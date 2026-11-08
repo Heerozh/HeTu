@@ -1,6 +1,6 @@
 """
-复合索引（groupby）的订阅与线协议：按组订阅（声明了 point_sub 时只订这一组的频道）、离开与补位、
-组内换序、退化与警告、sub_id 与共享键、分组值校验、hidden 分组列，以及 receiver 按位置转发 group。
+复合索引（groupby）的订阅与线协议：按组订阅（每组一个 zset，订这一组 key 的 keyspace 频道）、离开
+与补位、组内换序、频道 API、sub_id 与共享键、分组值校验、hidden 分组列，以及 receiver 按位置转发 group。
 设计稿见 docs/superpowers/specs/2026-11-08-composite-index-design.md §6、§7。
 """
 
@@ -35,9 +35,10 @@ def def_rank():
     @define_component(namespace="pytest", permission=Permission.USER, force=True)
     class Rank(BaseComponent):
         zone: np.int32 = property_field(0)
-        # 按 zone 分组、组内按 level 排序，按组发频道
+        # 按 zone 分组、组内按 level 排序。声明了 point_sub（复合索引用不上它，按组订阅照样只被
+        # 本组的写入叫醒）
         level: np.int32 = property_field(0, groupby="zone", point_sub=True)
-        # 没声明 point_sub：按组订阅退化为订整个索引的频道
+        # 没声明 point_sub：和 level 一样
         score: np.int32 = property_field(0, groupby="zone")
         secret: np.int32 = property_field(0, hidden=True)
         # 分组列是 hidden：客户端不能按组订阅
@@ -98,26 +99,36 @@ async def _insert(backend: Backend, comp, *rows: dict) -> list[int]:
     return ids
 
 
-async def test_group_subscription_uses_group_channel(broker, rank_ref, admin_ctx):
-    """声明了 point_sub 的复合索引按组订阅：只订这一组的频道，本组的插入照样推送"""
+@pytest.mark.parametrize("index_name", ["level", "score"])
+async def test_group_subscription_uses_group_key_channel(
+    broker, rank_ref, admin_ctx, index_name, caplog
+):
+    """
+    复合索引每组一个 zset，按组订阅订这一组 key 的 keyspace 频道：别的组的写入叫不醒它，本组的
+    插入照样推送。声明没声明 point_sub 都一样（score 没声明），不退化、不警告
+    """
     backend = broker._backend
     comp = rank_ref.comp_cls
-    await _insert(backend, comp, {"zone": 1, "level": 5}, {"zone": 2, "level": 6})
-    sub_id, rows = await broker.subscribe_range(
-        rank_ref, admin_ctx, "level", 0, 100, limit=10, group={"zone": 1}
-    )
-    assert sub_id and [r["level"] for r in rows] == [5]
+    await _insert(backend, comp, {"zone": 1, index_name: 5}, {"zone": 2, index_name: 6})
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_id, rows = await broker.subscribe_range(
+            rank_ref, admin_ctx, index_name, 0, 100, limit=10, group={"zone": 1}
+        )
+    assert "point_sub" not in caplog.text
+    assert sub_id and [r[index_name] for r in rows] == [5]
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
-    assert idx_sub.enter_only
+    assert not idx_sub.enter_only  # 组 key 的通知进出都报，不靠行频道判离开
     servant = backend.servant
-    assert idx_sub.index_channel == servant.index_group_channel(
-        rank_ref, "level", {"zone": 1}
+    assert idx_sub.index_channel == servant.index_channel(
+        rank_ref, index_name, group={"zone": 1}
     )
-    assert idx_sub.index_channel != servant.index_group_channel(
-        rank_ref, "level", {"zone": 2}
+    assert idx_sub.index_channel != servant.index_channel(
+        rank_ref, index_name, group={"zone": 2}
     )
-    (new_id,) = await _insert(backend, comp, {"zone": 1, "level": 7})
-    await updates_until(broker, lambda u: u[sub_id][new_id]["level"] == 7)
+    await _insert(backend, comp, {"zone": 2, index_name: 7})
+    assert await broker.get_updates(timeout=0.5) == {}
+    (new_id,) = await _insert(backend, comp, {"zone": 1, index_name: 8})
+    await updates_until(broker, lambda u: u[sub_id][new_id][index_name] == 8)
 
 
 async def test_group_subscription_numeric_string(broker, rank_ref, admin_ctx):
@@ -133,8 +144,8 @@ async def test_group_subscription_numeric_string(broker, rank_ref, admin_ctx):
     )
     assert sub_id and [r["level"] for r in rows] == [5]
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
-    assert idx_sub.index_channel == backend.servant.index_group_channel(
-        rank_ref, "level", {"zone": 1}
+    assert idx_sub.index_channel == backend.servant.index_channel(
+        rank_ref, "level", group={"zone": 1}
     )
     int_sub_id, int_rows = await broker.subscribe_range(
         rank_ref, admin_ctx, "level", 0, 100, limit=10, group={"zone": 1}
@@ -151,8 +162,8 @@ async def test_group_subscription_numeric_string(broker, rank_ref, admin_ctx):
 @pytest.mark.parametrize("desc", [False, True])
 async def test_group_subscription_leave_backfills(broker, rank_ref, admin_ctx, desc):
     """
-    组频道只报进入：结果里的行换组、被删，由它们的行频道发现，推 None 并补进被 limit 截在外面
-    的行（同单列值频道的 test_point_query_leave_backfills_limit）
+    结果里的行换组、被删：这一组 key 上的 ZREM 叫醒订阅，推 None 并补进被 limit 截在外面的行
+    （同单列值频道的 test_point_query_leave_backfills_limit，那边靠行频道发现离开）
     """
     backend = broker._backend
     comp = rank_ref.comp_cls
@@ -189,7 +200,7 @@ async def test_group_subscription_leave_backfills(broker, rank_ref, admin_ctx, d
 async def test_group_subscription_sees_reorder_within_group(
     broker, rank_ref, admin_ctx
 ):
-    """组内本字段变化让截断窗口外的行挤进来：commit 发组频道，订阅重跑比对，被挤出的推 None"""
+    """组内本字段变化让截断窗口外的行挤进来：这一组 key 上有 ZREM / ZADD，订阅重跑比对，被挤出的推 None"""
     backend = broker._backend
     comp = rank_ref.comp_cls
     low, mid, high = await _insert(
@@ -214,22 +225,23 @@ async def test_group_subscription_sees_reorder_within_group(
     await updates_until(broker, reordered)
 
 
-async def test_group_subscription_without_point_sub(
-    broker, rank_ref, admin_ctx, caplog
-):
-    """没声明 point_sub 的复合索引按组订阅：退化为订整个索引的频道，警告一次，照样能推送"""
-    backend = broker._backend
-    comp = rank_ref.comp_cls
-    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
-        sub_id, _rows = await broker.subscribe_range(
-            rank_ref, admin_ctx, "score", 0, 100, group={"zone": 1}
-        )
-    assert "复合索引但没有声明" in caplog.text
-    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
-    assert not idx_sub.enter_only
-    assert idx_sub.index_channel == backend.servant.index_channel(rank_ref, "score")
-    (new_id,) = await _insert(backend, comp, {"zone": 1, "score": 3})
-    await updates_until(broker, lambda u: u[sub_id][new_id]["score"] == 3)
+async def test_group_channel_api(rank_ref, mod_auto_backend):
+    """
+    index_channel：复合索引要给全分组值，单列索引不能给 group；复合索引没有值频道（commit 不给
+    它发），调用报错并指向 index_channel
+    """
+    servant = mod_auto_backend().servant
+    with pytest.raises(ValueError, match="分组"):
+        servant.index_channel(rank_ref, "level")
+    with pytest.raises(ValueError, match="正好给出"):
+        servant.index_channel(rank_ref, "level", group={"zone": 1, "qty": 2})
+    with pytest.raises(ValueError, match="不是复合索引"):
+        servant.index_channel(rank_ref, "id", group={"zone": 1})
+    with pytest.raises(ValueError, match="index_channel"):
+        servant.index_value_channel(rank_ref, "level", 3)
+    assert servant.index_channel(rank_ref, "level", group={"zone": 1}) == (
+        servant.index_channel(rank_ref, "level", group={"zone": "1"})
+    )
 
 
 async def test_group_sub_id_and_share_key(broker, rank_ref, admin_ctx):

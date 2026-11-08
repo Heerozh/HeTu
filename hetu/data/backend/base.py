@@ -562,10 +562,22 @@ class BackendClient:
     # 哪些频道的 payload 是 row_id 集合
     TABLE_CHANNEL_SUFFIX = ":table"
 
-    def index_channel(self, table_ref: TableReference, index_name: str):
+    def index_channel(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        group: Mapping[str, Any] | None = None,
+    ) -> str:
         """
-        返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
+        返回索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
         供区间订阅用；点查询请用 `index_value_channel`，免得被无关的值叫醒。
+        复合索引（groupby）每组单独存放，必须用 group 给出全部分组列，得到的是这一组的频道：
+        只有这一组的行进出、组里有行的本字段变了才会通知，别的组的写入不会。单列索引不能给 group。
+
+        Channel of an index: every insert / delete / change of the indexed field
+        notifies it. A composite (groupby) index is stored per group: pass `group`
+        with every group-by column to get the channel of that group, which only
+        writes to that group notify. Single-column indexes take no `group`.
         """
         raise NotImplementedError
 
@@ -581,27 +593,12 @@ class BackendClient:
         点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
         id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。复合索引（groupby）没有值频道，
-        调用抛 `ValueError`，请用 `index_group_channel`。
+        调用抛 `ValueError`：按组订阅请用 `index_channel(…, group=…)`，它只被这一组的写入叫醒。
 
         Channel of one index value, only for indexes declared with `point_sub` (raises
         `ValueError` otherwise). Point-query subscriptions use it instead of
         `index_channel` so writes to other values don't wake them up. Composite
-        (groupby) indexes have group channels instead, see `index_group_channel`.
-        """
-        raise NotImplementedError
-
-    def index_group_channel(
-        self, table_ref: TableReference, index_name: str, group: Mapping[str, Any]
-    ) -> str:
-        """
-        返回复合索引（groupby）某一组的频道名。只有声明了 `point_sub` 的复合索引才有组频道，单列
-        索引、未声明 point_sub 的复合索引调用会抛 `ValueError`。有行"进入"这一组时（insert，
-        或 update 改了分组列 / 本字段），commit 才向此频道发一条消息，消息不带内容；一个事务每个
-        (索引, 组) 只发一条。行"离开"不发，由订阅者订着的行频道发现。group 是 {分组列: 值}，按
-        `resolve_group_` 规范化。
-
-        Channel of one group of a composite (groupby) index, only for indexes declared
-        with `point_sub`. Commits publish to it when rows enter the group.
+        (groupby) indexes have none: use `index_channel(..., group=...)`.
         """
         raise NotImplementedError
 

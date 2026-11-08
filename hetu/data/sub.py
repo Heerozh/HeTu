@@ -38,23 +38,11 @@ _point_sub_warned: weakref.WeakKeyDictionary[type, set[str]] = (
 
 
 def warn_point_sub_fallback_(table_ref: TableReference, index_name: str) -> None:
-    """
-    点查询退化为区间订阅时警告，每个组件类的每个索引只警告一次。复合索引没声明 point_sub 时，
-    按组订阅也退化为订整个索引的频道，同样警告
-    """
+    """点查询退化为区间订阅时警告，每个组件类的每个索引只警告一次"""
     warned = _point_sub_warned.setdefault(table_ref.comp_cls, set())
     if index_name in warned:
         return
     warned.add(index_name)
-    if table_ref.comp_cls.index_groups_.get(index_name):
-        logger.warning(
-            _(
-                "⚠️ [📡Subscription] {comp_name}.{index_name} 是复合索引但没有声明 "
-                "point_sub，按组订阅退化为订整个索引的频道：任何一组的写入都会叫醒它重跑"
-                "比对。需要高效按组订阅请在 property_field 里加 point_sub=True"
-            ).format(comp_name=table_ref.comp_name, index_name=index_name)
-        )
-        return
     if index_name == "id":
         # id 不能声明 point_sub，按 id 订单行本该走行订阅
         logger.warning(
@@ -326,7 +314,7 @@ class IndexSubscription(BaseSubscription):
         self.table_ref = table_ref
         self.servant = servant
         self.rls_ctx = rls_ctx_(table_ref, ctx)
-        # 点查询时是"索引=该值"的频道，复合索引按组查询时是该组的频道，区间查询时是整个索引的
+        # 点查询时是"索引=该值"的频道，复合索引是这一组 key 的频道，区间查询时是整个索引的
         # 频道；收到就重跑 range 比对
         self.index_channel = index_channel
         self.query_param = query_param
@@ -335,14 +323,14 @@ class IndexSubscription(BaseSubscription):
         # 最近一次读 range 的 id 顺序（索引顺序）：共享订阅按它排快照，后加入者的回复与首次
         # 订阅的回复一样按索引排。只改非索引字段的更新不影响顺序
         self.order: list[int] = []
-        # 订的是只报"进入"的频道（值频道、组频道）时为查询匹配的排序键闭区间 (lo, hi)（见
-        # `BackendClient.index_query_keys_`），否则 None。这种频道只在有行进入时才有通知，行
-        # "离开"（删除、改走、换组）要靠结果里各行的行频道发现，见 get_updated
+        # 订的是只报"进入"的值频道时（单列 point_sub 的点查询）为查询匹配的排序键闭区间
+        # (lo, hi)（见 `BackendClient.index_query_keys_`），否则 None。值频道只在有行进入时才有
+        # 通知，行"离开"（删除、改走）要靠结果里各行的行频道发现，见 get_updated
         self.enter_bounds = enter_bounds
 
     @property
     def enter_only(self) -> bool:
-        """订的频道是否只报"进入"（值频道、组频道），离开要靠行频道发现"""
+        """订的频道是否只报"进入"（单列 point_sub 的值频道），离开要靠行频道发现"""
         return self.enter_bounds is not None
 
     def use_servant_(self, servant: BackendClient) -> None:
@@ -414,8 +402,8 @@ class IndexSubscription(BaseSubscription):
                 )
             )
         if self.enter_only and self._left_(await row_sub.read_(channel)):
-            # 值频道、组频道只在有行"进入"时才有通知：这行离开了查询（删除 / 字段改走 / 换组）
-            # 只能在这里发现。重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
+            # 值频道只在有行"进入"时才有通知：这行离开了查询（删除 / 字段改走）只能在这里发现。
+            # 重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
             new_chans, rem_chans, rtn = await self._rerange()
             if channel in self.row_subs:
                 # 重跑后它仍在结果里（读到的索引与行不是同一时刻的）：照常推行更新
@@ -426,8 +414,7 @@ class IndexSubscription(BaseSubscription):
     def _left_(self, row: dict[str, Any] | None) -> bool:
         """
         订只报进入的频道时：读回的行是否已不在查询里（行不存在，或它在索引上的排序键不在查询
-        的区间里）。排序键与数据库索引的 member 是同一套编码，复合索引带着组前缀，换了组也
-        算离开；单列点查询的区间只有那一个值
+        的区间里）。排序键与数据库索引的 member 是同一套编码；单列点查询的区间只有那一个值
         """
         if row is None:
             return True
@@ -2663,18 +2650,14 @@ class SubscriptionBroker:
             # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道。值频道只有
             # 声明了 point_sub 的索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引
             # 的频道并警告一次。id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）。
-            # 复合索引的查询都在一组里：声明了 point_sub 就订这一组的频道，否则退化并警告
+            # 复合索引每组一个 zset，查询都在一组里：订这一组 key 的频道，进出都会通知，只有这
+            # 一组的写入叫醒它
             comp_cls = table_ref.comp_cls
             enter_only = False
             if comp_cls.index_groups_[index_name]:
-                if index_name in comp_cls.point_subs_:
-                    index_channel = servant.index_group_channel(
-                        table_ref, index_name, cast(Mapping[str, Any], group)
-                    )
-                    enter_only = True
-                else:
-                    warn_point_sub_fallback_(table_ref, index_name)
-                    index_channel = servant.index_channel(table_ref, index_name)
+                index_channel = servant.index_channel(
+                    table_ref, index_name, group=group
+                )
             else:
                 point_value = BackendClient.point_query_value_(
                     comp_cls.dtype_map_[index_name], left, right

@@ -9,12 +9,16 @@ import itertools
 import json
 import random
 from contextlib import ExitStack
+from typing import cast
 
 import numpy as np
 import pytest
 from fixtures.backends import (
     raw_hset,
     raw_index_members,
+    raw_index_zset_keys,
+    raw_key_count,
+    raw_zadd,
     use_redis_backend_only,
     use_redis_family_backend_only,
 )
@@ -32,6 +36,7 @@ from hetu.data.backend import (
     TableReference,
     UniqueViolation,
 )
+from hetu.data.backend.redis_model import RedisModelClient
 from hetu.data.sub import SubscriptionBroker
 
 SnowflakeID().init(1, 0)
@@ -831,50 +836,57 @@ async def test_direct_set_rejects_index_columns(new_component_env, mod_auto_back
     assert await master.direct_set(ref, row_id, hp="3")
 
 
-async def test_group_channel_and_commit(slot_ref, mod_auto_backend):
+async def test_commit_routes_to_group_keys(slot_ref, mod_auto_backend):
     """
-    point_sub 的复合索引按组发频道：insert 进组、改本字段、换组发新组的频道，只改别的列、
-    delete 不发。值频道 / 组频道的接口互相拒绝对方的索引
+    复合索引每组一个 zset：ZADD / ZREM / UNIQ 都发到行所在组的 key，换组时 ZREM 发到旧组的 key；
+    不登记任何频道，声明了 point_sub（level）也不发 PUBLISH。组里最后一行走了 zset 就没了
     """
     backend: Backend = mod_auto_backend()
     comp = slot_ref.comp_cls
-    master = backend.master
-    chan1 = master.index_group_channel(slot_ref, "level", {"zone": 1})
-    chan2 = master.index_group_channel(slot_ref, "level", {"zone": 2})
-    assert chan1 != chan2
-    with pytest.raises(ValueError, match="index_group_channel"):
-        master.index_value_channel(slot_ref, "level", 3)
-    with pytest.raises(ValueError, match="point_sub"):
-        master.index_group_channel(slot_ref, "name", {"server": "s", "zone": 1})
-    from hetu.data import BaseComponent, define_component, property_field
+    master = cast(RedisModelClient, backend.master)
 
-    @define_component(namespace="pytest", force=True)
-    class Solo(BaseComponent):
-        owner: np.int64 = property_field(0, point_sub=True)
-
-    with pytest.raises(ValueError, match="不是复合索引"):
-        master.index_group_channel(
-            TableReference(Solo, "pytest", 1), "owner", {"zone": 1}
+    def group_key(index_name: str, group: dict) -> str:
+        return master.index_zset_key_(
+            master.index_key(slot_ref, index_name),
+            master.group_prefix_of_(slot_ref, index_name, group),
         )
 
-    captured: list[list[str]] = []
+    level_key = master.index_key(slot_ref, "level")
+    zone1, zone2 = group_key("level", {"zone": 1}), group_key("level", {"zone": 2})
+    assert zone1 != zone2 and zone1.startswith(level_key + ":")
+    assert master.index_channel(slot_ref, "level", group={"zone": 1}) == (
+        f"__keyspace@{master.dbi}__:{zone1}"
+    )
+
+    payloads: list[list] = []
     original = master.build_commit_payload_
 
     def capture(idmap):
         keys, payload = original(idmap)
-        captured.append([c if isinstance(c, str) else c.decode() for c in payload[4]])
+        payloads.append(payload)
         return keys, payload
+
+    def level_writes() -> list[tuple[str, str]]:
+        """最近一次提交里 level 索引的 (命令, key)"""
+        return [
+            (cmd[0], cmd[1])
+            for cmd in payloads[-1][1]
+            if cmd[0] in ("ZADD", "ZREM")
+            and (cmd[1] == level_key or cmd[1].startswith(level_key + ":"))
+        ]
 
     master.build_commit_payload_ = capture  # type: ignore
     try:
         (row_id,) = await _insert(backend, comp, _slot(comp, zone=1, level=1))
-        assert captured[-1] == [chan1]
+        assert level_writes() == [("ZADD", zone1)]
+        uniq_keys = [check[1] for check in payloads[-1][0] if check[0] == "UNIQ"]
+        assert group_key("name", {"server": "", "zone": 1}) in uniq_keys
+        assert group_key("slot", {"owner": 0}) in uniq_keys
+        assert payloads[-1][4] == []  # 不登记频道
         for change, expect in (
-            ({"level": 2}, [chan1]),
-            ({"zone": 2}, [chan2]),
+            ({"level": 2}, [("ZREM", zone1), ("ZADD", zone1)]),
+            ({"zone": 2}, [("ZREM", zone1), ("ZADD", zone2)]),
             ({"qty": 3}, []),
-            # score 是没开 point_sub 的复合索引：改它不发
-            ({"score": 1.5}, []),
         ):
             async with backend.session("pytest", 1) as session:
                 repo = session.using(comp)
@@ -882,24 +894,17 @@ async def test_group_channel_and_commit(slot_ref, mod_auto_backend):
                 for key, value in change.items():
                     row[key] = value
                 await repo.update(row)
-            assert captured[-1] == expect, change
+            assert level_writes() == expect, change
+            assert payloads[-1][4] == [], change
+        assert raw_index_zset_keys(backend, slot_ref, "level") == [zone2]
         async with backend.session("pytest", 1) as session:
             repo = session.using(comp)
             await repo.get(id=row_id)
             repo.delete(row_id)
-        assert captured[-1] == []
-        # 一个事务里同一组进了几行只发一条，不同组各一条
-        chan3 = master.index_group_channel(slot_ref, "level", {"zone": 3})
-        await _insert(
-            backend,
-            comp,
-            _slot(comp, zone=1, level=5),
-            _slot(comp, zone=3, level=6),
-            _slot(comp, zone=1, level=7),
-        )
-        assert captured[-1] == [chan1, chan3]
+        assert level_writes() == [("ZREM", zone2)]
     finally:
         del master.build_commit_payload_
+    assert raw_index_zset_keys(backend, slot_ref, "level") == []
 
 
 async def test_range_read_inconsistent_group(slot_ref, mod_auto_backend):
@@ -992,9 +997,16 @@ async def test_rebuild_index_composite(slot_ref, mod_auto_backend):
     before = {
         name: raw_index_members(backend, slot_ref, name) for name in comp.indexes_
     }
+    keys_before = raw_index_zset_keys(backend, slot_ref, "level")
+    assert len(keys_before) == 2  # zone 1、zone 2 各一个 zset
+    # 残留：改成复合之前的单个 key、已经没有行的组 key。重建会删掉，raw_index_members 合并所有 key
+    level_key = backend.master.index_key(slot_ref, "level")
+    raw_zadd(backend, level_key, b"stale\x00999")
+    raw_zadd(backend, level_key + ":deadbeef", b"stale\x00998")
     assert maint.do_rebuild_index_(slot_ref) == 2
     for name in comp.indexes_:
         assert raw_index_members(backend, slot_ref, name) == before[name], name
+    assert raw_index_zset_keys(backend, slot_ref, "level") == keys_before
 
     # level 改了值（重建的话 level 索引会变），slot 造出组内重复：重建失败，level 也不换
     raw_hset(backend, slot_ref, a_id, level="50")
@@ -1004,30 +1016,58 @@ async def test_rebuild_index_composite(slot_ref, mod_auto_backend):
     assert "owner" in str(excinfo.value)  # 报错里给出 (分组列…, 本字段)
     for name in comp.indexes_:
         assert raw_index_members(backend, slot_ref, name) == before[name], name
+    # 失败的重建不留临时 key：表名下只剩两行和各索引的 zset
+    index_keys = sum(
+        len(raw_index_zset_keys(backend, slot_ref, name)) for name in comp.indexes_
+    )
+    assert raw_key_count(backend, slot_ref) == 2 + index_keys
+
+
+async def test_rebuild_index_empty_table_drops_group_keys(slot_ref, mod_auto_backend):
+    """表里一行都没有时，索引里剩下的都是残留：复合索引的组 key、单列格式的 key 都删掉"""
+    backend: Backend = mod_auto_backend()
+    level_key = backend.master.index_key(slot_ref, "level")
+    raw_zadd(backend, level_key, b"stale\x00999")
+    raw_zadd(backend, level_key + ":deadbeef", b"stale\x00998")
+    maint = backend.get_table_maintenance()
+    assert maint.do_rebuild_index_(slot_ref) == 0
+    assert raw_index_zset_keys(backend, slot_ref, "level") == []
 
 
 @use_redis_backend_only
 async def test_rebuild_index_error_before_first_tmp_key(
     slot_ref, mod_auto_backend, monkeypatch
 ):
-    """Redis 重建索引一开始就出错（还没登记任何临时 key）：抛出原来的异常，不被清理的 DEL 盖住"""
+    """
+    Redis 重建索引一开始就出错（还没建任何临时 key）：抛出原来的异常；清理没有要删的 key，
+    不发不带参数的 DEL（那会再抛一个异常，盖住原来的）
+    """
     backend: Backend = mod_auto_backend()
     comp = slot_ref.comp_cls
     await _insert(backend, comp, _slot(comp, zone=1, level=1))
     maint = backend.get_table_maintenance()
     io = maint.client.io  # type: ignore[attr-defined]
-    original = io.delete
-    calls: list[tuple] = []
+    original_pipeline, original_delete = io.pipeline, io.delete
+    deletes: list[tuple] = []
 
-    def flaky_delete(*keys):
-        calls.append(keys)
-        if len(calls) == 1:
+    def failing_pipeline(*args, **kwargs):
+        pipe = original_pipeline(*args, **kwargs)
+
+        def boom():
             raise ConnectionError("boom")
-        return original(*keys)
 
-    monkeypatch.setattr(io, "delete", flaky_delete)
+        pipe.execute = boom
+        return pipe
+
+    def recording_delete(*keys):
+        deletes.append(keys)
+        return original_delete(*keys)
+
+    monkeypatch.setattr(io, "pipeline", failing_pipeline)
+    monkeypatch.setattr(io, "delete", recording_delete)
     with pytest.raises(ConnectionError, match="boom"):
         maint.do_rebuild_index_(slot_ref)
+    assert all(deletes), deletes
 
 
 async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
@@ -1078,6 +1118,10 @@ async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
         assert len(await repo.range(time=(0, 1000), owner=11, limit=-1)) == 0
         with pytest.raises(ValueError, match="分组"):
             await repo.range(time=(0, 1000))
+    # 每组一个 zset，单列格式的 key 删掉了
+    time_key = backend.master.index_key(filled_item_ref, "time")
+    time_keys = raw_index_zset_keys(backend, filled_item_ref, "time")
+    assert time_keys and all(key.startswith(time_key + ":") for key in time_keys)
 
     # 再去掉 groupby（换回原来的定义）：同样走 skip 路径，索引重建回单列格式
     original = BaseComponent.load_json(filled_item_ref.comp_cls.json_)
@@ -1093,6 +1137,7 @@ async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
         repo = session.using(original)
         assert (await repo.get(time=111)).name == "Itm11"
         assert len(await repo.range(time=(0, 1000), limit=-1)) == 25
+    assert raw_index_zset_keys(backend, filled_item_ref, "time") == [time_key]
 
 
 def test_headless_schema_diff_groupby(new_component_env):

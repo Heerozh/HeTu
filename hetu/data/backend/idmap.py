@@ -62,6 +62,9 @@ class RangeObservation:
     # 只保护返回的行、不校验区间（get 命中：约定是"返回一行匹配的"，那一行由 VER 管）。
     # 读取一致性照样核对
     rows_only: bool = False
+    # 读的那个 zset（复合索引每组一个，见 RedisModelClient.index_zset_key_），commit 时的区间
+    # 校验查它。由后端的 range_read_ 填上
+    key: str = ""
 
 
 @dataclass(slots=True)

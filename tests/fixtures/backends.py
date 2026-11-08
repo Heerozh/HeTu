@@ -263,13 +263,56 @@ def use_redis_family_backend_only(func):
 # ============ 直接读写底层数据（造数据、核对索引用） ============
 
 
-def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
-    """索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表"""
+def raw_index_zset_keys(backend: Backend, ref, index_name: str) -> list[str]:
+    """
+    索引名下现有的所有 zset key，排好序：单列索引的那一个，复合索引的各组 key（每组一个 zset），
+    以及残留的另一种格式的 key
+    """
     master = cast(RedisModelClient, backend.master)
-    key = master.index_key(ref, index_name)
+    idx_key = master.index_key(ref, index_name)
     if isinstance(master, RedisBackendClient):
-        return list(master.io.zrange(key, 0, -1))  # type: ignore
-    return cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+        io = master.io
+        found = io.keys(idx_key + ":*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        keys = [key.decode() for key in found]  # type: ignore
+        if io.exists(idx_key):
+            keys.append(idx_key)
+        return sorted(keys)
+    sqlite = cast(SQLiteBackendClient, master)
+    keys = sqlite.run_sync_(SQLiteStore.zkeys_with_prefix, idx_key + ":")
+    if sqlite.run_sync_(SQLiteStore.zmembers, idx_key):
+        keys.append(idx_key)
+    return sorted(keys)
+
+
+def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
+    """
+    索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表。
+    复合索引每组一个 zset，合并各组的（member 带着组前缀，合并后的顺序就是一个大 zset 的顺序）
+    """
+    master = cast(RedisModelClient, backend.master)
+    members: list[bytes] = []
+    for key in raw_index_zset_keys(backend, ref, index_name):
+        if isinstance(master, RedisBackendClient):
+            members.extend(master.io.zrange(key, 0, -1))  # type: ignore
+        else:
+            members.extend(
+                cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+            )
+    return sorted(members)
+
+
+def raw_zadd(backend: Backend, key: str, member: bytes) -> None:
+    """绕过事务直接往 zset 里加一个 member（造残留的索引 key 用：不动行、不发通知）"""
+    master = cast(RedisModelClient, backend.master)
+    if isinstance(master, RedisBackendClient):
+        master.io.zadd(key, {member: 0})  # type: ignore
+        return
+
+    def _add(store: SQLiteStore) -> None:
+        with store.write_txn():
+            store.zadd(key, member)
+
+    cast(SQLiteBackendClient, master).run_sync_(_add)
 
 
 def raw_hset(backend: Backend, ref, row_id: int, **fields: str) -> None:

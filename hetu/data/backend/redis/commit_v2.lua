@@ -121,8 +121,8 @@ end
 -- payload 搬运），而且每个副本都要再执行一遍（数据见 benchmark/redis_publish_cost_result.md）。
 -- 所以只保留这两个调用点，Python 侧只给声明了的组件 / 索引准备数据：
 -- - 表频道：table_sub 组件，一个事务一张表一条，消息是 msgpack 的 row_id 列表；
--- - 值频道：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条，消息为空串；复合索引（groupby）
---   发的是组频道，一个事务每个 (索引, 组) 一条。
+-- - 值频道：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条，消息为空串。
+-- 复合索引（groupby）不在这里发：每组一个 zset，按组订阅订这一组 key 的 keyspace 通知。
 -- 不要在这里加新的调用点、也不要往消息里塞内容：tests/test_arch_publish.py 守门。
 -- （原生 cluster 下 PUBLISH 会经 cluster bus 发到所有节点；推荐用 proxy 反代，没有这个问题）
 if table_pubs then

@@ -240,18 +240,22 @@ class SQLiteTableMaintenance(TableMaintenance):
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
-        按行数据重建组件表的索引，返回行数。member 的算法与 Redis 后端、与 commit 写索引时相同
-        （`rebuild_member_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途失败
-        （unique 冲突）旧索引原样保留。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        按行数据重建组件表的索引，返回行数。member 与 zset key 的算法与 Redis 后端、与 commit 写
+        索引时相同（`rebuild_entry_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途
+        失败（unique 冲突）旧索引原样保留。复合索引每组一个 zset，替换时这个索引名下的旧 key 全部
+        删掉（单列的 key 与复合的组 key），不留另一种格式或空了的组。表里一行都没有时，索引里
+        剩下的都是残留，直接删掉。
         """
         comp_cls = table_ref.comp_cls
         table = self.client.cluster_prefix(table_ref)
         row_count = len(self._run(SQLiteStore.row_ids, table))
-        new_indexes: dict[str, list[bytes]] = {}
+        # {索引 key: {zset key: members}}
+        new_indexes: dict[str, dict[str, list[bytes]]] = {}
         # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
         struct = comp_cls.new_row(id_=0)
         for idx_name in comp_cls.indexes_:
-            members: list[bytes] = []
+            idx_key = self.client.index_key(table_ref, idx_name)
+            by_key: dict[str, list[bytes]] = {}
             if row_count:
                 # 复合索引要读分组列和本字段
                 columns = (*comp_cls.index_groups_[idx_name], idx_name)
@@ -272,8 +276,9 @@ class SQLiteTableMaintenance(TableMaintenance):
                                     idx_name=col,
                                 )
                             )
-                    member = self.client.rebuild_member_(
+                    zset_key, member = self.client.rebuild_entry_(
                         comp_cls,
+                        idx_key,
                         idx_name,
                         struct,
                         dict(zip(columns, cast(tuple[bytes, ...], raws))),
@@ -296,13 +301,17 @@ class SQLiteTableMaintenance(TableMaintenance):
                                 )
                             )
                         seen.add(value)
-                    members.append(member)
-            new_indexes[self.client.index_key(table_ref, idx_name)] = members
+                    by_key.setdefault(zset_key, []).append(member)
+            new_indexes[idx_key] = by_key
 
         def _replace(store: SQLiteStore):
             with store.write_txn():
-                for idx_key, idx_members in new_indexes.items():
-                    store.zreplace(idx_key, idx_members)
+                for idx_key, by_key in new_indexes.items():
+                    # 前缀带 ":"：不会删到名字以本索引名开头的别的索引（level 与 level2）
+                    store.zreplace(idx_key, ())
+                    store.zdelete_prefix(idx_key + ":")
+                    for zset_key, members in by_key.items():
+                        store.zreplace(zset_key, members)
 
         self._run(_replace)
         return row_count
