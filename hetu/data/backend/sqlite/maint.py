@@ -188,12 +188,16 @@ class SQLiteTableMaintenance(TableMaintenance):
     def do_rename_table_(self, from_: TableReference, to_: TableReference):
         """
         重命名组件表：行表改名、索引 key 改前缀、meta 换成 to_ 的定义。版本号照搬（同 Redis 后端）：
-        改名不动数据，索引还是原来的格式
+        改名不动数据，索引还是原来的格式。
+
+        提交序号列的计数器只在组件名不变（换簇）时跟着搬，规则同 Redis 后端：默认迁移脚本先把
+        原表改名成临时表、拷完再删掉临时表，计数器跟着搬就会被一起删掉；留在原名下，新表接着用
         """
         from_table = self.client.cluster_prefix(from_)
         to_table = self.client.cluster_prefix(to_)
         from_meta = (from_.instance_name, from_.comp_name)
         to_instance, to_comp, to_json, _version, to_cluster = self._meta_of(to_)
+        move_counters = from_.comp_name == to_.comp_name
 
         def _rename(store: SQLiteStore) -> int:
             with store.write_txn():
@@ -204,6 +208,10 @@ class SQLiteTableMaintenance(TableMaintenance):
                 )
                 store.rename_row_table(from_table, to_table)
                 store.zrename_prefix(from_table + ":", to_table + ":")
+                if move_counters:
+                    seq_head = ":seq:"
+                    count += len(store.kv_items_with_prefix(from_table + seq_head))
+                    store.kv_rename_prefix(from_table + seq_head, to_table + seq_head)
                 store.meta_delete(*from_meta)
                 store.meta_set(to_instance, to_comp, to_json, old[1], to_cluster)
                 return count
@@ -229,8 +237,9 @@ class SQLiteTableMaintenance(TableMaintenance):
     @override
     def do_drop_table_(self, table_ref: TableReference) -> int:
         """
-        清空组件表的全部数据（所有簇的行表、索引）和 meta。返回删掉的键数：行数 + 索引 key 数 +
-        meta，对应 Redis 删掉的 key 数。名字以本组件名开头的副本组件不碰
+        清空组件表的全部数据（所有簇的行表、索引、提交序号列的计数器）和 meta。返回删掉的键数：
+        行数 + 索引 key 数 + 计数器数 + meta，对应 Redis 删掉的 key 数。名字以本组件名开头的副本
+        组件不碰
         """
         prefix = self.client.all_clusters_prefix(table_ref)
         instance, comp = table_ref.instance_name, table_ref.comp_name
@@ -242,6 +251,7 @@ class SQLiteTableMaintenance(TableMaintenance):
                     count += store.count_rows(table)
                     store.drop_row_table(table)
                 count += store.zdelete_prefix(prefix)
+                count += store.kv_delete_prefix(prefix)
                 count += store.meta_delete(instance, comp)
                 return count
 

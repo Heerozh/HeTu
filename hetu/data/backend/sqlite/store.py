@@ -12,7 +12,8 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
   hash 里没有这个字段。
 - lex zset（索引）：全局一张 `__hetu_zset(key, member)`，member 与 Redis 字节相同；SQLite 的 BLOB 比较是
   memcmp 再比长度，与 zset 的 lex 比较一致。
-- 带过期的字符串（维护锁）：`__hetu_kv`。meta：`__hetu_meta`。通知：`__hetu_notify`。
+- 字符串：`__hetu_kv`，带过期的是维护锁，不过期的是提交序号列的计数器。meta：`__hetu_meta`。
+  通知：`__hetu_notify`。
 
 本类的方法只在客户端的专用线程里调用（sqlite3 连接不跨线程），由调用方保证串行。写事务用
 `write_txn()`，事务不跨调用。
@@ -690,6 +691,54 @@ class SQLiteStore:
             )
             self.conn.execute(
                 f"UPDATE {quote(ZSET_TABLE)} SET key = ? WHERE key = ?", (target, key)
+            )
+
+    # ============ 不过期的字符串（提交序号列的计数器） ============
+    # 和维护锁共用 KV 表，expire_at 为 NULL；key 都在组件表的 cluster_prefix 下（见
+    # RedisModelClient.seq_counter_key_），值是十进制的字节串，同 Redis 的 INCRBY。
+
+    def kv_get_int(self, key: str) -> int | None:
+        """计数器的值：key 不存在为 0；值不是整数返回 None（同 Redis INCRBY 的 not an integer）"""
+        raw = self.kv_get(key)
+        if raw is None:
+            return 0
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    def kv_set(self, key: str, value: bytes) -> None:
+        """`SET key value`（不过期）。只能在写事务里调用"""
+        self.conn.execute(
+            f"INSERT INTO {quote(KV_TABLE)} (key, value, expire_at) VALUES (?, ?, NULL) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, expire_at = NULL",
+            (key, value),
+        )
+
+    def kv_items_with_prefix(self, prefix: str) -> list[tuple[str, bytes]]:
+        """key 以 prefix 开头、没过期的 (key, value)，按 key 排序"""
+        rows = self.conn.execute(
+            f"SELECT key, value FROM {quote(KV_TABLE)} WHERE substr(key, 1, ?) = ? "
+            "AND (expire_at IS NULL OR expire_at > ?) ORDER BY key",
+            (len(prefix), prefix, time.time()),
+        ).fetchall()
+        return [(str(row[0]), bytes(row[1])) for row in rows]
+
+    def kv_delete_prefix(self, prefix: str) -> int:
+        """删掉 key 以 prefix 开头的所有字符串，返回删掉的个数。只能在写事务里调用"""
+        cur = self.conn.execute(
+            f"DELETE FROM {quote(KV_TABLE)} WHERE substr(key, 1, ?) = ?",
+            (len(prefix), prefix),
+        )
+        return cur.rowcount
+
+    def kv_rename_prefix(self, old: str, new: str) -> None:
+        """key 的前缀 old 换成 new，目标 key 已存在的先删掉（同 RESTORE REPLACE）。只能在写事务里调用"""
+        for key, _value in self.kv_items_with_prefix(old):
+            target = new + key[len(old) :]
+            self.conn.execute(f"DELETE FROM {quote(KV_TABLE)} WHERE key = ?", (target,))
+            self.conn.execute(
+                f"UPDATE {quote(KV_TABLE)} SET key = ? WHERE key = ?", (target, key)
             )
 
     # ============ 带过期的字符串（维护锁） ============

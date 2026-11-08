@@ -156,7 +156,13 @@ class RedisTableMaintenance(TableMaintenance):
     # 无需drop_table, 此类操作适合人工删除
 
     def do_rename_table_(self, from_: TableReference, to_: TableReference):
-        """重命名组件表"""
+        """
+        重命名组件表。
+
+        提交序号列的计数器（`{cluster_prefix}:seq:…`）只在组件名不变（换簇）时跟着搬：默认迁移
+        脚本先把原表改名成临时表、拷完再删掉临时表，计数器跟着搬就会被一起删掉，之后只能按剩下
+        的行校准，删掉的尾部号会被复用。留在原名下，新表的 cluster_prefix 和原表相同，接着用
+        """
         # 重命名key
         from_prefix = f"{self.client.cluster_prefix(from_)}:"
         from_prefix_len = len(from_prefix)
@@ -168,6 +174,9 @@ class RedisTableMaintenance(TableMaintenance):
             target_nodes=RedisCluster.PRIMARIES,
         )
         from_keys = cast(list[bytes], from_keys)
+        if from_.comp_name != to_.comp_name:
+            seq_head = (from_prefix + "seq:").encode()
+            from_keys = [key for key in from_keys if not key.startswith(seq_head)]
         for b_from_key in from_keys:
             from_key = b_from_key.decode()
             to_key = to_prefix + from_key[from_prefix_len:]

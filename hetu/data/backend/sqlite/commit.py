@@ -4,8 +4,11 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 
-`redis/commit_v2.lua` 的 Python 版：在一个 `BEGIN IMMEDIATE` 写事务里依次跑 checks → pushes →
-通知，返回与 Lua 字节相同的串。
+`redis/commit_v2.lua` 的 Python 版：在一个 `BEGIN IMMEDIATE` 写事务里依次跑 checks → 发号
+（提交序号列）→ pushes → 通知，返回与 Lua 字节相同的串。
+
+和 Redis 不同的一处：Phase 2 写到一半出错时，SQLite 的写事务整个回滚，Redis 会留下已经执行的
+写入（提交序号列在 Redis 上因此可能留下缺口，SQLite 不会）。
 
 **逐段对应 `commit_v2.lua`，改一边必须改另一边。** `tests/test_backend_client.py` 里的检查码用例
 两个后端共跑，守着两边一致。
@@ -19,10 +22,14 @@ import time
 from typing import Any
 
 import msgpack
+import numpy as np
 
 from ....i18n import _
-from ..base import ROW_ID_TOKEN_LEN
+from ..base import ROW_ID_TOKEN_LEN, to_sortable_bytes
 from .store import KEYSPACE_PREFIX, SQLiteStore
+
+# 提交序号列的上限：再往上 Lua 的 double 不精确（见 commit_v2.lua）
+SEQ_LIMIT = 2**53
 
 
 def _lua_str(value: Any) -> bytes:
@@ -101,7 +108,29 @@ def _run_checks(
     return None
 
 
-def _run_pushes(store: SQLiteStore, pushes: list) -> dict[str, bytes | None]:
+def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
+    """
+    Phase 2 开头：提交序号列这次要发的号，返回 {seq_allocs 的下标（从 1 起）: 第一个号}。全成或
+    全不发，同 Lua 的减回：先读出各计数器、检查完，全部通过才写；有一个不是整数或到了上限，就返回
+    失败串，什么都不写
+    """
+    pending: list[tuple[str, int, int]] = []  # (计数器 key, 发完之后的值, 第一个号)
+    for counter_key, count in seq_allocs:
+        current = store.kv_get_int(counter_key.decode())
+        if current is None:
+            return b"SEQ: ERR value is not an integer or out of range " + counter_key
+        last = current + count
+        if last >= SEQ_LIMIT:
+            return b"SEQ: Counter overflow " + counter_key
+        pending.append((counter_key.decode(), last, current + 1))
+    for key, last, _first in pending:
+        store.kv_set(key, b"%d" % last)
+    return {slot: first for slot, (_k, _l, first) in enumerate(pending, start=1)}
+
+
+def _run_pushes(
+    store: SQLiteStore, pushes: list, seq_next: dict[int, int]
+) -> dict[str, bytes | None]:
     """Phase 2: 批量写入，返回按 Redis keyspace 规则要发的频道（有序去重）"""
     channels: dict[str, bytes | None] = {}
 
@@ -110,7 +139,23 @@ def _run_pushes(store: SQLiteStore, pushes: list) -> dict[str, bytes | None]:
 
     for cmd in pushes:
         op = cmd[0]
-        if op == b"HSET":
+        if op == b"HSETSEQ":
+            # ["HSETSEQ", 下标, 组 key, P, id 段, 行 key, field, val, ..., 号的字段名, 占位]：
+            # 号替换最后的占位写进行（同名字段取最后一个值，同 Redis），再把 P + 号的编码 +
+            # 0x00 + id 段加进组 key。计数器不发通知：HeTu 给 Redis 开的 Kghz 不含 $
+            slot, zset_key, prefix, row_token = cmd[1], cmd[2], cmd[3], cmd[4]
+            n = seq_next[slot]
+            seq_next[slot] = n + 1
+            args = cmd[5:]
+            args[-1] = b"%d" % n
+            key = args[0].decode()
+            mapping = {args[i].decode(): args[i + 1] for i in range(1, len(args), 2)}
+            store.hset(key, mapping)
+            notify(key)
+            member = prefix + to_sortable_bytes(np.int64(n)) + b"\x00" + row_token
+            if store.zadd(zset_key.decode(), member):
+                notify(zset_key.decode())
+        elif op == b"HSET":
             # ["HSET", key, field, val, ...]：HSET 总会产生 keyspace 事件
             key = cmd[1].decode()
             mapping = {cmd[i].decode(): cmd[i + 1] for i in range(2, len(cmd), 2)}
@@ -143,22 +188,30 @@ def run_commit(
 ) -> bytes:
     """
     执行一次提交。packed 是 `RedisModelClient.build_commit_payload_` 的 payload 经 msgpack 打包，
-    结构: [ [checks...], [pushes...], {deleted...}, [table_pubs...], [value_chans...] ]；按
-    `raw=True` 解开，和 Lua 里一样全是字节串，末尾缺的元素按空处理（同 Lua 的 nil）。
-    cleanup_before 不为 None 时，顺手清掉这之前的通知（和提交同一个事务；校验不过时照样清）。
+    结构: [ [checks...], [pushes...], {deleted...}, [table_pubs...], [value_chans...],
+    [seq_allocs...] ]；按 `raw=True` 解开，和 Lua 里一样全是字节串，末尾缺的元素按空处理（同 Lua
+    的 nil）。cleanup_before 不为 None 时，顺手清掉这之前的通知（和提交同一个事务；校验不过时照样清）。
     """
     payload: list = list(msgpack.unpackb(packed, raw=True))
-    payload += [None] * (5 - len(payload))
+    payload += [None] * (6 - len(payload))
     checks: list = payload[0] or []
     pushes: list = payload[1] or []
     deleted: dict = payload[2] or {}
     table_pubs: list = payload[3] or []
     value_chans: list = payload[4] or []
+    seq_allocs: list = payload[5] or []
     with store.write_txn():
         # 校验只读：没通过时什么都还没写，不用回滚
         failure = _run_checks(store, checks, deleted, pushes)
+        seq_next: dict[int, int] = {}
+        if failure is None and seq_allocs:
+            allocated = _alloc_seqs(store, seq_allocs)
+            if isinstance(allocated, bytes):
+                failure = allocated
+            else:
+                seq_next = allocated
         if failure is None:
-            channels = _run_pushes(store, pushes)
+            channels = _run_pushes(store, pushes, seq_next)
             # Phase 3: 表频道（payload 是 msgpack 的 row_id 列表）/ 索引值频道（无 payload）
             for channel, message in table_pubs:
                 channels.setdefault(channel.decode(), bytes(message))
