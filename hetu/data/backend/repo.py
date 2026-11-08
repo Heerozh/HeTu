@@ -17,6 +17,7 @@ from .base import (
     BackendClient,
     RowFormat,
     UniqueViolation,
+    literal_bound_,
     overflows_column_,
     resolve_group_,
 )
@@ -131,11 +132,13 @@ class SessionRepository:
         for unique_index in fields:
             value: np.generic = row[unique_index]
             group = {col: row[col].item() for col in index_groups[unique_index]}
+            # 行里的值按字面查：以 ( / [ 开头的字符串不能被当成区间标记
+            literal = literal_bound_(value.item())
             existing_row = await client.range(
                 ref,
                 unique_index,
-                value.item(),
-                value.item(),
+                literal,
+                literal,
                 1,
                 False,
                 RowFormat.ID_LIST,
@@ -342,7 +345,9 @@ class SessionRepository:
             辅助参数，复合索引（groupby）的分组值 {分组列: 值}，配合 `index_name` 使用。
         kwargs: IndexScalar
             查询字段和值，例如 `id=1234567890`。只能查询一个有索引的字段；复合索引要同时给出
-            全部分组列，例如 `get(name="abc", zone=3)`（组内查询）。
+            全部分组列，例如 `get(name="abc", zone=3)`（组内查询）。值按字面比较：字符串开头的
+            `(` / `[` 不是区间标记（只有 `range` 才解释），`get(name="[GM]Bob")` 查的就是
+            "[GM]Bob"。
 
         Examples
         --------
@@ -373,11 +378,14 @@ class SessionRepository:
         idmap = self._session.idmap
         # 如果不是主键，直接用range方法
         if index_name != "id":
+            # 查询值按字面比较：字符串开头的 ( / [ 不是区间标记（range 才是）。否则 "(cool)"
+            # 永远读空、还按原值登记 negative observation，插入时撞上已有的那行会判竞态一直重试
+            literal = literal_bound_(query_value)
             # 去cache查询（含本事务新 insert 的行，所以要先于 negative cache）。查询值先按列
             # 类型换算（同 range 的点查）：数值列拿 "10" 查和拿 10 查一样，缓存里的行、
             # negative cache 都按换算后的值比
             point = BackendClient.point_query_value_(
-                comp_cls.dtype_map_[index_name], query_value, None
+                comp_cls.dtype_map_[index_name], literal, None
             )
             if point is None:
                 value = query_value
@@ -404,7 +412,7 @@ class SessionRepository:
             # 几行补上），读空时也就读全了这个值，校验的是整个值上没有别的行
             rows, obs = await self._range_read(
                 index_name,
-                _to_py(query_value),
+                _to_py(literal),
                 None,
                 1,
                 False,
@@ -480,7 +488,9 @@ class SessionRepository:
             查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
             复合索引（groupby）要同时用等值给出全部分组列，例如 `range(level=(1, 10), zone=3)`，
             结果只含这一组的行；区间之外的 kwarg 都是分组值。
-            默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
+            默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。所以字符串
+            边界本身以 `(` / `[` 开头时（比如玩家名 "[GM]Bob"），要在前面再加一个 `[`；只查
+            一个值请用 `get`，它按字面比较。
             区间里没有值（比如两端都是开区间、值又相同）时返回空；下界大于上界报
             `ValueError`。
             不限下界或上界时传 `-inf` / `inf`（`float("inf")` 或 `np.inf`），比如
@@ -893,6 +903,7 @@ class SessionRepository:
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
             组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
             `upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
+            值和 `get` 一样按字面比较，开头的 `(` / `[` 不是区间标记。
             字符串锚定值超过列宽时没有行能匹配，要新建行时抛 ValueError（存进去会被截断，之后
             拿这个值查不到它）。
         """

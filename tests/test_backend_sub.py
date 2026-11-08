@@ -182,6 +182,30 @@ async def test_subscribe_get_by_id(
     assert "_version" not in row
 
 
+async def test_subscribe_get_literal_value(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """按索引订阅单行的值和 repo.get 一样按字面比较：开头的 ( / [ 不是区间标记，"[GM]Bob"
+    不会订到 "GM]Bob" 那一行"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for i, name in enumerate(("(cool)", "GM]Bob")):
+            row = comp.new_row()
+            row.name, row.time = name, 900 + i
+            await repo.insert(row)
+    await backend.wait_for_synced()
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "(cool)"
+    )
+    assert sub_id and row and row["time"] == 900
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "[GM]Bob"
+    )
+    assert sub_id is None and row is None
+
+
 async def test_subscribe_get_repeat_by_other_index_no_warning(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):

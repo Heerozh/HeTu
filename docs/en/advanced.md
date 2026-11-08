@@ -501,7 +501,7 @@ back empty is checked at commit too. When `get` finds a row, only that
 returned row is guarded; rows with the same value inserted afterwards don't
 count as a conflict.
 
-Two things to watch:
+Things to watch:
 
 - **Read it all.** A truncated read (one that returned `limit` rows) only
   guards the first `limit` rows it saw; rows it didn't read are treated as
@@ -512,6 +512,10 @@ Two things to watch:
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.
+- **In `range`, a leading `(` / `[` on a string bound marks an open / closed
+  end.** When you `range` over a string that comes from a player (a name like
+  "[GM]Bob"), put one more `[` in front, or a different value gets queried.
+  To look up a single value, use `get` / `upsert`: they compare literally.
 
 ### Hot paths: unique within a group + `upsert`
 

@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 import numpy as np
 
 from hetu.data.backend import BackendClient, MQClient, RowFormat
-from hetu.data.backend.base import group_query_key_, index_value_bytes_
+from hetu.data.backend.base import (
+    group_query_key_,
+    index_value_bytes_,
+    literal_bound_,
+)
 from hetu.data.component import Permission
 from hetu.i18n import _
 from hetu.safelogging.filter import ContextFilter
@@ -2316,6 +2320,7 @@ class SubscriptionBroker:
     ) -> tuple[str | None, dict[str, Any] | None]:
         """
         获取并订阅单行数据。复合索引（groupby）要用 group 给出全部分组列的值 {分组列: 值}。
+        query_value 和 `repo.get` 一样按字面比较，字符串开头的 `(` / `[` 不是区间标记。
         如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
         内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
         按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
@@ -2377,10 +2382,12 @@ class SubscriptionBroker:
                 raise ValueError(_("按 id 订阅不能给分组值"))
             row_id = int(query_value)
         else:
+            # 和 repo.get 一样按字面比较：字符串开头的 ( / [ 不是区间标记，"[GM]Bob" 不会订到
+            # "GM]Bob" 那一行
             ids = await servant.range(
                 table_ref,
                 index_name,
-                query_value,
+                literal_bound_(query_value),
                 limit=1,
                 row_format=RowFormat.ID_LIST,
                 group=group,

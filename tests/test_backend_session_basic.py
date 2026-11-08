@@ -518,6 +518,78 @@ async def test_upsert_anchor_overflows_column(
     assert sorted(rows.name.tolist()) == sorted([full, cjk])
 
 
+async def test_point_query_values_are_literal(
+    item_ref, mod_auto_backend: Callable[..., Backend]
+):
+    """
+    get / upsert 的值按字面比较，字符串开头的 ( / [ 不是区间标记（只有 range 才解释）。以前
+    "(cool)" 永远读空，还按原值登记 negative observation：upsert 或"get 为 None 就 insert"撞上
+    已有的那行时判竞态，System 一直重试到上限，任何玩家拿已被占用的名字注册就能触发；
+    "[GM]Bob" 查的是 "GM]Bob"，会拿到、改到别人的行
+    """
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    ids = {}
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for i, name in enumerate(("(cool)", "GM]Bob", "Alice")):
+            row = comp.new_row()
+            row.name, row.time = name, 1 + i
+            await repo.insert(row)
+            ids[name] = int(row.id)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        got = await repo.get(name="(cool)")
+        assert got is not None and int(got.id) == ids["(cool)"]
+        assert await repo.get(name="[GM]Bob") is None
+        # 已有的行：upsert 命中、改它，不撞 unique、不判竞态
+        async with repo.upsert(name="(cool)") as row:
+            assert int(row.id) == ids["(cool)"]
+            row.qty = 7
+        # 没有的值：新建一行，下次 upsert 命中它
+        async with repo.upsert(name="[GM]Bob") as row:
+            row.time = 4
+        # 本事务插入的行、本事务读空登记的 negative observation 也按字面
+        row = comp.new_row()
+        row.name, row.time = "(new", 5
+        await repo.insert(row)
+        got = await repo.get(name="(new")
+        assert got is not None and int(got.id) == int(row.id)
+        assert await repo.get(name="[new") is None
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        async with repo.upsert(name="[GM]Bob") as row:
+            assert row.time == 4
+        got = await repo.get(name="GM]Bob")
+        assert got is not None and int(got.id) == ids["GM]Bob"] and got.time == 2
+        got = await repo.get(name="(cool)")
+        assert got is not None and got.qty == 7
+
+    # 名字已被占用时 get 读得到那行，没有登记"不存在"：硬插也是确定性的 UniqueViolation，
+    # 不会判竞态重试（以前这里是 RaceCondition）
+    with pytest.raises(UniqueViolation):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            await repo.get(name="(cool)")
+            row = comp.new_row()
+            row.name, row.time = "(cool)", 200
+            await repo.insert(row)
+
+    # 提前检查查远程冲突也按字面：撞上 "(cool)"，"[Alice" 和 "Alice" 不是同一个值
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        cases = (("(cool)", ("name", False)), ("[Alice", (None, False)))
+        for i, (name, expect) in enumerate(cases):
+            row = comp.new_row()
+            row.name, row.time = name, 100 + i
+            assert await repo.is_unique_conflicts(row, insert=True) == expect, name
+
+
 async def test_upsert_by_id_does_not_mint_snowflake(
     item_ref, mod_auto_backend: Callable[..., Backend]
 ):
