@@ -383,6 +383,32 @@ def test_sortable_bytes_nan_sign_ignored():
         assert to_sortable_bytes_list(array) == [committed, committed]
 
 
+def test_sortable_bytes_trailing_nul_is_padding():
+    """
+    S / U 列定宽、结尾用 \\x00 补齐：存进列里的值结尾的 \\x00 就没了（中间的还在）。查询值是
+    `dtype.type(...)` 造的标量，结尾的 \\x00 还在，编码时也得去掉、与存的值编码一致。否则带
+    \\x00 的值查不到写进去的行：get 读空，upsert 去插入撞上已有的那行，判竞态一直重试
+    """
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    cases = {
+        "S8": ([b"", b"ab", b"a\x00b"], b"\x00"),
+        "U8": (["", "ab", "a\x00b"], "\x00"),
+    }
+    for typ, (values, nul) in cases.items():
+        dtype = np.dtype(typ)
+        for value in values:
+            expect = to_sortable_bytes(dtype.type(value))
+            stored = np.array([value + nul], dtype=dtype)
+            assert stored[0] == value, (typ, value)
+            assert to_sortable_bytes(stored[0]) == expect, (typ, value)
+            assert to_sortable_bytes_list(stored) == [expect], (typ, value)
+            for query in (value + nul, value + nul * 3):
+                assert to_sortable_bytes(dtype.type(query)) == expect, (typ, query)
+
+
 async def test_range_index_reads_values_without_rows(
     nums, mod_auto_backend, monkeypatch
 ):

@@ -9,7 +9,7 @@ from fixtures.backends import raw_index_members
 from fixtures.testdata import create_ref, def_item
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RowFormat, TableReference
+from hetu.data.backend import Backend, RowFormat, TableReference, UniqueViolation
 
 SnowflakeID().init(1, 0)
 
@@ -218,6 +218,39 @@ async def test_bytes_index_range(blob_ref, mod_auto_backend):
     assert list(rows.tag) == [b"a", b"a\x00b", b"ab"]
     rows = await servant.range(blob_ref, "tag", b"a", b"b", limit=2, desc=True)
     assert list(rows.tag) == [b"b", b"ab"]
+
+
+async def test_bytes_trailing_nul_is_padding(blob_ref, mod_auto_backend):
+    """
+    S 列定宽、结尾用 \\x00 补齐：结尾的 \\x00 一赋值就被当成补齐丢掉了（中间的不丢），带不
+    带它是同一个值。索引 member 按去掉它的值写，与行一致；查询值、upsert 的锚定值带着它也
+    按去掉的算，能命中写进去的行。只是数据存不住，索引不受影响
+    """
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, tag=[b"a\x00b\x00"])
+    servant = backend.servant
+    assert (await servant.get(blob_ref, row_id)).tag == b"a\x00b"
+    # 值段是 a\x00b 的转义，后面直接是终止符和 id：没有结尾 \x00 转义出的 \x00\xff
+    member = b"a\x00\xffb\x00" + str(row_id).encode()
+    assert raw_index_members(backend, blob_ref, "tag") == [member]
+    for query in (b"a\x00b", b"a\x00b\x00", b"a\x00b\x00\x00"):
+        rows = await servant.range(blob_ref, "tag", query)
+        assert [int(r.id) for r in rows] == [row_id], query
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        async with repo.upsert(tag=b"a\x00b\x00") as row:
+            assert int(row.id) == row_id
+            row.small = 7
+    await backend.wait_for_synced()
+    assert (await servant.get(blob_ref, row_id)).small == 7
+    # 不带 \x00 的同值再插，撞 unique
+    with pytest.raises(UniqueViolation):
+        await _insert(backend, comp, tag=[b"a\x00b"])
+
+    backend.get_table_maintenance().rebuild_index(blob_ref)
+    assert raw_index_members(backend, blob_ref, "tag") == [member]
 
 
 async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
