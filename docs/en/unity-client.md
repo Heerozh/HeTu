@@ -273,9 +273,8 @@ var member = await HeTuClient.Instance.WatchRow<GuildMember>(
 - **The dictionary is copied**: changing it after the call does not affect the
   subscription, and a reconnect restores with the `group` given at subscribe
   time. `WatchRow` still restores by the row's `id` once the row is resolved.
-- **What wakes it up**: if the server-side composite index declares
-  `point_sub=True`, the subscription is only woken by writes in its own group;
-  otherwise writes in any group wake it.
+- **What wakes it up**: only writes in its own group; writes in other groups
+  never wake it. The server does not need `point_sub` for this.
 - **Server version**: subscriptions with `group` need a server that supports
   composite indexes (later than v2025.11.1). Older servers do not understand
   `group` and close the connection with 4002. Subscriptions without `group`

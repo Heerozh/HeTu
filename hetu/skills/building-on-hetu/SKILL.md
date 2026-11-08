@@ -69,7 +69,9 @@ working examples — read them first.
   `range(level=(10, 20), zone=3)`, `get(name="x", zone=3)`,
   `upsert(name="x", zone=3)`. With `unique=True` it is unique within a group —
   use it instead of a concatenated `f"{a}:{b}"` unique key. Group-by columns:
-  int / str / bytes only. Clients subscribe with a `group` argument.
+  int / str / bytes only. Clients subscribe with a `group` argument; each group
+  is its own zset, so a group subscription only wakes on that group's writes —
+  no `point_sub` needed (it is ignored on composite indexes).
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,

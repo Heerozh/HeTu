@@ -34,7 +34,7 @@ class ChatMessage(hetu.BaseComponent):
 - **字段名不能和 NumPy 行属性同名。** 单行数据是 `np.record`，多行是 `np.recarray`，读属性时 NumPy 自己的属性优先：字段若叫 `size`，`row.size` 读到的是 NumPy 的 `size`，而不是字段值。所以 `size`、`item`、`shape`、`data`、`round`、`sort` 这类名字（以及 Python / C# 关键字）在定义时就会报错，请换成 `bag_size`、`item_id` 这样更具体的名字。
 - **SQLite 只用于开发。** SQLite 后端在本地库文件上模拟 Redis 的行为（索引排序、提交校验、订阅通知都与 Redis 一致），免装服务、方便调试，但不考虑性能；生产请用 Redis。
 - **一种索引类型，两种风格。** 索引始终是有序集合，支持 `range()` 查询和订阅。`unique=True` 是相同的排序索引，外加提交时的唯一性检查，同时隐式开启 `index=True`。`point_sub=True` 声明这个索引支持高效点订阅（见[订阅](#订阅)），同样隐式开启 `index=True`。
-- **复合索引：按组有序。** 在字段上加 `groupby="zone"`，得到"按 zone 分组、组内按本字段排序"的索引，索引名仍是本字段名：`level = property_field(0, groupby="zone")`。查询要同时用等值给出全部分组列，如 `range(level=(10, 20), zone=3)`、`get(name="abc", zone=3)`，只读这一组的行，提交时的防幻读校验也只看这一组。配上 `unique=True` 就是组内唯一，不同组可以同值。分组列只能是整数、str、bytes 字段，可以修改，索引会跟着搬到新组；不支持只给部分分组列，也不支持在分组列上给区间。旧版 HeTu 读不了用了 `groupby` 的组件的 schema，升级时新旧版本不要混跑同一个库。
+- **复合索引：按组有序。** 在字段上加 `groupby="zone"`，得到"按 zone 分组、组内按本字段排序"的索引，索引名仍是本字段名：`level = property_field(0, groupby="zone")`。查询要同时用等值给出全部分组列，如 `range(level=(10, 20), zone=3)`、`get(name="abc", zone=3)`，只读这一组的行，提交时的防幻读校验也只看这一组。配上 `unique=True` 就是组内唯一，不同组可以同值。分组列只能是整数、str、bytes 字段，可以修改，索引会跟着搬到新组；不支持只给部分分组列，也不支持在分组列上给区间或跨组扫描。每组单独存成一个 zset：每组有几行以上时比一个大索引更省内存，分组值是长字符串、每组又只有一两行时最多会多用到 1.5~3.7 倍。旧版 HeTu 读不了用了 `groupby` 的组件的 schema，升级时新旧版本不要混跑同一个库。
 - **`namespace=` 只是一个标签。** 任何字符串都可以。运行中的服务器在启动时绑定到恰好一个命名空间（`--namespace`），并且只加载该命名空间的 `系统` 和 `端点`；如果这些 `系统` 引用了其他命名空间的 `组件`，则这些组件也会随之加载。要托管多个命名空间，请启动多台服务器。
 
 ## 系统
@@ -184,10 +184,9 @@ class Item(hetu.BaseComponent):
 所以只给真正会被点查询订阅的索引声明。
 
 复合索引（`groupby`）上的 `range` 都在一组里，要带上分组值（客户端 SDK 的 `group` 参数）。复合索引
-声明了 `point_sub=True` 时只订这一组的频道：这一组有行进出，或者组里有行的本字段变了，才会叫醒它；
-没声明时订整个索引的频道，任何一组的写入都会叫醒它（服务器会警告一次）。代价也按组算：组里每次
-有行"进入"（插入、换组进来、本字段变化），提交时多发一条通知。所以像"按赛季排名的分数"这种本字段
-改得很频繁的复合索引，开 `point_sub` 之前先估一下 PUBLISH 的量。
+每组单独存成一个 zset，订阅订的就是这一组的通知：这一组有行进出，或者组里有行的本字段变了，才会叫醒
+它，别的组的写入不会。这些通知由各副本应用写入时自己产生，提交时不用多发 PUBLISH，所以复合索引不需要
+`point_sub`（写了会警告并忽略），像"按赛季排名的分数"这种本字段改得很频繁的复合索引也可以放心订阅。
 
 ### 何时用整表订阅
 
@@ -247,7 +246,7 @@ class Player(hetu.BaseComponent):
     role: str = hetu.property_field("", dtype="U16", index=True, hidden=True)
 ```
 
-订阅（`select` / `range` / 整表订阅）推给客户端的行都不带 `hidden` 的列，管理员连接也一样；只改了 `hidden` 列的写入客户端看不出变化，不推送。客户端也不能按 `hidden` 的列订阅：就算不推它的值，按 `role` 等于 `"werewolf"` 做 `range` 这样的查询条件本身就能把它试探出来，所以它也不能声明 `point_sub`。复合索引的分组列是 `hidden` 时同理：客户端不能按组订阅，这个索引也不能声明 `point_sub`。和行级权限一样，`hidden` 只管订阅：`系统` 里照常读写，`ResponseToClient` 返回的数据不过滤；`hetu build` 生成的客户端类不含这一列。改动 `hidden` 和改权限一样要跑 `hetu upgrade`（只更新 schema 版本，不搬数据）。
+订阅（`select` / `range` / 整表订阅）推给客户端的行都不带 `hidden` 的列，管理员连接也一样；只改了 `hidden` 列的写入客户端看不出变化，不推送。客户端也不能按 `hidden` 的列订阅：就算不推它的值，按 `role` 等于 `"werewolf"` 做 `range` 这样的查询条件本身就能把它试探出来，所以它也不能声明 `point_sub`。复合索引的分组列是 `hidden` 时同理：客户端不能按组订阅这个索引。和行级权限一样，`hidden` 只管订阅：`系统` 里照常读写，`ResponseToClient` 返回的数据不过滤；`hetu build` 生成的客户端类不含这一列。改动 `hidden` 和改权限一样要跑 `hetu upgrade`（只更新 schema 版本，不搬数据）。
 
 ## 事务
 
