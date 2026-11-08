@@ -137,6 +137,16 @@ class SessionRepository:
                 # 如果existing_row的id存在于mark_deleted中，则不算冲突
                 if session.idmap.is_deleted(ref, existing_row[0]):
                     continue
+                # 本事务已经把这一列的值从那行挪走了（同一事务里挪 unique 值）：提交时豁免，
+                # 这里也不算冲突
+                cached, state = session.idmap.get(ref, existing_row[0])
+                if (
+                    cached is not None
+                    and state == RowState.UPDATE
+                    and unique_key_of_row_(ref.comp_cls, unique_index, cached)
+                    != unique_key_of_row_(ref.comp_cls, unique_index, row)
+                ):
+                    continue
                 return unique_index
         return None
 

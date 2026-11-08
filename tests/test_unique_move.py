@@ -105,6 +105,28 @@ async def test_move_exemption_is_per_index(pair_ref, mod_auto_backend):
             await repo.update(mine)
 
 
+async def test_is_unique_conflicts_ignores_moved_values(pair_ref, mod_auto_backend):
+    """
+    提前检查 is_unique_conflicts 与提交时的判定一致：本事务已经把值从库里那行挪走了，新行用
+    这个值不算冲突；没挪走的照样报冲突
+    """
+    backend: Backend = mod_auto_backend()
+    comp = pair_ref.comp_cls
+    p1, _p2 = await _insert(backend, comp, (41, 141, 41.0), (42, 142, 42.0))
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=p1)
+        row.a = 43
+        await repo.update(row)
+        new = comp.new_row()
+        new.a, new.b, new.f = 41, 143, 43.0
+        assert await repo.is_unique_conflicts(new, insert=True) == (None, False)
+        clash = comp.new_row()
+        clash.a, clash.b, clash.f = 42, 144, 44.0
+        assert await repo.is_unique_conflicts(clash, insert=True) == ("a", False)
+        await repo.insert(new)
+
+
 @pytest.mark.parametrize("read", ["get", "range"])
 async def test_move_after_empty_read_is_race(pair_ref, mod_auto_backend, read):
     """

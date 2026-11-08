@@ -641,6 +641,30 @@ async def test_unique_point_hit_checks_all_columns(slot_ref, mod_auto_backend):
             assert sorted(got.id) == sorted([r_id, s_id])
 
 
+async def test_is_unique_conflicts_within_group(slot_ref, mod_auto_backend):
+    """
+    提前检查 is_unique_conflicts 按 (组, 值) 判断：别的组同值不算冲突；本事务已经从组里挪走
+    的值也不算，与提交时一致
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    a_id, _b_id = await _insert(
+        backend, comp, _slot(comp, owner=8, slot=1), _slot(comp, owner=8, slot=2)
+    )
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        other_group = _slot(comp, owner=9, slot=2)
+        assert await repo.is_unique_conflicts(other_group, insert=True) == (None, False)
+        row = await repo.get(id=a_id)
+        row.slot = 3
+        await repo.update(row)
+        refill = _slot(comp, owner=8, slot=1)
+        assert await repo.is_unique_conflicts(refill, insert=True) == (None, False)
+        clash = _slot(comp, owner=8, slot=2)
+        assert await repo.is_unique_conflicts(clash, insert=True) == ("slot", False)
+        await repo.insert(refill)
+
+
 @pytest.mark.parametrize("read", ["get", "range"])
 async def test_group_move_after_empty_read_is_race(slot_ref, mod_auto_backend, read):
     """
