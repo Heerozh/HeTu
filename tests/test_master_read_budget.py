@@ -115,3 +115,46 @@ async def test_push_refresh_budget(lb_backend, mod_backend_config, filled_item_r
     finally:
         await other.close()
         await broker.close()
+
+
+@use_redis_family_backend_only
+async def test_seq_polling_never_touches_master(new_component_env, mod_backend_config):
+    """
+    库外消费方按文档的写法轮询提交序号列：读计数器、增量读都在副本上，master 一次不读
+    （设计稿 2026-11-09-commit-seq-third-party-design.md §5.5）
+    """
+    import numpy as np
+    from fixtures.testdata import create_ref
+
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.data.backend import Table
+
+    @define_component(namespace="pytest", force=True)
+    class SeqCmd(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")
+
+    config = copy.deepcopy(mod_backend_config)
+    config["master_weight"] = 0
+    backend = Backend(config)
+    backend.post_configure(components=[SeqCmd])
+    try:
+        create_ref(SeqCmd, backend)
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(SeqCmd)
+            for _ in range(3):
+                row = SeqCmd.new_row()
+                row.owner = 7
+                await repo.insert(row)
+        await backend.wait_for_synced()
+        tbl = Table(SeqCmd, "pytest", 1, backend)
+        with ExitStack() as stack:
+            counts = count_reads(stack, backend)
+            assert await tbl.servant_seq_head_many([{"owner": 7}]) == [3]
+            assert await tbl.servant_seq_head(group={"owner": 7}) == 3
+            rows, blocked = await tbl.servant_seq_read(0, group={"owner": 7})
+            assert len(rows) == 3 and blocked is None
+            assert counts()["master"] == 0, f"轮询提交序号列不该读 master：{counts()}"
+            assert counts()["servant"] > 0
+    finally:
+        await backend.close()
