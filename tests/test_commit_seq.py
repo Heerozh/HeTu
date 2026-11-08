@@ -12,6 +12,7 @@ import logging
 import numpy as np
 import pytest
 from fixtures.backends import (
+    SQLITE_BACKENDS,
     raw_index_members,
     raw_kv_get,
     raw_kv_keys,
@@ -455,6 +456,33 @@ async def test_payload_without_commit_seq_unchanged(
         session.discard()
     assert payload[5] == []
     assert [cmd[0] for cmd in payload[1]] == ["HSET", "ZADD", "ZADD"]
+
+
+@pytest.mark.parametrize("backend_name", SQLITE_BACKENDS, indirect=True)
+async def test_sqlite_counter_sends_no_notification(log_ref, mod_auto_backend):
+    """
+    SQLite 按 Redis 产生通知的规则记通知：HSETSEQ 写的行发行频道、组 key 发索引频道；计数器不发
+    （HeTu 给 Redis 开的 Kghz 不含 $，INCRBY 不产生通知）
+    """
+    from hetu.data.backend.sqlite import SQLiteBackendClient
+    from hetu.data.backend.sqlite.store import SQLiteStore
+
+    backend: Backend = mod_auto_backend()
+    master = backend.master
+    assert isinstance(master, SQLiteBackendClient)
+    comp = log_ref.comp_cls
+    tail = master.run_sync_(SQLiteStore.notify_tail)
+    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    fetched, _min_id, _last = master.run_sync_(
+        SQLiteStore.notify_fetch, tail, None, 100
+    )
+    channels = {channel for _id, channel, _payload in fetched}
+    prefix = to_sortable_bytes(np.int64(7))
+    group_key = master.index_zset_key_(master.index_key(log_ref, "seq"), prefix)
+    assert master.row_channel(log_ref, row_id) in channels
+    assert f"__keyspace@0__:{group_key}" in channels
+    counter_head = master.cluster_prefix(log_ref) + ":seq:"
+    assert not [channel for channel in channels if counter_head in channel]
 
 
 async def test_counter_keys_layout(new_component_env, mod_auto_backend):
