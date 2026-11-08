@@ -1,21 +1,18 @@
 name: Workflow for Codecov python
+# 只在 PR 上跑（全部后端 + 上传覆盖率）。直接 push 不跑：分支开了 PR 后，push 和 pull_request
+# 会各触发一次，push 那次只是重复
 on:
-  push:
-    paths:
-      - "**.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "**.py"
       - "pyproject.toml"
       - "uv.lock"
+      - ".github/workflows/ci.yml"
 
 concurrency:
-  # github.ref = refs/heads/branch_name or refs/tags/tag_name
+  # github.ref = refs/pull/<PR 号>/merge
   # github.workflow = top-level workflow name
-  group: ${{ github.workflow }}-${{ github.ref }} # branch上只同时运行一个
+  group: ${{ github.workflow }}-${{ github.ref }} # 同一个 PR 只同时运行一个，新推送取消旧的
   cancel-in-progress: true
 
 jobs:
@@ -36,8 +33,6 @@ jobs:
       - name: Install pytest
         run: pip install --group dev
       - name: Run tests and collect coverage
-        env:
-          HETU_TEST_BACKENDS: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && 'redis' || '' }}
         run: |
           PWD=$(pwd)
           export PYTHONPATH=$PWD/:$PYTHONPATH
@@ -45,7 +40,6 @@ jobs:
           mkdir -p ./logs
           pytest -n 4 --cov-config=.coveragerc --cov=hetu tests/ ${{ env.CODECOV_ATS_TESTS }}
       - name: Upload coverage to Codecov
-        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
         uses: codecov/codecov-action@v5
         with:
           verbose: true
