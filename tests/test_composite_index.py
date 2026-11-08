@@ -246,10 +246,14 @@ def _pool(dtype: np.dtype) -> list:
 
 
 def _split_member(comp, index_name: str, member: bytes) -> tuple:
-    """按设计稿 §4.1 的规则把 member 切回 (分组值…, 本字段值, id 串)，验证可唯一切分"""
-    from hetu.data.backend.base import from_sortable_bytes
+    """按设计稿 §4.1 的规则把 member 切回 (分组值…, 本字段值, id)，验证可唯一切分"""
+    from hetu.data.backend.base import (
+        from_sortable_bytes,
+        member_row_id_,
+        member_value_,
+    )
 
-    value_seg, _sep, row_id = member.rpartition(b"\x00")
+    value_seg, row_id = member_value_(member), member_row_id_(member)
     pos = 0
     values = []
     for col in comp.index_groups_[index_name]:
@@ -275,32 +279,38 @@ def _split_member(comp, index_name: str, member: bytes) -> tuple:
     values.append(
         from_sortable_bytes(comp.dtype_map_[index_name], value_seg[pos:]).item()
     )
-    return (*values, row_id.decode())
+    return (*values, row_id)
 
 
 def test_composite_member_order_and_split(new_component_env):
     """
-    member 的字节序 = (分组值…, 本字段值, id 十进制串) 的逐列字典序，且 member 能唯一切分。
-    值覆盖中间 \\x00、\\x01、\\xff 开头、空串、非 BMP 字符、有符号与无符号极值、±inf、-0.0
+    member 的字节序 = (分组值…, 本字段值, id) 的逐列字典序，且 member 能唯一切分。
+    值覆盖中间 \\x00、\\x01、\\xff 开头、空串、非 BMP 字符、有符号与无符号极值、±inf、-0.0；
+    id 覆盖负数和不同位数
     """
-    from hetu.data.backend.base import index_value_bytes_, index_value_bytes_list_
+    from hetu.data.backend.base import (
+        index_member_,
+        index_value_bytes_,
+        index_value_bytes_list_,
+    )
 
     rng = random.Random(20261108)
+    id_pool = [-(2**63), -(10**18), -9, -1, 0, 1, 9, 10, 10**17, 10**18, 2**63 - 1]
     for comp in def_codecs():
         index_name = "f"
         columns = (*comp.index_groups_[index_name], index_name)
         rows = np.zeros(80, dtype=comp.dtypes)
-        rows["id"] = rng.sample(range(1, 10**6), len(rows))
+        rows["id"] = id_pool + rng.sample(range(100, 10**6), len(rows) - len(id_pool))
         for col in columns:
             pool = _pool(comp.dtype_map_[col])
             rows[col] = [rng.choice(pool) for _ in range(len(rows))]
         values = index_value_bytes_list_(comp, index_name, rows)
         # 批量版与逐行版一致
         assert values == [index_value_bytes_(comp, index_name, row) for row in rows]
-        members = [v + b"\x00" + b"%d" % i for v, i in zip(values, rows["id"].tolist())]
-        # 期望的顺序：numpy 存进去之后的值（结尾 \x00 已去掉）按 python 元组比，id 按十进制串
+        members = [index_member_(v, i) for v, i in zip(values, rows["id"].tolist())]
+        # 期望的顺序：numpy 存进去之后的值（结尾 \x00 已去掉）按 python 元组比，id 按数值
         keys = [
-            (*(rows[col][i].item() for col in columns), str(rows["id"][i]))
+            (*(rows[col][i].item() for col in columns), int(rows["id"][i]))
             for i in range(len(rows))
         ]
         by_member = sorted(range(len(rows)), key=lambda i: members[i])

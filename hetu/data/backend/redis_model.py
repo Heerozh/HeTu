@@ -31,13 +31,17 @@ from .base import (
     exact_number_,
     from_sortable_bytes,
     group_prefix_,
+    index_member_,
     index_value_bytes_,
     index_value_bytes_list_,
     inverted_bounds_error_,
+    member_row_id_,
+    member_value_,
     normalize_int_bounds_,
     peel_bound_,
     resolve_group_,
     row_group_prefix_,
+    row_id_token_,
     sortable_token,
     to_sortable_bytes,
 )
@@ -431,7 +435,7 @@ class RedisModelClient(BackendClient):
         `range_read_` 的后半段：由 ZRANGE 读回的原样 member 与规范化后的两端，得到行 id 与这次读取的
         观察（commit 时变成对 key 的 CNT 检查，见 `_range_checks`）。key 是读的那个 zset。
         """
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        row_ids = [member_row_id_(vk) for vk in members]
         # 观察区间给 ZLEXCOUNT 用，要按 min, max 排；desc 时 b_left 是上界
         lo, hi = (b_right, b_left) if desc else (b_left, b_right)
         # 两端都是 "[" 开头的闭区间，去掉 "[" 就是 member（排序键）的闭区间
@@ -666,7 +670,7 @@ class RedisModelClient(BackendClient):
         members, _key, _b_left, _b_right = await self._zrange_members(
             table_ref, index_name, left, right, limit, desc, group
         )
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        row_ids = [member_row_id_(vk) for vk in members]
 
         if row_format == RowFormat.ID_LIST:
             return row_ids
@@ -700,9 +704,8 @@ class RedisModelClient(BackendClient):
         skip = len(self.group_prefix_of_(table_ref, index_name, group))
         result = []
         for member in members:
-            # member 是 value\x00id，row_id 不含 0x00，最后一个 0x00 就是终止符
-            value, _sep, row_id = member.rpartition(b"\x00")
-            result.append((from_sortable_bytes(dtype, value[skip:]), int(row_id)))
+            value = member_value_(member)[skip:]
+            result.append((from_sortable_bytes(dtype, value), member_row_id_(member)))
         return result
 
     @override
@@ -730,12 +733,12 @@ class RedisModelClient(BackendClient):
         self, table_ref: TableReference, index_name: str, rows: np.ndarray
     ) -> list[bytes]:
         """
-        见基类。排序键就是索引 member：值段（复合索引是组前缀加本字段的编码）+ 0x00 + 十进制 id，
-        与 commit 写索引时一致
+        见基类。排序键就是索引 member：值段（复合索引是组前缀加本字段的编码）+ 0x00 + id 段
+        （见 `ROW_ID_TOKEN_LEN`），与 commit 写索引时一致
         """
         values = index_value_bytes_list_(table_ref.comp_cls, index_name, rows)
         return [
-            value + b"\x00" + b"%d" % row_id
+            index_member_(value, row_id)
             for value, row_id in zip(values, rows["id"].tolist())
         ]
 
@@ -812,7 +815,7 @@ class RedisModelClient(BackendClient):
                     # 按整个值段比：复合索引只比本字段的话，读取期间被挪到别的组（本字段没变）
                     # 的行会被放过
                     value = index_value_bytes_(comp_cls, obs.index_name, row)
-                    if value != member.rsplit(b"\x00", 1)[0]:
+                    if value != member_value_(member):
                         raise InconsistentRangeRead(
                             comp_cls.name_, obs.index_name, row_id
                         )
@@ -962,7 +965,8 @@ class RedisModelClient(BackendClient):
         race_checks: list[list[str | bytes]] = []
         strict_checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
-        deleted: dict[str, bool] = {}
+        # 本事务删掉的行：{id 段: True}，id 段同索引 member 末尾的（见 ROW_ID_TOKEN_LEN）
+        deleted: dict[bytes, bool] = {}
         # 主动 PUBLISH 的通知只有两种，都只给声明了的组件/索引发（PUBLISH 很贵，见
         # benchmark/redis_publish_cost_result.md；tests/test_arch_publish.py 守门，别往这里
         # 加新通知、也别往消息里塞内容）：
@@ -983,9 +987,9 @@ class RedisModelClient(BackendClient):
             dtype_map = comp_cls.dtype_map_
             index_groups = comp_cls.index_groups_
             # 索引全部转换为bytes索引（score统一用0，不需要score排序），测试下来lex和score
-            # 排序性能是一样的。member 是值段 + 0x00 + 十进制 id，值段见 index_value_bytes_；
-            # 单列索引的值段就是本字段的编码，热路径上直接编码。复合索引每组一个 zset，ZADD /
-            # ZREM / UNIQ 都发到行所在组的 key（见 composite_entry_）
+            # 排序性能是一样的。member 是值段 + 0x00 + id 段（定宽，见 ROW_ID_TOKEN_LEN），值段见
+            # index_value_bytes_；单列索引的值段就是本字段的编码，热路径上直接编码。复合索引每组
+            # 一个 zset，ZADD / ZREM / UNIQ 都发到行所在组的 key（见 composite_entry_）
             # insert
             for insert in inserts:
                 row_id = str(insert["id"])
@@ -1014,7 +1018,7 @@ class RedisModelClient(BackendClient):
                         )
                 # 版本号随机起步（见 FIRST_VERSION_SPAN）
                 _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
-                b_row_id = row_id.encode("ascii")
+                b_row_id = row_id_token_(int(row_id))
                 for name, idx_key, value in entries:
                     _enter_channel(comp_cls, name, idx_key, value)
                     pushes.append(["ZADD", idx_key, "0", value + b"\x00" + b_row_id])
@@ -1066,7 +1070,7 @@ class RedisModelClient(BackendClient):
                             f"{_index_label(comp_cls, name)} id={row_id} update",
                         )
                 _hset_key(key, old_version, new_row)
-                b_row_id = row_id.encode("ascii")
+                b_row_id = row_id_token_(int(row_id))
                 for _name, old_key, old_value, _new_key, _new_value in changes:
                     pushes.append(["ZREM", old_key, old_value + b"\x00" + b_row_id])
                 for name, _old_key, _old_value, new_key, new_value in changes:
@@ -1076,13 +1080,13 @@ class RedisModelClient(BackendClient):
                     )
             # delete：按数据库里的原值清索引
             for delete in deletes:
-                # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
                 row_id = str(delete["id"])
-                deleted[row_id] = True
+                b_row_id = row_id_token_(int(row_id))
+                # 传入删掉的行的 id 段：之后 unique 检查查到的 member 是这些行的，不算冲突
+                deleted[b_row_id] = True
                 key = id_prefix + row_id
                 old_version = delete["_version"]
                 _version_must_match(key, old_version)
-                b_row_id = row_id.encode("ascii")
                 for name in indexes:
                     if index_groups[name]:
                         idx_key, value = self.composite_entry_(
@@ -1199,7 +1203,7 @@ class RedisModelClient(BackendClient):
         index_name: str,
         struct: np.record,
         raws: Mapping[str, bytes],
-        row_id: bytes,
+        row_id: int,
     ) -> tuple[str, bytes]:
         """
         重建索引时，由行里存的原始字节算出 (zset key, 索引 member)：先按 dtype 转换再编码，与 commit
@@ -1214,4 +1218,4 @@ class RedisModelClient(BackendClient):
             key, value = cls.composite_entry_(comp_cls, idx_key, index_name, struct)
         else:
             key, value = idx_key, index_value_bytes_(comp_cls, index_name, struct)
-        return key, value + b"\x00" + row_id
+        return key, index_member_(value, row_id)

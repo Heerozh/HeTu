@@ -21,6 +21,7 @@ import numpy as np
 from hetu.data.backend import BackendClient, MQClient, RowFormat
 from hetu.data.backend.base import (
     group_query_key_,
+    index_member_,
     index_value_bytes_,
     literal_bound_,
 )
@@ -426,7 +427,9 @@ class IndexSubscription(BaseSubscription):
         lo, hi = self.enter_bounds
         comp_cls = self.table_ref.comp_cls
         index_name = self.query_param["index_name"]
-        key = index_value_bytes_(comp_cls, index_name, row) + b"\x00%d" % row["id"]
+        key = index_member_(
+            index_value_bytes_(comp_cls, index_name, row), int(row["id"])
+        )
         return not lo <= key <= hi
 
     async def _rerange(

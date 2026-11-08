@@ -20,6 +20,7 @@ from fixtures.backends import (
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
+from hetu.data.backend.base import member_row_id_
 
 SnowflakeID().init(1, 0)
 
@@ -705,7 +706,7 @@ async def test_rebuild_index_removes_orphans(item_ref, mod_auto_backend):
     maint.delete_row(item_ref, int(x.id))  # 只删行 key，owner 索引里留下 x
     maint.rebuild_index(item_ref)
     members = raw_index_members(backend, item_ref, "owner")
-    assert [m.rsplit(b"\x00", 1)[-1] for m in members] == [str(y.id).encode()]
+    assert [member_row_id_(m) for m in members] == [int(y.id)]
 
     maint.delete_row(item_ref, int(y.id))  # 表空了，索引里只剩残留
     maint.rebuild_index(item_ref)

@@ -17,7 +17,7 @@ import numpy as np
 
 from ....i18n import _
 from ...component import BaseComponent
-from ..base import RowFormat, TableMaintenance
+from ..base import RowFormat, TableMaintenance, member_row_id_, member_value_
 from ..table import TableReference
 from .store import SQLiteStore
 
@@ -105,7 +105,7 @@ class SQLiteTableMaintenance(TableMaintenance):
         members = self._run(
             SQLiteStore.zrange_bylex, idx_key, b_left, b_right, False, 0, limit
         )
-        return [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        return [member_row_id_(vk) for vk in members]
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -282,11 +282,11 @@ class SQLiteTableMaintenance(TableMaintenance):
                         idx_name,
                         struct,
                         dict(zip(columns, cast(tuple[bytes, ...], raws))),
-                        str(row_id).encode(),
+                        row_id,
                     )
                     if is_unique:
                         # 按值段（复合索引带组前缀）查重，同组同值才算冲突
-                        value = member.rsplit(b"\x00", 1)[0]
+                        value = member_value_(member)
                         if value in seen:
                             raise RuntimeError(
                                 _(

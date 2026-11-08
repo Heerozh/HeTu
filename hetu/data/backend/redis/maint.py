@@ -16,7 +16,7 @@ from redis.cluster import RedisCluster
 
 from ....common.helper import batched
 from ...component import BaseComponent
-from ..base import RowFormat, TableMaintenance
+from ..base import RowFormat, TableMaintenance, member_row_id_, member_value_
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -76,9 +76,7 @@ class RedisTableMaintenance(TableMaintenance):
         row_ids = self.client.io.zrange(
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
-        row_ids = cast(list[bytes], row_ids)
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
-        return row_ids
+        return [member_row_id_(vk) for vk in cast(list[bytes], row_ids)]
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -314,7 +312,7 @@ class RedisTableMaintenance(TableMaintenance):
                     for key in chunk:
                         pipe.hmget(key, columns)
                     rows: list[list[bytes | None]] = pipe.execute()
-                    # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id
+                    # 不管 unique 还是 index 都是 zset，member 是 值段\x00id 段
                     by_key: dict[str, dict[bytes, int]] = {}
                     for key, raws in zip(chunk, rows):
                         if any(raw is None for raw in raws):
@@ -329,11 +327,11 @@ class RedisTableMaintenance(TableMaintenance):
                             idx_name,
                             struct,
                             dict(zip(columns, cast(list[bytes], raws))),
-                            key.rsplit(":", 1)[-1].encode(),
+                            int(key.rsplit(":", 1)[-1]),
                         )
                         if is_unique:
                             # 按值段（复合索引带组前缀）查重，同组同值才算冲突
-                            value = member.rsplit(b"\x00", 1)[0]
+                            value = member_value_(member)
                             if value in seen:
                                 raise RuntimeError(
                                     f"组件{table_ref.comp_name}的unique索引`{idx_name}`"

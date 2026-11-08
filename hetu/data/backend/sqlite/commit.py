@@ -21,6 +21,7 @@ from typing import Any
 import msgpack
 
 from ....i18n import _
+from ..base import ROW_ID_TOKEN_LEN
 from .store import KEYSPACE_PREFIX, SQLiteStore
 
 
@@ -78,10 +79,10 @@ def _run_checks(
             seen_uniq.add(dup)
             res = store.zrange_bylex(idx_key.decode(), start_val, end_val, False, 0, 1)
             if res:
-                # member 是 value\x00row_id，row_id 不含 0x00，故最后一个 0x00 即终止符
-                row_id = res[0].rsplit(b"\x00", 1)[-1]
+                # member 是 值段\x00id 段，id 段定宽（ROW_ID_TOKEN_LEN），deleted 的键也是 id 段
+                row_token = res[0][-ROW_ID_TOKEN_LEN:]
                 # 唯一索引指向的行在本次事务中被删除了，则不算冲突
-                if not deleted.get(row_id):
+                if not deleted.get(row_token):
                     # 本次提交会把这个 member 移走（同一事务里把值挪到了别的行）也不算：被移走的
                     # 行都有 VER 钉住，库里它的 member 就是本次要 ZREM 的那个
                     if removed is None:

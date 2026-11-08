@@ -255,6 +255,36 @@ def sortable_token(sortable: bytes) -> str:
     return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
 
 
+# 索引 member 是 值段 + 0x00 + id 段。id 段是 id + 2^63 的 16 位小写 hex，也就是 int64 的
+# `to_sortable_bytes` 的 hex：定宽，整个 int64 范围都保序（含按 key 的未来调用用的负 id），
+# 同一个值下的行就按 id 的数值排；只有 0-9a-f，不含 0x00 / 0xff，"最后一个 0x00 是终止符"、
+# 区间两端的 \x00 / \x00\xff 照旧成立。以前是不补零的十进制，雪花 id 从 18 位进到 19 位
+# （2033-07）之后同值的行会乱序，"取某个值下最新 N 行"会取错
+ROW_ID_TOKEN_LEN = 16
+_ROW_ID_OFFSET = 1 << 63
+
+
+def row_id_token_(row_id: int | np.integer) -> bytes:
+    """内部方法：行 id → 索引 member 末尾的 id 段（见 `ROW_ID_TOKEN_LEN`）"""
+    # 先转 int：np.int64 加 2^63 会溢出
+    return b"%016x" % (int(row_id) + _ROW_ID_OFFSET)
+
+
+def index_member_(value: bytes, row_id: int | np.integer) -> bytes:
+    """内部方法：值段 + 行 id → 索引 member"""
+    return value + b"\x00" + row_id_token_(row_id)
+
+
+def member_row_id_(member: bytes) -> int:
+    """内部方法：索引 member → 行 id。id 段定宽，取最后 `ROW_ID_TOKEN_LEN` 个字节"""
+    return int(member[-ROW_ID_TOKEN_LEN:], 16) - _ROW_ID_OFFSET
+
+
+def member_value_(member: bytes) -> bytes:
+    """内部方法：索引 member 去掉 0x00 + id 段，剩下的值段（复合索引带组前缀）"""
+    return member[: -ROW_ID_TOKEN_LEN - 1]
+
+
 # 复合索引里 str / bytes 分组列编码后面跟的终止符。不能用单个 0x00：值的转义是 0x00 → 0x00 0xff，
 # 下一列的编码以 0xff 开头时（整数最大值、浮点 +inf / NaN、0xff 开头的 bytes）比较会越过
 # 终止符，把 "a\x00b" 组的行算进 "a" 组的区间。0x00 0x01 和转义的 0x00 0xff 在第二个字节就分开了
