@@ -720,7 +720,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:848`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L848)</small>
+<small>Source: [`hetu/data/backend/base.py:853`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L853)</small>
 
 从数据库直接获取单行数据。
 
@@ -767,7 +767,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:978`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L978)</small>
+<small>Source: [`hetu/data/backend/base.py:983`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L983)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -833,7 +833,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1157`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1157)</small>
+<small>Source: [`hetu/data/backend/base.py:1162`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1162)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
