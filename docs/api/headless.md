@@ -69,7 +69,9 @@ HeadlessClient(
 无服务器进程的表直读写客户端，用 `connect()` 创建。
 
 - `table(comp)` → 现有 [`Table`](system.md#table)：非事务读走 `servant_get` / `servant_range` /
-  `servant_get_many`（`direct_set` 不保证通知一致，请勿使用）。
+  `servant_get_many`；提交序号列（`commit_seq`）的命令表用 `servant_seq_read` 按号
+  消费、确认缺口，`servant_seq_head` / `servant_seq_head_many` 读发到第几号
+  （`direct_set` 不保证通知一致，请勿使用）。
 - `session(*comps)` → [`HeadlessSession`](headless.md#headlesssession)：``s[Comp]`` 即现有 [`SessionRepository`](system.md#sessionrepository)，
   退出 ``async with`` 即 commit，提交路径与 System 完全相同。
 - 不发雪花号：`insert` 的行 id 必须非零，`upsert` 只在锚定 ``id=<显式值>`` 时允许新建。
@@ -111,7 +113,7 @@ resolve_tables_(
 ) -> list[hetu.data.backend.table.Table]
 ```
 
-<small>Source: [`hetu/headless.py:296`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L296)</small>
+<small>Source: [`hetu/headless.py:298`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L298)</small>
 
 内部方法：按服务器 meta 把组件解析成 [`Table`](system.md#table)（cluster_id 来自 meta，不本地重算）。
 
@@ -138,7 +140,7 @@ from_backend(
 ) -> Self
 ```
 
-<small>Source: [`hetu/headless.py:341`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L341)</small>
+<small>Source: [`hetu/headless.py:343`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L343)</small>
 
 用一个已有的 `Backend` 创建 client（不接管其生命周期，`close()` 不会关它）。
 
@@ -161,7 +163,7 @@ table(
 ) -> hetu.data.backend.table.Table
 ```
 
-<small>Source: [`hetu/headless.py:358`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L358)</small>
+<small>Source: [`hetu/headless.py:360`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L360)</small>
 
 按组件类或组件名取 [`Table`](system.md#table)（非事务读用）。未声明的组件抛 `KeyError`。
 
@@ -185,7 +187,7 @@ session(
 ) -> hetu.headless.HeadlessSession
 ```
 
-<small>Source: [`hetu/headless.py:380`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L380)</small>
+<small>Source: [`hetu/headless.py:382`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L382)</small>
 
 开一个事务，声明本事务会碰的组件（必须同簇，否则 `ValueError`）。
 
@@ -210,7 +212,7 @@ Open a transaction over the given (same-cluster) components.
 check_schema() -> None
 ```
 
-<small>Source: [`hetu/headless.py:415`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L415)</small>
+<small>Source: [`hetu/headless.py:417`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L417)</small>
 
 重读所有已认表的 meta，簇或数据布局变了就抛异常（[`TableNotFound`](headless.md#tablenotfound) /
 [`ClusterChanged`](headless.md#clusterchanged) / [`SchemaMismatch`](headless.md#schemamismatch)），不自动刷新——由调用方重新 [`connect`](headless.md#connect) 或退出。
@@ -233,7 +235,7 @@ Re-read table metas; raise if the cluster id or layout changed on the server.
 close() -> None
 ```
 
-<small>Source: [`hetu/headless.py:433`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L433)</small>
+<small>Source: [`hetu/headless.py:435`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L435)</small>
 
 关闭连接（仅当 backend 由本 client 创建时才关它）/ Close owned backend.
 
@@ -408,7 +410,7 @@ connect(
 ) -> hetu.headless.HeadlessClient
 ```
 
-<small>Source: [`hetu/headless.py:445`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L445)</small>
+<small>Source: [`hetu/headless.py:447`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L447)</small>
 
 
 

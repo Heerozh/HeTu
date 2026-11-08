@@ -9,6 +9,49 @@ weight: 30
 
 
 
+## `SeqReadResult`
+
+```python
+SeqReadResult(rows: RowsT, blocked: tuple[int, int] | None)
+```
+
+<small>Source: [`hetu/data/backend/base.py:198`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L198)</small>
+
+
+**Bases:** `tuple`, `Generic`
+
+
+
+Result of `BackendClient.seq_read`: the rows read and what blocked the read.
+
+提交序号列增量读（`seq_read`）的结果，可以直接解包：``rows, blocked = ...``。
+
+- `rows`：号大于 `after` 的行，按号升序，格式按 `row_format`；
+- `blocked`：``(号, 行 id)`` 或 None。索引里有、这次却没取到行的第一个 member，它挡住了后面的
+  行；None 表示没被挡住。取行落到落后的副本、读完索引之后行被删了都会挡住，下一次通常就好了；
+  同一个 ``(号, 行 id)`` 一直挡着，多半是索引残留（索引里有、行没有）。
+
+
+
+
+### Attributes
+
+- **`rows`** (RowsT) — _No description._
+
+- **`blocked`** (tuple[int, int] | None) — _No description._
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## `SessionRepository`
 
 ```python
@@ -720,7 +763,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:853`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L853)</small>
+<small>Source: [`hetu/data/backend/base.py:939`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L939)</small>
 
 从数据库直接获取单行数据。
 
@@ -767,7 +810,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:983`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L983)</small>
+<small>Source: [`hetu/data/backend/base.py:1069`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1069)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -827,13 +870,152 @@ servant_range(
 
 
 
+#### `servant_seq_head`
+
+```python
+servant_seq_head(group: collections.abc.Mapping[str, Any] | None = None) -> int
+```
+
+<small>Source: [`hetu/data/backend/base.py:1248`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1248)</small>
+
+Read the latest number issued by one commit_seq group.
+
+读提交序号列（`commit_seq`）一个组最近发出的号，也就是这一组发到了第几号。还没发过号是 0，
+易失表维护清空之后也是 0。非事务读，走副本，可能落后。
+
+计数器和索引是两个 key，读计数器不和任何一次读在同一个快照里：只能用来发现有新号、监控
+积压、报警，**不能**拿来把游标推过没见到行的号。库外消费方的写法见 `seq_read`。
+
+
+**Parameters**
+
+- **`group`** (Any) — 分组值 {分组列: 值}，规则同 `range` 的 `group`：带 groupby 的必须正好给出全部分组列，
+不带 groupby 的不给。
+
+
+
+
+**Returns**
+
+这一组最近发出的号，没发过号是 0。
+
+
+
+
+
+
+**Notes**
+
+Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
+
+
+
+#### `servant_seq_head_many`
+
+```python
+servant_seq_head_many(
+    groups: collections.abc.Sequence[collections.abc.Mapping[str, typing.Any] | None],
+) -> list[int]
+```
+
+<small>Source: [`hetu/data/backend/base.py:1286`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1286)</small>
+
+Read the latest numbers issued by many commit_seq groups in one round trip.
+
+批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
+一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。有一个计数器被写坏，
+整批抛 RuntimeError。
+
+
+**Parameters**
+
+- **`groups`** (Any) — 每一项是一个组的分组值，规则同 `seq_head` 的 `group`。
+
+
+
+
+**Returns**
+
+每个组最近发出的号，没发过号是 0，顺序同 `groups`。
+
+
+
+
+
+
+
+
+#### `servant_seq_read`
+
+```python
+servant_seq_read(
+    after: int,
+    limit: int = 100,
+    *,
+    group: collections.abc.Mapping[str, Any] | None = None,
+    after_id: int | None = None,
+    row_format=<RowFormat.STRUCT: 1>,
+) -> hetu.data.backend.base.SeqReadResult[typing.Any]
+```
+
+<small>Source: [`hetu/data/backend/base.py:1363`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1363)</small>
+
+Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
+
+给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
+不需要 master。
+
+一次读钉在一个节点上：先一条 ZRANGE 读这一组在 `after` 之后的 member（这个节点上的原子快照），
+再从同一个节点取行。号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行
+已经不在了，所以：
+
+- 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
+  (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
+- 取行时读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：停在它
+  前面，它记为 `blocked`，下次再读；
+- 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
+
+注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
+小于所有消费方**已经落盘的**游标的行，删之前先核对，见文档"binlog 式同步"一节。
+
+
+**Parameters**
+
+- **`after`** (Any) — 游标，也就是最后处理过的那一号；从头读给 0。0 <= after < 2^53。
+
+- **`limit`** (Any) — 最多返回的行数，正整数。一次读太多会长时间占住副本，一般几百到几千行。
+
+- **`group`** (Any) — 分组值 {分组列: 值}，规则同 `range` 的 `group`。
+
+- **`after_id`** (Any) — 游标那一号的行的雪花 id（锚点）。给了就核对序列：游标那一号换了一行、游标那一行没了而
+后面有号、组里有重号，都抛 [`CommitSeqDiverged`](exceptions.md#commitseqdiverged)。给的时候 `after` 必须 >= 1。不给就不核对，
+也就发现不了号被复用。
+
+- **`row_format`** (Any) — 返回数据解码格式，同 `range`，但不支持 `RowFormat.ID_LIST`。
+
+
+
+
+**Returns**
+
+``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
+``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：读的那个节点上
+`after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+
+
+
+
+
+
+
+
 #### `direct_set`
 
 ```python
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1162`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1162)</small>
+<small>Source: [`hetu/data/backend/base.py:1427`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1427)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

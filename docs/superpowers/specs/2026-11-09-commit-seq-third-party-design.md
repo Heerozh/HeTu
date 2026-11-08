@@ -1,7 +1,7 @@
 # 提交序号列的库外消费方（`servant_seq_*`）— 设计稿
 
 - 日期：2026-11-09
-- 状态：过了一轮两路独立审核（§13），已按审核意见改写；待实现。
+- 状态：已实现（§14），设计过了一轮两路独立审核（§13），已按审核意见改写。
   - 用户已定（2026-11-09）：读计数器和封装好的增量读都做。审核之后改了的命名和返回值见 §13。
 - 分支：`feat/commit-seq-third-party`（基于 dev `fce72f5b`）
 - 前置：提交序号列（PR #215，`2026-11-09-commit-seq-design.md`，下称"原稿"）
@@ -398,3 +398,34 @@ async def poll_all(owners: list[int]) -> None:
 - A1 的"读写分离代理下第一行读不到时单独重取几次"、B4 的"单独的探测方法"：见 §7。
 - B7 的 `limit` 上限：不设，文档写明代价。
 - B12 的缓存组 key：先不做，每组约 3µs，组多时先降轮询频率。
+
+## 14. 实现记录（2026-11-09）
+
+按 §12 的顺序实现，每步一个提交、带测试：
+
+1. 读计数器：`6f2979a1`
+2. 增量读：`18fc35f9`
+3. 守门：`90db0f7b`
+4. §6 写法的用例、headless 端到端：`a4390bdb`
+5. 文档、`scripts/api_extras.py`、`docs/api`，以及本节：最后一个提交
+
+和本稿写法不同的地方：
+
+- **整数解析放在 `base.py`**（`parse_redis_int_`），不在 `redis_model.py`：SQLite 的 `store.py` 不依赖模型层，从 `base` 导入不会循环。
+- **钉节点不给原语加 `node` 参数**：改成 `pinned_reader_(key)` 返回一个带 `zrange_bylex_`、`hgetall_many_` 的对象（`SeqReader` 协议）。非 cluster 返回自己；原生 cluster 返回 `_PinnedClusterReader`，两条原语都带 `target_nodes` 发给选定的节点。热路径上的原语一个字没改。§5.1 里的 `seq_read_node_` 就是它。
+- **cluster 下的 master 连接**选 primary（不带负载策略），servant 连接才用 `RANDOM_REPLICA`。
+- **`reason` 的区分**：号等于 `after` 的 member 里，锚点还在、另有别的行时是 `duplicate`；锚点不在、这一号是别的行时是 `reused`。
+- `SeqReadResult` 用 PEP 695 的泛型 NamedTuple（`class SeqReadResult[RowsT](NamedTuple)`）。
+
+**手工验证多副本 cluster**（§9 最后一条，按审核 A1 的做法）：3 个节点配成 1 主 2 从，写入 1..10 号并同步之后，把其中一个副本的 masterauth 改错、断开复制，它停在 10 号；再写入 11..20 号。从游标 (10, id) 轮询 30 轮：
+
+| 读法 | 只读 | 先读计数器再读 |
+|---|---|---|
+| `servant_seq_read`（钉在随机选的副本上） | 第一轮就推进到 20 | 第一轮就推进到 20 |
+| 对照：不钉节点，ZRANGE 和取行各自按命令轮询副本 | 30 轮都停在 10 | 30 轮都停在 10 |
+
+验证时顺带撞上了 §8 记的既有问题：副本在主库还没有任何写入时同步，复制偏移是 0，CLUSTER SLOTS 不列它们，HeTu 的 servant 客户端只认得 primary，所有 servant 读都落到了 master。先往主库写一笔、等副本的偏移大于 0 再建客户端，才认出两个副本。
+
+测试：`tests/test_commit_seq_servant.py` 在 sqlite、redis、valkey、redis_cluster 上全部通过（cluster 钉节点的用例只在 redis_cluster 上跑）；守门与读预算用例通过；四个后端全量 3100 个通过、6 个跳过（`pytest==9.1.1 -n 8`）。
+
+没有做的：重建索引时报告孤儿行（§8）、`limit` 上限、缓存组 key、§8 记的 cluster 客户端认不出新副本的既有问题。
