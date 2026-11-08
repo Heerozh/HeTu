@@ -225,9 +225,12 @@ class SQLiteTableMaintenance(TableMaintenance):
         )
 
     @override
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义，不动表数据"""
-        meta = self._meta_of(table_ref)
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据，见基类"""
+        instance, comp, json_, schema_version, cluster_id = self._meta_of(table_ref)
+        meta = (instance, comp, json_, version or schema_version, cluster_id)
 
         def _update(store: SQLiteStore):
             with store.write_txn():

@@ -285,6 +285,11 @@ def member_value_(member: bytes) -> bytes:
     return member[: -ROW_ID_TOKEN_LEN - 1]
 
 
+# 迁移脚本搬完了数据、重建索引却失败时（unique 冲突、提交序号列组内重复……）写进 meta 的版本号。
+# 这时数据已经是新定义的、索引没建成、提交序号列的计数器也没校准：版本号故意和任何定义都对不上，
+# 服务器拒绝启动；修好数据后再跑 hetu upgrade，会按当前定义直接重建
+REBUILD_PENDING_VERSION = "rebuild-pending"
+
 # 提交序号列（commit_seq）的号的上限（不含）：提交脚本里的数是 Lua 的 double，再往上不精确。
 # 提交时到了上限返回 SEQ 失败，重建时库里已有的号到了上限报错
 COMMIT_SEQ_LIMIT = 1 << 53
@@ -1320,8 +1325,13 @@ class TableMaintenance:
         """
         raise NotImplementedError
 
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据"""
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """
+        把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据。version
+        不给时按定义算；迁移搬完数据却没能重建索引时，写 `REBUILD_PENDING_VERSION`
+        """
         raise NotImplementedError
 
     # === === ===
@@ -1503,10 +1513,19 @@ class TableMaintenance:
         if meta.version == schema_version_(comp_cls.json_):
             return  # 迁移脚本已按当前定义重建了表
         stored = BaseComponent.load_json(meta.json)
+        if meta.version == REBUILD_PENDING_VERSION:
+            # 上次迁移脚本搬完了数据、重建索引却失败了（见 MigrationScript.upgrade）
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 上次迁移搬完数据后重建索引失败，"
+                    "这次已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
         # 分组列也要比：给已有索引加 / 去 groupby 时 indexes_、uniques_ 都不变，不重建的话
         # 库里留着旧格式的 member。提交序号列也要比：给已有索引的字段打开 commit_seq 时上面几项
         # 都不变，不重建的话计数器没人校准，会从 1 开始发、撞上已有的号
-        if (
+        elif (
             stored.indexes_,
             stored.uniques_,
             stored.index_groups_,

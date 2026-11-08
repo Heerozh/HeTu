@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from hetu.data import BaseComponent
 from hetu.i18n import _
 
-from .backend.base import schema_version_, schema_versions_
+from .backend.base import REBUILD_PENDING_VERSION, schema_version_, schema_versions_
 from .backend.table import TableReference
 
 if TYPE_CHECKING:
@@ -214,7 +214,21 @@ class MigrationScript:
                     "  ✔️ [💾MIGRATION][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
                 ).format(comp_name=self.ref.comp_name, count=len(row_ids))
             )
-            maint.do_rebuild_index_(target_table)
+            try:
+                maint.do_rebuild_index_(target_table)
+            except Exception as exc:
+                # 数据已经按新定义搬完（默认脚本连原表都删了），meta 也已经是新定义的版本：不管的话
+                # 服务器照常启动，而索引没建成、提交序号列的计数器没校准（会发出重号）。把版本号
+                # 标成对不上的值，服务器拒绝启动，修好数据后再跑 hetu upgrade 会直接重建
+                maint.do_update_meta_(target_table, version=REBUILD_PENDING_VERSION)
+                raise RuntimeError(
+                    _(
+                        "[💾MIGRATION][{comp_name}组件] 数据已经按新定义搬完，但重建索引失败："
+                        "{error}。在修好之前服务器会拒绝启动：请直接修改表里的数据（比如用 "
+                        "TableMaintenance 的 upsert_row 给重复的号重新编号），再跑一次 hetu "
+                        "upgrade，它会按当前定义直接重建索引"
+                    ).format(comp_name=self.ref.comp_name, error=exc)
+                ) from exc
             logger.warning(
                 _("  ✔️ [💾MIGRATION][{comp_name}组件] 已重建Index").format(
                     comp_name=self.ref.comp_name

@@ -18,6 +18,7 @@ from fixtures.backends import (
     raw_kv_keys,
     raw_kv_set,
     raw_seq_counter_key,
+    use_redis_backend_only,
     use_redis_family_backend_only,
 )
 from fixtures.testdata import create_ref
@@ -818,17 +819,26 @@ async def test_cluster_migration_moves_counters(guild_log_ref, mod_auto_backend)
     assert [int(seq) for seq in rows.seq] == [1, 2, 4]
 
 
-def _ledger(commit_seq: bool):
-    """Ledger：seq 按 owner 分组的复合索引，commit_seq 开关可选（迁移前后两个版本）"""
+def _ledger(commit_seq: bool, extra: bool = False, groupby: str = "owner"):
+    """
+    Ledger：seq 按 owner（或 guild）分组的复合索引，commit_seq 开关可选（迁移前后两个版本），
+    extra 多一列（改 dtype，走默认迁移脚本）
+    """
     from hetu.data import BaseComponent, define_component, property_field
 
-    @define_component(namespace="pytest", force=True)
-    class Ledger(BaseComponent):
-        owner: np.int64 = property_field(0, index=True)
-        seq: np.int64 = property_field(0, commit_seq=commit_seq, groupby="owner")
-        kind: np.int16 = property_field(0)
-
-    return Ledger
+    annotations = {"owner": np.int64, "guild": np.int64, "seq": np.int64}
+    namespace = {
+        "owner": property_field(0, index=True),
+        "guild": property_field(0),
+        "seq": property_field(0, commit_seq=commit_seq, groupby=groupby),
+    }
+    annotations["kind"], namespace["kind"] = np.int16, property_field(0)
+    if extra:
+        annotations["extra"], namespace["extra"] = np.int32, property_field(7)
+    namespace["__annotations__"] = annotations
+    return define_component(namespace="pytest", force=True)(
+        type("Ledger", (BaseComponent,), namespace)
+    )
 
 
 async def _fill_ledger(backend: Backend, comp, rows: dict[int, list[int]]) -> None:
@@ -843,11 +853,14 @@ async def _fill_ledger(backend: Backend, comp, rows: dict[int, list[int]]) -> No
     await backend.wait_for_synced()
 
 
-def _enable_commit_seq(backend: Backend, tmp_path):
-    """给 Ledger 已有的 seq 字段打开 commit_seq，跑迁移（dtype 不变，走 skip 路径）"""
+def _enable_commit_seq(backend: Backend, tmp_path, **define):
+    """
+    给 Ledger 已有的 seq 字段打开 commit_seq，跑迁移。只改这一项时 dtype 不变、走 skip 路径；
+    define 可以另加 extra（改 dtype，走默认迁移脚本）、换 groupby
+    """
     from hetu.data.backend import Table
 
-    new_comp = _ledger(commit_seq=True)
+    new_comp = _ledger(commit_seq=True, **define)
     table = Table(new_comp, "pytest", 1, backend)
     maint = backend.get_table_maintenance()
     status, old_meta = maint.check_table(table)
@@ -926,6 +939,96 @@ async def test_enable_commit_seq_rejects_bad_numbers(
     assert raw_index_members(backend, ref, "seq") == before
     assert raw_kv_keys(backend, backend.master.cluster_prefix(ref) + ":seq:") == []
     assert backend.get_table_maintenance().check_table(table)[0] == "schema_mismatch"
+
+
+async def test_dtype_migration_rebuild_failure_refuses_to_start(
+    new_component_env, mod_auto_backend, tmp_path
+):
+    """
+    改 dtype 的迁移（加一列）同时给已有字段打开 commit_seq，组内又有重复号：默认迁移脚本已经把
+    数据搬完，重建失败时 meta 标成待重建，服务器拒绝启动（check_table 不是 ok），不会带着没建成
+    的索引发出重号。修好数据再跑一次 upgrade，按当前定义直接重建
+    """
+    from hetu.data.backend.base import REBUILD_PENDING_VERSION
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(_ledger(commit_seq=False), backend)
+    await _fill_ledger(backend, ref.comp_cls, {7: [1, 2, 2]})
+
+    new_comp, table, migrate = _enable_commit_seq(backend, tmp_path, extra=True)
+    with pytest.raises(RuntimeError, match="组内重复的号"):
+        migrate()
+    maint = backend.get_table_maintenance()
+    status, meta = maint.check_table(table)
+    assert status == "schema_mismatch"
+    assert meta is not None and meta.version == REBUILD_PENDING_VERSION
+
+    # 修数据：后一个 2 号改成 3 号，再跑一次 upgrade
+    rows = [maint.get(table, row_id) for row_id in maint.get_all_row_id(table)]
+    twos = sorted((row for row in rows if row.seq == 2), key=lambda row: row.id)
+    twos[1].seq = 3
+    maint.upsert_row(table, twos[1])
+    assert maint.migration_schema(tmp_path / "app.py", table, meta)
+    assert maint.check_table(table)[0] == "ok"
+    await backend.wait_for_synced()
+    assert _counter(backend, table, owner=7) == 3
+    row = new_comp.new_row()
+    row.owner = 7
+    await _insert(backend, new_comp, row)
+    assert [int(r.seq) for r in await _read_all(backend, new_comp, 7)] == [1, 2, 3, 4]
+
+
+async def test_change_groupby_recalibrates_new_counters(
+    new_component_env, mod_auto_backend, tmp_path
+):
+    """
+    改 commit_seq 字段的 groupby（owner → guild）：新分组用新的计数器 key，按数据校准，旧 key 留着；
+    原来的号在新分组里重复时报错，什么都不动
+    """
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(_ledger(commit_seq=True), backend)
+    comp = ref.comp_cls
+    for owner, guild in ((7, 1), (7, 1), (8, 2)):
+        row = comp.new_row()
+        row.owner, row.guild = owner, guild
+        await _insert(backend, comp, row)
+    old_keys = raw_kv_keys(backend, backend.master.cluster_prefix(ref) + ":seq:")
+    assert len(old_keys) == 2
+
+    _new_comp, table, migrate = _enable_commit_seq(backend, tmp_path, groupby="guild")
+    assert migrate()
+    await backend.wait_for_synced()
+    assert _counter(backend, table, guild=1) == 2
+    assert _counter(backend, table, guild=2) == 1
+    keys = raw_kv_keys(backend, backend.master.cluster_prefix(ref) + ":seq:")
+    assert set(old_keys) < set(keys)  # 旧 key 留着
+
+    # 另一份数据：两个 owner 各自的 1 号都在 guild 1，改按 guild 分组就重复了
+    ref2 = create_ref(_ledger(commit_seq=True), backend)
+    for owner, guild in ((7, 1), (8, 1)):
+        row = ref2.comp_cls.new_row()
+        row.owner, row.guild = owner, guild
+        await _insert(backend, ref2.comp_cls, row)
+    before = raw_index_members(backend, ref2, "seq")
+    _new_comp, table2, migrate2 = _enable_commit_seq(backend, tmp_path, groupby="guild")
+    with pytest.raises(RuntimeError, match="组内重复的号"):
+        migrate2()  # guild 1 里两行都是 1 号
+    assert raw_index_members(backend, ref2, "seq") == before
+    assert backend.get_table_maintenance().check_table(table2)[0] == "schema_mismatch"
+
+
+@use_redis_backend_only
+async def test_counters_calibrated_before_swap(log_ref, mod_auto_backend, monkeypatch):
+    """先校准计数器、再换上索引：换上那一步出错时，计数器已经校准好了（只往上调不会发出重号）"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    await _insert(backend, comp, _log(comp, 7), _log(comp, 7), _log(comp, 7))
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=7), b"1")
+    maint = backend.get_table_maintenance()
+    monkeypatch.setattr(maint, "_RENAME_LUA", "return redis.error_reply('boom')")
+    with pytest.raises(Exception, match="boom"):
+        maint.do_rebuild_index_(log_ref)
+    assert _counter(backend, log_ref, owner=7) == 3
 
 
 async def test_rebuild_only_raises_counters(log_ref, mod_auto_backend):

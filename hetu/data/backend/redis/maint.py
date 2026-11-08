@@ -206,12 +206,14 @@ class RedisTableMaintenance(TableMaintenance):
         )
 
     @override
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义，不动表数据"""
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据，见基类"""
         json_ = table_ref.comp_cls.json_
         meta: dict[FieldT, EncodableT] = {
             "json": json_,
-            "version": schema_version_(json_),
+            "version": version or schema_version_(json_),
             "cluster_id": table_ref.cluster_id,
         }
         self.client.io.hset(self.meta_key(table_ref), mapping=meta)
