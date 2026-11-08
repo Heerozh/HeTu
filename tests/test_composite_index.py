@@ -1041,19 +1041,60 @@ async def test_rebuild_index_empty_table_drops_group_keys(slot_ref, mod_auto_bac
 
 
 @use_redis_backend_only
+async def test_rebuild_index_swap_failure_keeps_old_keys(
+    slot_ref, mod_auto_backend, monkeypatch
+):
+    """
+    Redis 重建在换上阶段出错（比如超时）：先 RENAME 换上、后删残留，所以出错的那个索引原来的 key
+    还在，回退到旧定义照样能读。重跑一次就恢复，留下的临时 key 在下次重建开头清掉
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    await _insert(
+        backend, comp, _slot(comp, zone=1, level=1), _slot(comp, zone=2, level=2)
+    )
+    maint = backend.get_table_maintenance()
+    io = maint.client.io  # type: ignore[attr-defined]
+    # 模拟单列改复合：库里 level 只有单列格式的 key
+    level_key = backend.master.index_key(slot_ref, "level")
+    io.delete(*raw_index_zset_keys(backend, slot_ref, "level"))
+    raw_zadd(backend, level_key, b"old\x001")
+    original_eval = io.eval
+
+    def flaky_eval(script, numkeys, *names):
+        if any(":rebuilding:level:" in name for name in names[:numkeys]):
+            raise TimeoutError("boom")
+        return original_eval(script, numkeys, *names)
+
+    monkeypatch.setattr(io, "eval", flaky_eval)
+    with pytest.raises(TimeoutError, match="boom"):
+        maint.do_rebuild_index_(slot_ref)
+    assert raw_index_zset_keys(backend, slot_ref, "level") == [level_key]
+
+    monkeypatch.undo()
+    assert maint.do_rebuild_index_(slot_ref) == 2
+    keys = raw_index_zset_keys(backend, slot_ref, "level")
+    assert len(keys) == 2 and level_key not in keys
+    index_keys = sum(
+        len(raw_index_zset_keys(backend, slot_ref, name)) for name in comp.indexes_
+    )
+    assert raw_key_count(backend, slot_ref) == 2 + index_keys  # 临时 key 都清掉了
+
+
+@use_redis_backend_only
 async def test_rebuild_index_error_before_first_tmp_key(
     slot_ref, mod_auto_backend, monkeypatch
 ):
     """
     Redis 重建索引一开始就出错（还没建任何临时 key）：抛出原来的异常；清理没有要删的 key，
-    不发不带参数的 DEL（那会再抛一个异常，盖住原来的）
+    不发不带参数的 UNLINK（那会再抛一个异常，盖住原来的）
     """
     backend: Backend = mod_auto_backend()
     comp = slot_ref.comp_cls
     await _insert(backend, comp, _slot(comp, zone=1, level=1))
     maint = backend.get_table_maintenance()
     io = maint.client.io  # type: ignore[attr-defined]
-    original_pipeline, original_delete = io.pipeline, io.delete
+    original_pipeline, original_delete = io.pipeline, io.unlink
     deletes: list[tuple] = []
 
     def failing_pipeline(*args, **kwargs):
@@ -1070,7 +1111,7 @@ async def test_rebuild_index_error_before_first_tmp_key(
         return original_delete(*keys)
 
     monkeypatch.setattr(io, "pipeline", failing_pipeline)
-    monkeypatch.setattr(io, "delete", recording_delete)
+    monkeypatch.setattr(io, "unlink", recording_delete)
     with pytest.raises(ConnectionError, match="boom"):
         maint.do_rebuild_index_(slot_ref)
     assert all(deletes), deletes

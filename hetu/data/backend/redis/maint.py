@@ -230,9 +230,12 @@ class RedisTableMaintenance(TableMaintenance):
     REBUILD_BATCH = 10000
 
     def _delete_keys(self, keys: list[str]) -> None:
-        """分批 DEL（复合索引的组 key 可能很多，一条命令塞不下）。空列表什么也不做"""
+        """
+        分批 UNLINK：旧的单列索引可能很大，DEL 会阻塞 Redis；复合索引的组 key 可能很多，一条命令
+        塞不下。空列表什么也不做（不带参数的命令会报错，盖住调用方要抛的异常）
+        """
         for batch in batched(keys, 1000):
-            self.client.io.delete(*batch)
+            self.client.io.unlink(*batch)
 
     def _index_zset_keys(self, table_ref: TableReference, idx_name: str) -> list[str]:
         """这个索引名下现有的所有 zset key：单列索引的那一个，以及复合索引的各组 key"""
@@ -249,13 +252,14 @@ class RedisTableMaintenance(TableMaintenance):
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
         按行数据重建组件表的索引，返回行数。分两阶段：先把每个索引都建到临时 key、通过 unique
-        检查，全部建好之后再统一 RENAME 覆盖旧索引。中途失败（中断、超时、unique 冲突）所有旧
-        索引原样保留：逐个建、逐个换的话，后面的索引失败时前面的已经换成新定义的格式（比如复合
-        索引），而 meta 还是旧定义，回退代码就读不懂了。
+        检查，全部建好之后再统一 RENAME 覆盖旧索引。建的阶段失败（中断、超时、unique 冲突）所有
+        旧索引原样保留：逐个建、逐个换的话，后面的索引失败时前面的已经换成新定义的格式（比如复合
+        索引），而 meta 还是旧定义，回退代码就读不懂了。换上阶段很短，在那里出错时，已换上的索引
+        是新的，出错的索引原来的 key 还在（先换上、后删残留），重跑一次即可恢复（设计稿 §14.6）。
 
-        复合索引每组一个 zset，按组建临时 key；换上之前，删掉这个索引名下不在新结果里的 key：
+        复合索引每组一个 zset，按组建临时 key；换上之后，删掉这个索引名下不在新结果里的 key：
         已经空了的旧组、改成复合之前的单个 key、改回单列之前的组 key。表里一行都没有时，索引里
-        剩下的都是残留，直接删掉。
+        剩下的都是残留，直接删掉。上次中断留下的临时 key 在开头清掉。
         """
         from .client import RedisBackendClient
 
@@ -335,17 +339,19 @@ class RedisTableMaintenance(TableMaintenance):
             )
             raise
         for idx_name, targets in renames.items():
+            # 先换上、后删残留：换到一半出错（超时、中断）时，这个索引原来的 key 还在，回退到旧
+            # 定义照样能读。一批一条脚本：少些往返，一批之内是原子的。cluster 模式的管道不让发
+            # RENAME，脚本的 key 都带同一个 {CLU} hash tag，在同一个 slot
+            for batch in batched(targets.items(), self.REBUILD_BATCH):
+                names = [name for zset_key, tmp in batch for name in (tmp, zset_key)]
+                io.eval(self._RENAME_LUA, len(names), *names)
+            # 这个索引名下不在新结果里的：空了的旧组、另一种格式的 key
             stale = [
                 key
                 for key in self._index_zset_keys(table_ref, idx_name)
                 if key not in targets
             ]
             self._delete_keys(stale)
-            # 一批一条脚本：少些往返，一批之内是原子的。cluster 模式的管道不让发 RENAME，脚本的
-            # key 都带同一个 {CLU} hash tag，在同一个 slot
-            for batch in batched(targets.items(), self.REBUILD_BATCH):
-                names = [name for zset_key, tmp in batch for name in (tmp, zset_key)]
-                io.eval(self._RENAME_LUA, len(names), *names)
         return len(keys)
 
     # KEYS 依次是 (临时 key, 目标 key) 对
