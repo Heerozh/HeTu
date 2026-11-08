@@ -25,11 +25,8 @@ import msgpack
 import numpy as np
 
 from ....i18n import _
-from ..base import ROW_ID_TOKEN_LEN, to_sortable_bytes
+from ..base import COMMIT_SEQ_LIMIT, ROW_ID_TOKEN_LEN, to_sortable_bytes
 from .store import KEYSPACE_PREFIX, SQLiteStore
-
-# 提交序号列的上限：再往上 Lua 的 double 不精确（见 commit_v2.lua）
-SEQ_LIMIT = 2**53
 
 
 def _lua_str(value: Any) -> bytes:
@@ -120,7 +117,7 @@ def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
         if current is None:
             return b"SEQ: ERR value is not an integer or out of range " + counter_key
         last = current + count
-        if last >= SEQ_LIMIT:
+        if last >= COMMIT_SEQ_LIMIT:
             return b"SEQ: Counter overflow " + counter_key
         pending.append((counter_key.decode(), last, current + 1))
     for key, last, _first in pending:

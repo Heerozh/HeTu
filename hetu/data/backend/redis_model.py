@@ -22,6 +22,7 @@ import numpy as np
 
 from ...i18n import _
 from .base import (
+    COMMIT_SEQ_LIMIT,
     BackendClient,
     InconsistentRangeRead,
     RaceCondition,
@@ -61,6 +62,89 @@ MAX_VERSION = 2**31 - 1
 # upsert(id=)、按 key 的未来调用），读到旧行的事务提交时 VER 才不会把新行当成旧行（ABA）。
 # 范围不取大，给 int32 留足改动次数的余量
 FIRST_VERSION_SPAN = 1 << 24
+
+
+class CommitSeqScan:
+    """
+    重建索引时统计提交序号列（commit_seq）：每组最大的号、组内重复的号、到了上限的号。两个后端的
+    `do_rebuild_index_` 在建的阶段逐行 `add`，建完先 `raise_for_problems`（有问题就报错，所有旧
+    索引、计数器原样保留），再按 `counters()` 把计数器只升不降地校准到每组最大的号，然后才换上
+    索引（先校准：换上之后、校准之前进程被杀的话，计数器低于库里的数据，会发出重号）。
+
+    号 ≤ 0 表示没有号（新加 commit_seq 列时历史行填的 0），不参与统计。
+    """
+
+    # 报错里最多列出几组
+    MAX_LISTED = 10
+
+    def __init__(self, comp_cls: type[BaseComponent], comp_name: str) -> None:
+        field = comp_cls.commit_seq_
+        assert field is not None
+        self.comp_cls = comp_cls
+        self.comp_name = comp_name
+        self.field = field
+        self.groups = comp_cls.index_groups_[field]
+        self.max_by_prefix: dict[bytes, int] = {}
+        self._seen: set[tuple[bytes, int]] = set()
+        self.duplicates: list[str] = []
+        self.overflows: list[str] = []
+
+    def _describe(self, struct: np.record, seq: int) -> str:
+        values = ", ".join(f"{col}={struct[col].item()!r}" for col in self.groups)
+        return f"({values}{', ' if values else ''}{self.field}={seq})"
+
+    def add(self, struct: np.record, member: bytes) -> None:
+        """一行：struct 是这一行（至少分组列和本字段已按 dtype 转好），member 是它在这个索引上的"""
+        seq = int(struct[self.field])
+        if seq <= 0:
+            return
+        # 值段是 P + 号的 8 字节编码
+        prefix = member_value_(member)[:-8]
+        if seq >= COMMIT_SEQ_LIMIT and len(self.overflows) < self.MAX_LISTED:
+            self.overflows.append(self._describe(struct, seq))
+        if (prefix, seq) in self._seen:
+            if len(self.duplicates) < self.MAX_LISTED:
+                self.duplicates.append(self._describe(struct, seq))
+            return
+        self._seen.add((prefix, seq))
+        if seq > self.max_by_prefix.get(prefix, 0):
+            self.max_by_prefix[prefix] = seq
+
+    def raise_for_problems(self) -> None:
+        """组内有重复的号、有号到了上限：报错，要求先写迁移脚本重新编号"""
+        if self.duplicates:
+            raise RuntimeError(
+                _(
+                    "组件{comp_name}的提交序号列`{field}`在重建索引时发现组内重复的号：{rows}"
+                    "（最多列出{limit}个）。重复的号会让消费方静默漏掉后一行，请先写迁移脚本"
+                    "重新编号。"
+                ).format(
+                    comp_name=self.comp_name,
+                    field=self.field,
+                    rows=", ".join(self.duplicates),
+                    limit=self.MAX_LISTED,
+                )
+            )
+        if self.overflows:
+            raise RuntimeError(
+                _(
+                    "组件{comp_name}的提交序号列`{field}`在重建索引时发现号达到了上限 2^53："
+                    "{rows}（最多列出{limit}个），之后这些组每次提交都会失败。请先写迁移脚本"
+                    "重新编号。"
+                ).format(
+                    comp_name=self.comp_name,
+                    field=self.field,
+                    rows=", ".join(self.overflows),
+                    limit=self.MAX_LISTED,
+                )
+            )
+
+    def counters(self, cluster_prefix: str) -> list[tuple[str, int]]:
+        """[(计数器 key, 这一组最大的号)]，没有行的组不在里面（计数器不动）"""
+        return [
+            (RedisModelClient.seq_counter_key_(cluster_prefix, self.comp_cls, p), seq)
+            for p, seq in self.max_by_prefix.items()
+        ]
 
 
 class RedisModelClient(BackendClient):

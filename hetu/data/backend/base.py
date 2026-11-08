@@ -285,6 +285,10 @@ def member_value_(member: bytes) -> bytes:
     return member[: -ROW_ID_TOKEN_LEN - 1]
 
 
+# 提交序号列（commit_seq）的号的上限（不含）：提交脚本里的数是 Lua 的 double，再往上不精确。
+# 提交时到了上限返回 SEQ 失败，重建时库里已有的号到了上限报错
+COMMIT_SEQ_LIMIT = 1 << 53
+
 # 索引的存储格式版本，并进表的 schema 版本号（见 `schema_version_`）。member 的编码一变就加一：
 # 旧库每张表的版本号都对不上，服务器拒绝启动，`hetu upgrade` 按新格式重建索引。
 # 1：id 段是不补零的十进制；2：id 段定宽（`ROW_ID_TOKEN_LEN`）
@@ -1500,11 +1504,18 @@ class TableMaintenance:
             return  # 迁移脚本已按当前定义重建了表
         stored = BaseComponent.load_json(meta.json)
         # 分组列也要比：给已有索引加 / 去 groupby 时 indexes_、uniques_ 都不变，不重建的话
-        # 库里留着旧格式的 member
-        if (stored.indexes_, stored.uniques_, stored.index_groups_) != (
+        # 库里留着旧格式的 member。提交序号列也要比：给已有索引的字段打开 commit_seq 时上面几项
+        # 都不变，不重建的话计数器没人校准，会从 1 开始发、撞上已有的号
+        if (
+            stored.indexes_,
+            stored.uniques_,
+            stored.index_groups_,
+            stored.commit_seq_,
+        ) != (
             comp_cls.indexes_,
             comp_cls.uniques_,
             comp_cls.index_groups_,
+            comp_cls.commit_seq_,
         ):
             self.do_rebuild_index_(table_ref)
             logger.warning(

@@ -625,3 +625,265 @@ async def test_pending_rows_not_on_seq_index(log_ref, mod_auto_backend):
         assert [int(seq) for seq in rest.seq] == [2]
     await backend.wait_for_synced()
     assert await _seqs(backend, comp, owner=7) == [(2, 2), (3, 3)]
+
+
+# ---------------------------------------------------------------- 维护
+
+
+def _redefine_log(extra_field: bool = False, groupby="owner"):
+    """重新定义同名的 Log（force 覆盖），可以多一列 extra、换分组列"""
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    annotations = {
+        "owner": np.int64,
+        "guild": np.int64,
+        "seq": np.int64,
+        "kind": np.int16,
+        "uid": np.int64,
+    }
+    namespace = {
+        "owner": property_field(0, index=True),
+        "guild": property_field(0),
+        "seq": property_field(0, commit_seq=True, groupby=groupby),
+        "kind": property_field(0),
+        "uid": property_field(0, unique=True),
+    }
+    if extra_field:
+        annotations["extra"] = np.int32
+        namespace["extra"] = property_field(7)
+    namespace["__annotations__"] = annotations
+    return define_component(namespace="pytest", permission=Permission.USER, force=True)(
+        type("Log", (BaseComponent,), namespace)
+    )
+
+
+async def _delete_seqs(backend: Backend, comp, owner: int, seqs) -> None:
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for seq in seqs:
+            row = await repo.get(seq=seq, owner=owner)
+            repo.delete(row.id)
+    await backend.wait_for_synced()
+
+
+@pytest.fixture
+async def guild_log_ref(new_component_env, mod_auto_backend) -> TableReference:
+    return create_ref(_redefine_log(), mod_auto_backend())
+
+
+async def test_dtype_migration_keeps_counters(
+    guild_log_ref, mod_auto_backend, tmp_path
+):
+    """
+    改 dtype 的迁移（这里是加一列，走默认迁移脚本：原表改名到临时表、建新表、拷行、删临时表）之后，
+    计数器还在：组内最大号被删了的组、整组删光了的组，都接着原来的号发，不复用
+    """
+    from hetu.data.backend import Table
+
+    backend: Backend = mod_auto_backend()
+    comp = guild_log_ref.comp_cls
+    await _insert(backend, comp, *(_log(comp, 7) for _ in range(5)))
+    await _insert(backend, comp, *(_log(comp, 8) for _ in range(3)))
+    await _delete_seqs(backend, comp, 7, (4, 5))
+    await _delete_seqs(backend, comp, 8, (1, 2, 3))
+
+    new_comp = _redefine_log(extra_field=True)
+    table = Table(new_comp, "pytest", 1, backend)
+    maint = backend.get_table_maintenance()
+    status, old_meta = maint.check_table(table)
+    assert status == "schema_mismatch"
+    assert maint.migration_schema(tmp_path / "app.py", table, old_meta)
+    assert maint.check_table(table)[0] == "ok"
+    await backend.wait_for_synced()
+
+    await _insert(backend, new_comp, _log(new_comp, 7), _log(new_comp, 8))
+    assert [seq for seq, _kind in await _seqs(backend, new_comp, owner=7)] == [
+        1,
+        2,
+        3,
+        6,
+    ]
+    assert [seq for seq, _kind in await _seqs(backend, new_comp, owner=8)] == [4]
+    # 临时表名下没有留下计数器
+    temp = TableReference(new_comp.duplicate("pytest", "__temp__"), "pytest", 1)
+    assert raw_kv_keys(backend, backend.master.all_clusters_prefix(temp)) == []
+
+
+async def test_cluster_migration_moves_counters(guild_log_ref, mod_auto_backend):
+    """换簇（组件名不变）时计数器跟着搬到新簇下，接着发"""
+    from hetu.data.backend import Table
+
+    backend: Backend = mod_auto_backend()
+    comp = guild_log_ref.comp_cls
+    await _insert(backend, comp, *(_log(comp, 7) for _ in range(3)))
+    await _delete_seqs(backend, comp, 7, (3,))
+
+    table = Table(comp, "pytest", 2, backend)
+    maint = backend.get_table_maintenance()
+    status, old_meta = maint.check_table(table)
+    assert status == "cluster_mismatch"
+    maint.migration_cluster_id(table, old_meta)
+    assert raw_kv_keys(backend, backend.master.cluster_prefix(guild_log_ref)) == []
+    async with backend.session("pytest", 2) as session:
+        await session.using(comp).insert(_log(comp, 7))
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 2) as session:
+        rows = await session.using(comp).range(seq=(-np.inf, np.inf), owner=7, limit=-1)
+    assert [int(seq) for seq in rows.seq] == [1, 2, 4]
+
+
+def _ledger(commit_seq: bool):
+    """Ledger：seq 按 owner 分组的复合索引，commit_seq 开关可选（迁移前后两个版本）"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class Ledger(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        seq: np.int64 = property_field(0, commit_seq=commit_seq, groupby="owner")
+        kind: np.int16 = property_field(0)
+
+    return Ledger
+
+
+async def _fill_ledger(backend: Backend, comp, rows: dict[int, list[int]]) -> None:
+    """按 {owner: [号, …]} 写入（commit_seq 关着时号可以随便写）"""
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for owner, seqs in rows.items():
+            for seq in seqs:
+                row = comp.new_row()
+                row.owner, row.seq = owner, seq
+                await repo.insert(row)
+    await backend.wait_for_synced()
+
+
+def _enable_commit_seq(backend: Backend, tmp_path):
+    """给 Ledger 已有的 seq 字段打开 commit_seq，跑迁移（dtype 不变，走 skip 路径）"""
+    from hetu.data.backend import Table
+
+    new_comp = _ledger(commit_seq=True)
+    table = Table(new_comp, "pytest", 1, backend)
+    maint = backend.get_table_maintenance()
+    status, old_meta = maint.check_table(table)
+    assert status == "schema_mismatch"
+    return (
+        new_comp,
+        table,
+        lambda: maint.migration_schema(tmp_path / "app.py", table, old_meta),
+    )
+
+
+async def test_enable_commit_seq_on_existing_field(
+    new_component_env, mod_auto_backend, tmp_path
+):
+    """
+    把已有的序号字段改成 commit_seq：值保留，计数器校准到每组最大的正数号，之后接着发；≤ 0 的号
+    表示没有号，不参与校准。只改了 commit_seq、索引定义没变，也要走重建（否则计数器没人校准）
+    """
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(_ledger(commit_seq=False), backend)
+    await _fill_ledger(backend, ref.comp_cls, {7: [1, 2, 5], 8: [3], 9: [0, -1]})
+
+    new_comp, table, migrate = _enable_commit_seq(backend, tmp_path)
+    assert migrate()
+    await backend.wait_for_synced()
+    assert _counter(backend, table, owner=7) == 5
+    assert _counter(backend, table, owner=8) == 3
+    assert raw_kv_get(backend, raw_seq_counter_key(backend, table, owner=9)) is None
+    rows = [new_comp.new_row() for _ in range(3)]
+    for row, owner in zip(rows, (7, 8, 9)):
+        row.owner = owner
+    await _insert(backend, new_comp, *rows)
+    assert [int(row.seq) for row in await _read_all(backend, new_comp, 7)] == [
+        1,
+        2,
+        5,
+        6,
+    ]
+    assert [int(row.seq) for row in await _read_all(backend, new_comp, 8)] == [3, 4]
+    assert [int(row.seq) for row in await _read_all(backend, new_comp, 9)] == [
+        -1,
+        0,
+        1,
+    ]
+
+
+async def _read_all(backend: Backend, comp, owner: int):
+    async with backend.session("pytest", 1) as session:
+        return await session.using(comp).range(
+            seq=(-np.inf, np.inf), owner=owner, limit=-1
+        )
+
+
+@pytest.mark.parametrize(
+    "rows, match",
+    [
+        ({7: [1, 2, 2], 8: [0, 0]}, "组内重复的号"),
+        ({7: [1, 2**53]}, "上限"),
+    ],
+)
+async def test_enable_commit_seq_rejects_bad_numbers(
+    new_component_env, mod_auto_backend, tmp_path, rows, match
+):
+    """
+    组内重复的号（会让消费方静默漏行）、到了 2^53 的号：升级报错，旧索引、计数器、meta 都不动。
+    重复检查跳过 ≤ 0 的号（新加列时历史行都是 0）
+    """
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(_ledger(commit_seq=False), backend)
+    await _fill_ledger(backend, ref.comp_cls, rows)
+    before = raw_index_members(backend, ref, "seq")
+
+    _new_comp, table, migrate = _enable_commit_seq(backend, tmp_path)
+    with pytest.raises(RuntimeError, match=match):
+        migrate()
+    assert raw_index_members(backend, ref, "seq") == before
+    assert raw_kv_keys(backend, backend.master.cluster_prefix(ref) + ":seq:") == []
+    assert backend.get_table_maintenance().check_table(table)[0] == "schema_mismatch"
+
+
+async def test_rebuild_only_raises_counters(log_ref, mod_auto_backend):
+    """重建只把计数器往上调：比库里最大号大的不动，没有的补上"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    await _insert(backend, comp, _log(comp, 7), _log(comp, 7), _log(comp, 8))
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=7), b"100")
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=8), b"0")
+    backend.get_table_maintenance().do_rebuild_index_(log_ref)
+    assert _counter(backend, log_ref, owner=7) == 100
+    assert _counter(backend, log_ref, owner=8) == 1
+
+
+async def test_volatile_flush_restarts_numbering(new_component_env, mod_auto_backend):
+    """易失表每次维护清空，计数器一起删掉，号从 1 重来"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", volatile=True, force=True)
+    class Tick(BaseComponent):
+        seq: np.int64 = property_field(0, commit_seq=True)
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(Tick, backend)
+    await _insert(backend, Tick, Tick.new_row(), Tick.new_row())
+    assert _counter(backend, ref) == 2
+    backend.get_table_maintenance().flush(ref)
+    assert raw_kv_get(backend, raw_seq_counter_key(backend, ref)) is None
+    await _insert(backend, Tick, Tick.new_row())
+    assert await _seqs_plain(backend, Tick) == [1]
+
+
+async def _seqs_plain(backend: Backend, comp) -> list[int]:
+    async with backend.session("pytest", 1) as session:
+        rows = await session.using(comp).range(seq=(-np.inf, np.inf), limit=-1)
+    return [int(seq) for seq in rows.seq]
+
+
+def test_counter_key_depends_on_group_columns(new_component_env):
+    """改了 groupby（owner → guild，同是 int64、P 字节相同）就是另一组计数器 key，不继承旧组的号"""
+    by_owner = _redefine_log(groupby="owner")
+    by_guild = _redefine_log(groupby="guild")
+    prefix = to_sortable_bytes(np.int64(7))
+    key_owner = RedisModelClient.seq_counter_key_("p", by_owner, prefix)
+    key_guild = RedisModelClient.seq_counter_key_("p", by_guild, prefix)
+    assert key_owner == f"p:seq:seq:owner:{prefix.hex()}"
+    assert key_guild == f"p:seq:seq:guild:{prefix.hex()}"

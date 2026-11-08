@@ -23,6 +23,7 @@ from ..base import (
     member_value_,
     schema_version_,
 )
+from ..redis_model import CommitSeqScan
 from ..table import TableReference
 from .store import SQLiteStore
 
@@ -265,6 +266,9 @@ class SQLiteTableMaintenance(TableMaintenance):
         失败（unique 冲突）旧索引原样保留。复合索引每组一个 zset，替换时这个索引名下的旧 key 全部
         删掉（单列的 key 与复合的组 key），不留另一种格式或空了的组。表里一行都没有时，索引里
         剩下的都是残留，直接删掉。
+
+        提交序号列：组内有重复的号、有号到了上限时报错（见 `CommitSeqScan`）；计数器在替换索引的
+        同一个事务里校准到每组最大的号，只升不降。
         """
         comp_cls = table_ref.comp_cls
         table = self.client.cluster_prefix(table_ref)
@@ -273,6 +277,12 @@ class SQLiteTableMaintenance(TableMaintenance):
         new_indexes: dict[str, dict[str, list[bytes]]] = {}
         # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
         struct = comp_cls.new_row(id_=0)
+        # 提交序号列：建的时候统计每组最大的号，替换索引的同一个事务里校准计数器（只升不降）
+        scan = (
+            CommitSeqScan(comp_cls, table_ref.comp_name)
+            if comp_cls.commit_seq_ and row_count
+            else None
+        )
         for idx_name in comp_cls.indexes_:
             idx_key = self.client.index_key(table_ref, idx_name)
             by_key: dict[str, list[bytes]] = {}
@@ -321,11 +331,22 @@ class SQLiteTableMaintenance(TableMaintenance):
                                 )
                             )
                         seen.add(value)
+                    if scan is not None and idx_name == scan.field:
+                        scan.add(struct, member)
                     by_key.setdefault(zset_key, []).append(member)
             new_indexes[idx_key] = by_key
+        # 组内重复、到了上限：报错，旧索引、计数器都不动
+        counters = []
+        if scan is not None:
+            scan.raise_for_problems()
+            counters = scan.counters(table)
 
         def _replace(store: SQLiteStore):
             with store.write_txn():
+                for key, seq in counters:
+                    current = store.kv_get_int(key)
+                    if current is None or current < seq:
+                        store.kv_set(key, b"%d" % seq)
                 for idx_key, by_key in new_indexes.items():
                     # 前缀带 ":"：不会删到名字以本索引名开头的别的索引（level 与 level2）
                     store.zreplace(idx_key, ())

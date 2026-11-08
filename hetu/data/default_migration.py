@@ -113,6 +113,14 @@ def prepare() -> str:
                     f"届时请在本迁移脚本的 upgrade() 中为每行的 {target_column} "
                     f"赋予不同的唯一值，或在开发阶段清空数据库后重建。"
                 )
+            if target_props[target_column].commit_seq:
+                logger.warning(
+                    f"  ⚠️ [💾MIGRATION][{name}组件] "
+                    f"新增属性 {target_column} 是提交序号列（commit_seq），已有的行都填 0，"
+                    f"也就是没有号；新提交的行从 1 开始发号。要给已有的行编号，请在本迁移脚本的 "
+                    f"upgrade() 中为每组按顺序赋值 1、2、3……，之后重建索引会把计数器校准到"
+                    f"每组的最大号。"
+                )
 
     if remove_columns or unsafe_convert_columns:
         return "unsafe"

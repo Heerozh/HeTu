@@ -22,6 +22,7 @@ from ..base import (
     member_value_,
     schema_version_,
 )
+from ..redis_model import CommitSeqScan
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -291,6 +292,9 @@ class RedisTableMaintenance(TableMaintenance):
         复合索引每组一个 zset，按组建临时 key；换上之后，删掉这个索引名下不在新结果里的 key：
         已经空了的旧组、改成复合之前的单个 key、改回单列之前的组 key。表里一行都没有时，索引里
         剩下的都是残留，直接删掉。上次中断留下的临时 key 在开头清掉。
+
+        提交序号列：建的阶段统计每组最大的号，组内有重复、有号到了上限时报错（见
+        `CommitSeqScan`）；检查通过后先把计数器校准到每组最大的号（只升不降），再换上索引。
         """
         from .client import RedisBackendClient
 
@@ -313,6 +317,12 @@ class RedisTableMaintenance(TableMaintenance):
         struct = comp_cls.new_row(id_=0)
         # {索引名: {zset key: 临时 key}}
         renames: dict[str, dict[str, str]] = {}
+        # 提交序号列：建的时候统计每组最大的号，建完先检查、再校准计数器，最后才换上
+        scan = (
+            CommitSeqScan(comp_cls, table_ref.comp_name)
+            if comp_cls.commit_seq_
+            else None
+        )
         try:
             for idx_name in comp_cls.indexes_:
                 idx_key = self.client.index_key(table_ref, idx_name)
@@ -354,6 +364,8 @@ class RedisTableMaintenance(TableMaintenance):
                                     f"唯一变成了全局唯一）导致。"
                                 )
                             seen.add(value)
+                        if scan is not None and idx_name == scan.field:
+                            scan.add(struct, member)
                         by_key.setdefault(zset_key, {})[member] = 0
                     pipe = io.pipeline()
                     for zset_key, members in by_key.items():
@@ -362,6 +374,11 @@ class RedisTableMaintenance(TableMaintenance):
                             targets[zset_key] = tmp_key
                         pipe.zadd(tmp_key, members)
                     pipe.execute()
+            if scan is not None:
+                # 组内重复、到了上限：报错，旧索引、计数器都不动。先校准、再换上：只往上调计数器
+                # 不会产生重号，换上之后才校准的话，中途被杀会留下偏低的计数器
+                scan.raise_for_problems()
+                self._raise_counters(scan.counters(cluster_prefix))
         except BaseException:
             self._delete_keys(
                 [tmp for targets in renames.values() for tmp in targets.values()]
@@ -386,3 +403,24 @@ for i = 1, #KEYS, 2 do
 end
 return #KEYS / 2
 """
+
+    # KEYS 是计数器，ARGV 是对应的最大号：只升不降，值不是整数的（被写坏了）直接改写
+    _RAISE_COUNTERS_LUA = """
+for i = 1, #KEYS do
+    local current = tonumber(redis.call("GET", KEYS[i]))
+    if current == nil or current < tonumber(ARGV[i]) then
+        redis.call("SET", KEYS[i], ARGV[i])
+    end
+end
+return #KEYS
+"""
+
+    def _raise_counters(self, counters: list[tuple[str, int]]) -> None:
+        """
+        提交序号列的计数器校准到每组最大的号，只升不降。一批一条脚本：比较和写入之间不会插进别的
+        提交。计数器都带同一个 {CLU} hash tag，cluster 模式下在同一个 slot
+        """
+        for batch in batched(counters, 1000):
+            keys = [key for key, _seq in batch]
+            values = [str(seq) for _key, seq in batch]
+            self.client.io.eval(self._RAISE_COUNTERS_LUA, len(keys), *keys, *values)
