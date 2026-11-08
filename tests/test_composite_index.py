@@ -641,6 +641,32 @@ async def test_unique_point_hit_checks_all_columns(slot_ref, mod_auto_backend):
             assert sorted(got.id) == sorted([r_id, s_id])
 
 
+@pytest.mark.parametrize("read", ["get", "range"])
+async def test_group_move_after_empty_read_is_race(slot_ref, mod_auto_backend, read):
+    """
+    组内 unique 点查读空之后，又读到并发插进来占着 (组, 值) 的行，把它挪走、再插入这个值：
+    读集自相矛盾，要判竞态（单列的见 test_unique_move.py）
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            if read == "get":
+                assert await repo.get(slot=1, owner=7) is None
+            else:
+                assert len(await repo.range(slot=(1, 1), owner=7)) == 0
+            taken = _slot(comp, owner=7, slot=1)
+            async with backend.session("pytest", 1) as other:
+                await other.using(comp).insert(taken)
+            await backend.wait_for_synced()
+            mine = await repo.get(id=taken.id)
+            assert mine is not None
+            mine.slot = 5
+            await repo.update(mine)
+            await repo.insert(_slot(comp, owner=7, slot=1))
+
+
 async def test_move_unique_value_within_group(slot_ref, mod_auto_backend):
     """
     同一事务里在组内的行之间挪 unique 值（设计稿 §5.6，单列的见 test_unique_move.py）：挪走

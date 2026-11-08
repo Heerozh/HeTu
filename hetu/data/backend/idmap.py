@@ -640,10 +640,11 @@ class IdentityMap:
         不变的：
 
         - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
-        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
-          数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
-          保证提交时除本事务删掉的行外没有这个值，再排除"删掉了这个值的行"就等价于读空。
-          删掉过这样的行，说明本事务先看到"没有"、后又读到"有"，读集本身矛盾，要校验区间。
+        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉或改走
+          任何数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
+          保证提交时除本事务删掉、改走的行外没有这个值（提交脚本豁免本次要 ZREM 的 member），
+          再排除"删掉、改走了这个值的行"就等价于读空。删掉或改走过这样的行，说明本事务先看到
+          "没有"、后又读到"有"，读集本身矛盾，要校验区间。
         """
         ret: dict[TableReference, list[RangeObservation]] = {}
         for table_ref, observations in self._ranges.items():
@@ -833,8 +834,9 @@ class IdentityMap:
         self, table_ref: TableReference, index_name: str
     ) -> tuple[set[object], set[object]]:
         """
-        本事务在该列上写入的值（insert 的值，update 改成的新值），以及删除的行的原值。复合索引
-        的值是 (分组值…, 值) 元组（见 `unique_key_of_row_`）。
+        本事务在该列上写入的值（insert 的值，update 改成的新值），以及腾出的原值（删掉的行、
+        update 改走了这一列的行的数据库态）。复合索引的值是 (分组值…, 值) 元组（见
+        `unique_key_of_row_`）。
         """
         written: set[object] = set()
         deleted: set[object] = set()
@@ -859,6 +861,10 @@ class IdentityMap:
                 value = unique_key_of_row_(comp_cls, index_name, row)
                 if value != clean_value:
                     written.add(value)
+                    if clean is not None:
+                        # 改走了：提交脚本会豁免它原来的 member（同一事务里挪 unique 值），
+                        # 和删掉一样算腾出了原值
+                        deleted.add(clean_value)
         return written, deleted
 
     def get_clean_rows(self) -> dict[TableReference, dict[int, str]]:

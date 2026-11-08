@@ -10,7 +10,7 @@ from fixtures.backends import raw_index_members
 from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, TableReference, UniqueViolation
+from hetu.data.backend import Backend, RaceCondition, TableReference, UniqueViolation
 
 SnowflakeID().init(1, 0)
 
@@ -103,6 +103,36 @@ async def test_move_exemption_is_per_index(pair_ref, mod_auto_backend):
             mine = await repo.get(id=r_id)
             mine.a = 6
             await repo.update(mine)
+
+
+@pytest.mark.parametrize("read", ["get", "range"])
+async def test_move_after_empty_read_is_race(pair_ref, mod_auto_backend, read):
+    """
+    unique 点查读空之后，又读到了并发插进来占着这个值的行，把它挪走、再插入这个值：读集自相
+    矛盾（先看到没有、后又读到有），要判竞态。提交脚本会豁免被挪走的 member，所以读空的观察
+    不能再被"本事务写了这个值"跳过区间校验
+    """
+    backend: Backend = mod_auto_backend()
+    comp = pair_ref.comp_cls
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            if read == "get":
+                assert await repo.get(a=2000) is None
+            else:
+                assert len(await repo.range(a=(2000, 2000))) == 0
+            async with backend.session("pytest", 1) as other:
+                taken = comp.new_row()
+                taken.a, taken.b, taken.f = 2000, 3000, 30.0
+                await other.using(comp).insert(taken)
+            await backend.wait_for_synced()
+            mine = await repo.get(id=taken.id)
+            assert mine is not None
+            mine.a = 2005
+            await repo.update(mine)
+            new = comp.new_row()
+            new.a, new.b, new.f = 2000, 3001, 31.0
+            await repo.insert(new)
 
 
 async def test_nan_sign_update_no_self_collision(pair_ref, mod_auto_backend):
