@@ -2556,15 +2556,15 @@ class SubscriptionBroker:
           行增删/变更都会唤醒它重跑一次比对（点查询落到这里时服务器会警告一次）。
           热索引（如所有玩家都订自己的背包）请用点查询，并给索引声明 `point_sub=True`。
           `id` 不能声明 `point_sub`，按 id 订单行请用 `subscribe_get`。
-        - 复合索引（groupby）按组查询：索引声明了 `point_sub` 时只订这一组的频道，只有本组有行
-          进出、本组里本字段有变化时才唤醒；没声明时订整个索引的频道（会警告一次）。
+        - 复合索引（groupby）按组查询：每组单独存成一个 zset，只订这一组的频道，只有本组有行
+          进出、本组里本字段有变化时才唤醒，别的组的写入不会；不需要声明 `point_sub`。
 
         Point queries (`right` omitted or equal to `left`) on an index declared with
         `point_sub` only wake up when rows enter or leave that value. Range queries, and
         point queries on undeclared indexes (warned once), wake up on any write to the
         index. `id` cannot declare `point_sub`; watch a single row by id with
-        `subscribe_get`. Group queries on a composite (groupby) index declared with
-        `point_sub` only wake up on changes within that group.
+        `subscribe_get`. Group queries on a composite (groupby) index only wake up on
+        changes within that group (each group is its own zset; no `point_sub` needed).
 
         Returns
         --------
