@@ -89,5 +89,9 @@ class Table(TableReference):
         return bind_first_arg_with_typehint(self.backend.servant.seq_head_many, self)
 
     @property
+    def servant_seq_read(self):
+        return bind_first_arg_with_typehint(self.backend.servant.seq_read, self)
+
+    @property
     def direct_set(self):
         return bind_first_arg_with_typehint(self.backend.master.direct_set, self)

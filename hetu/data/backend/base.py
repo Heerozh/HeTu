@@ -54,7 +54,15 @@ from collections.abc import (
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NamedTuple,
+    final,
+    overload,
+)
 
 import numpy as np
 
@@ -115,6 +123,50 @@ class InconsistentRangeRead(RaceCondition):
         )
 
 
+class CommitSeqDiverged(Exception):
+    """
+    The commit_seq sequence no longer matches what the consumer recorded.
+
+    提交序号列的序列和库外消费方记下的对不上了，由 `BackendClient.seq_read` 抛出。重试不会好，
+    所以不继承 RaceCondition：这一组要停下来、报警，由人来处理，别的组照常消费。
+
+    `reason` 是下面三种之一：
+
+    - ``"reused"``：游标那一号现在是另一行，号被复用了。可能是数据回退（故障切换丢了最后几次提交、
+      AOF / RDB 重启、整库从备份恢复、易失表清空），也可能是计数器落后于数据之后又发了一遍（手工删了
+      计数器、内存淘汰、只导入了行、改了组件名或字段名之后重新校准）；
+    - ``"anchor_missing"``：游标那一行没了，后面却有号。数据回退了，或者游标那一行被误删了（按文档的
+      裁剪规则，游标那一行不会被正常删掉）；
+    - ``"duplicate"``：组里有重号，计数器落后于数据时会发出重号。
+
+    属性：`comp_name`、`group`（调用方给的原值）、`seq`（出问题的那一号）、`expected_id`、
+    `found_id`（`anchor_missing` 时为 None）、`reason`。
+    """
+
+    def __init__(
+        self,
+        comp_name: str,
+        group: Mapping[str, Any] | None,
+        seq: int,
+        expected_id: int,
+        found_id: int | None,
+        reason: str,
+    ):
+        super().__init__(comp_name, group, seq, expected_id, found_id, reason)
+        self.comp_name = comp_name
+        self.group = group
+        self.seq = seq
+        self.expected_id = expected_id
+        self.found_id = found_id
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return (
+            f"COMMIT_SEQ: {self.reason} {self.comp_name} group={self.group!r} "
+            f"seq={self.seq} expected_id={self.expected_id} found_id={self.found_id}"
+        )
+
+
 class UniqueViolation(IndexError):
     """
     唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。
@@ -141,6 +193,22 @@ class RowFormat(Enum):
     STRUCT = 1  # 默认值：按Component定义严格转换的np.record（c-struct like）类型
     TYPED_DICT = 2  # 先转换成STRUCT，再转换成dict的类型。
     ID_LIST = 3  # 只返回list of row id，只能用于range查询
+
+
+class SeqReadResult[RowsT](NamedTuple):
+    """
+    Result of `BackendClient.seq_read`: the rows read and what blocked the read.
+
+    提交序号列增量读（`seq_read`）的结果，可以直接解包：``rows, blocked = ...``。
+
+    - `rows`：号大于 `after` 的行，按号升序，格式按 `row_format`；
+    - `blocked`：``(号, 行 id)`` 或 None。索引里有、这次却没取到行的第一个 member，它挡住了后面的
+      行；None 表示没被挡住。取行落到落后的副本、读完索引之后行被删了都会挡住，下一次通常就好了；
+      同一个 ``(号, 行 id)`` 一直挡着，多半是索引残留（索引里有、行没有）。
+    """
+
+    rows: RowsT
+    blocked: tuple[int, int] | None
 
 
 def to_sortable_bytes(value: np.generic) -> bytes:
@@ -1245,6 +1313,114 @@ class BackendClient:
             组件没有提交序号列，或者某一项分组值不对（在访问数据库之前检查）。
         RuntimeError
             有计数器的值被写坏了，报错里带着它的 key。
+        """
+        raise NotImplementedError
+
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> SeqReadResult[np.recarray]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> SeqReadResult[list[dict[str, str]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> SeqReadResult[list[dict[str, Any]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: RowFormat = ...,
+    ) -> SeqReadResult[np.recarray | list[dict[str, str]] | list[dict[str, Any]]]: ...
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format=RowFormat.STRUCT,
+    ) -> SeqReadResult[Any]:
+        """
+        Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
+
+        给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
+        不需要 master。
+
+        一次读钉在一个节点上：先一条 ZRANGE 读这一组在 `after` 之后的 member（这个节点上的原子快照），
+        再从同一个节点取行。号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行
+        已经不在了，所以：
+
+        - 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
+          (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
+        - 取行时读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：停在它
+          前面，它记为 `blocked`，下次再读；
+        - 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
+
+        注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
+        小于所有消费方**已经落盘的**游标的行，删之前先核对，见文档"binlog 式同步"一节。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        after: int
+            游标，也就是最后处理过的那一号；从头读给 0。0 <= after < 2^53。
+        limit: int
+            最多返回的行数，正整数。一次读太多会长时间占住副本，一般几百到几千行。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`。
+        after_id: int | None
+            游标那一号的行的雪花 id（锚点）。给了就核对序列：游标那一号换了一行、游标那一行没了而
+            后面有号、组里有重号，都抛 `CommitSeqDiverged`。给的时候 `after` 必须 >= 1。不给就不核对，
+            也就发现不了号被复用。
+        row_format
+            返回数据解码格式，同 `range`，但不支持 `RowFormat.ID_LIST`。
+
+        Returns
+        -------
+        result: SeqReadResult
+            ``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
+            ``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：读的那个节点上
+            `after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+
+        Raises
+        ------
+        CommitSeqDiverged
+            给了 `after_id`，而序列和它对不上；或者组里有重号。
+        ValueError
+            组件没有提交序号列、分组值不对、参数取值不对，或者 `row_format` 是 `ID_LIST`。
+        TypeError
+            整数参数的类型不对（收 int 和 `np.integer`，不收 bool）。
         """
         raise NotImplementedError
 
