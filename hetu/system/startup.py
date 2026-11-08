@@ -28,7 +28,7 @@ ON_START_UUID_CONFIG_KEY = "ON_START_UUID"
 def make_boot_uuid() -> str:
     """生成一个本次开服(boot)的唯一标识，用作 on_start 去重的 SystemLock uuid。
 
-    长度需 <= 32（SystemLock.uuid 为 <U32），取 16 位 hex 足够避免开服间碰撞。
+    长度要放得进 SystemLock.uuid（<U64），取 16 位 hex 足够避免开服间碰撞。
     """
     return uuid.uuid4().hex[:16]
 

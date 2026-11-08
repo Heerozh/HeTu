@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from ...i18n import _
-from .base import BackendClient, RowFormat, UniqueViolation, resolve_group_
+from .base import (
+    BackendClient,
+    RowFormat,
+    UniqueViolation,
+    overflows_column_,
+    resolve_group_,
+)
 from .idmap import (
     LocalIndex,
     RangeObservation,
@@ -887,6 +893,8 @@ class SessionRepository:
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
             组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
             `upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
+            字符串锚定值超过列宽时没有行能匹配，要新建行时抛 ValueError（存进去会被截断，之后
+            拿这个值查不到它）。
         """
         index_name, query_value, group = self._point_kwargs(kwargs, unique_only=True)
 
@@ -962,6 +970,20 @@ class UpsertContext:
             )
         else:
             comp_cls = self.repo.ref.comp_cls
+            # 字符串列存进去会按列宽截断，查询值却不截断：锚定值放不下的话，新行存的是截断后的
+            # 值，拿原值永远查不到它，下次 upsert 又读空、去插入，撞上这一行报 UniqueViolation
+            if overflows_column_(comp_cls, self.index_name, self.query_value):
+                raise ValueError(
+                    _(
+                        "upsert 的锚定值超过了 {comp_name}.{index_name} 的列宽 {max_len}："
+                        "{value}。新行存进去会被截断，之后拿这个值查不到它"
+                    ).format(
+                        comp_name=comp_cls.name_,
+                        index_name=self.index_name,
+                        max_len=comp_cls.str_max_len(self.index_name),
+                        value=repr(self.query_value),
+                    )
+                )
             self.row_data = comp_cls.new_row()
             self.row_data[self.index_name] = self.query_value
             for col, value in zip(

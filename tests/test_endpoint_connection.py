@@ -358,6 +358,45 @@ async def test_flood_detect(mod_test_app, tbl_mgr, caplog, new_ctx):
         await loc_executor.terminate()
 
 
+async def test_flood_detect_exact_limit_and_ipv6(
+    mod_test_app, tbl_mgr, new_ctx, monkeypatch
+):
+    """
+    同 IP 的匿名连接正好放行 MAX 条，已登录的不算，报的数也只数匿名的。IPv6 地址（39 个字符，
+    代理头给的带方括号）要原样存下：列存进去会截断、查询值不截断，以前 <U32 放不下的地址计数
+    永远是 0，不受限制。带方括号的开头的 [ 还会被 range 当成闭区间标记剥掉，同样查不到
+    """
+    from hetu.endpoint.connection import Connection
+
+    monkeypatch.setattr(connection, "MAX_ANONYMOUS_CONNECTION_BY_IP", 3)
+    table = tbl_mgr.get_table(Connection)
+    assert table
+    executors = []
+    addresses = (
+        "233.111.111.112",
+        "2409:8a55:3c32:1a40:1c4f:6b2b:2fd5:8e0f",
+        "[2409:8a55:3c32:1a40:1c4f:6b2b:2fd5:8e0f]",
+    )
+    for i, address in enumerate(addresses):
+        logged_in = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+        await logged_in.initialize(address)
+        executors.append(logged_in)
+        ok, _ = await logged_in.execute("login", 2101 + i)
+        assert ok
+        await table.backend.wait_for_synced()  # 计数读的可能是副本
+        for _ in range(3):
+            guest = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+            await guest.initialize(address)
+            executors.append(guest)
+        with pytest.raises(RuntimeError, match=r"IP匿名连接数过多\(3\)"):
+            await EndpointExecutor("pytest", tbl_mgr, new_ctx()).initialize(address)
+        rows = await table.servant_range("address", "[" + address, limit=10)
+        assert len(rows) == 4 and set(rows.address.tolist()) == {address}
+
+    for executor in executors:
+        await executor.terminate()
+
+
 async def test_flood_detect_same_ip_concurrent_no_race(
     mod_test_app, tbl_mgr, monkeypatch
 ):

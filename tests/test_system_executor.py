@@ -232,6 +232,29 @@ async def test_execute_system_call_lock(mod_test_app, executor: EndpointExecutor
     assert ok
 
 
+async def test_call_lock_uuid_length(mod_test_app, executor: EndpointExecutor):
+    """
+    uuid 存在定宽的 SystemLock.uuid 里，放不下的存进去会被截断，之后拿原值查不到这把锁，同一个
+    uuid 会再执行一遍。所以超过列宽的在入口就报 ValueError、不执行 System；`str(uuid4())`
+    （36 个字符）和正好放满的照常去重
+    """
+    import uuid as uuidlib
+
+    from hetu.system.lock import SystemLock
+
+    ok, _ = await executor.execute("login", 1102)
+    assert ok
+    systems = executor.context.systems
+    max_len = SystemLock.str_max_len("uuid")
+    for i, uuid in enumerate((str(uuidlib.uuid4()), "u" * max_len)):
+        assert await systems.call("add_rls_comp_value", 1, uuid=uuid) == 100 + i + 1
+        assert await systems.call("add_rls_comp_value", 1, uuid=uuid) is None
+    with pytest.raises(ValueError, match="uuid"):
+        await systems.call("add_rls_comp_value", 10, uuid="u" * (max_len + 1))
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 2)
+    assert ok
+
+
 async def test_clean_expired_call_locks(monkeypatch, mod_test_app, tbl_mgr, executor):
     time_time = time.time
 

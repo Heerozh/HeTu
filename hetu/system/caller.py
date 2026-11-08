@@ -142,6 +142,14 @@ class SystemCaller:
                     "调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
                 ).format(sys_name=sys_name)
             )
+        # SystemLock.uuid 定宽：放不下的 uuid 存进去会被截断，之后拿原值查不到这把锁，同一个
+        # uuid 会再执行一遍
+        if uuid and len(str(uuid)) > (max_len := SystemLock.str_max_len("uuid")):
+            raise ValueError(
+                _("调用System {sys_name} 的uuid超过了 {max_len} 个字符：{uuid}").format(
+                    sys_name=sys_name, max_len=max_len, uuid=uuid
+                )
+            )
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
@@ -251,7 +259,8 @@ class SystemCaller:
 
             主要用于未来调用的幂等性，或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况。
             去重只在 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）内有效，过期的
-            锁由 future_call_task 定期清理。
+            锁由 future_call_task 定期清理。最长 64 个字符（`str(uuid.uuid4())` 是 36 个），
+            超过抛 ValueError。
 
         Returns
         -------

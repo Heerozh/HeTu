@@ -288,7 +288,8 @@ Mechanics:
   a slot earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
   `SystemLock` is volatile: `hetu upgrade` clears it.
 
-`uuid=` is a keyword-only argument on `ctx.systems.call(...)`.
+`uuid=` is a keyword-only argument on `ctx.systems.call(...)`, at most 64
+characters long (`str(uuid.uuid4())` is 36); a longer one raises `ValueError`.
 `ctx.depend[...](...)` is a plain function call inside the same
 transaction: it takes no `uuid=` and does no deduplication.
 
