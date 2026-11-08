@@ -186,6 +186,29 @@ names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
 names.OnDelete += (sub, id) => RemoveNameTag(id);
 ```
 
+### 按组订阅复合索引
+
+服务端用 `property_field(groupby=...)` 声明的复合索引（见[概念](concepts.md)），订阅时用最后一个参数
+`group` 给出全部分组列的值，只订这一组。`WatchRow` 和 `WatchRange` 都有这个参数：
+
+```csharp
+// level 按 zone 分组：订 zone=3 里 level 在 [10, 20] 的行，按 level 排序
+var zone3 = await HeTuClient.Instance.WatchRange<Monster>(
+    "level", 10, 20, 100,
+    group: new Dictionary<string, object> { ["zone"] = 3 });
+
+// 组内唯一的复合索引：按 (公会, 名字) 订一行
+var member = await HeTuClient.Instance.WatchRow<GuildMember>(
+    "name", "Ann", group: new Dictionary<string, object> { ["guild"] = guildId });
+```
+
+- **值的类型**：分组值只能是整数、bool、刚好是整数的浮点、`string`、`byte[]`。
+- **当场抛异常的情况**：值类型不合法，或者在 `id` 上带了 `group`，都当场抛 `ArgumentException`，请求不会发出去。
+- **断开连接的情况**：分组列名写错、值和列类型不符（比如整数列给了字符串），客户端看不出来，服务器会以 4002 断开连接。会话随之进入终态，不会重连。
+- **字典会被拷贝**：调用之后再改这个字典，不影响这次订阅；断线重连时按订阅时的 `group` 恢复。`WatchRow` 解析出行之后，照旧按行 `id` 恢复。
+- **唤醒范围**：服务端的复合索引声明了 `point_sub=True` 时，订阅只会被本组的写入叫醒，否则会被任何一组的写入叫醒。
+- **服务器版本**：带 `group` 的订阅需要支持复合索引的服务器（v2025.11.1 之后的版本）。旧服务器不认识 `group`，会以 4002 断开连接。不带 `group` 的订阅发出的报文和以前完全一样。
+
 ## 类型化组件 vs `DictComponent`
 
 服务器可以通过 `hetu build` 从你的 `Component` 定义生成匹配的 C# 类。结果实现了
