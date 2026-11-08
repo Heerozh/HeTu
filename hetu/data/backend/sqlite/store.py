@@ -20,7 +20,6 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
 """
 
 import logging
-import re
 import sqlite3
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ....i18n import _
+from ..base import parse_redis_int_
 
 logger = logging.getLogger("HeTu.root")
 
@@ -50,8 +50,6 @@ ROW_KEY = "_hetu_key"
 KEYSPACE_PREFIX = "__keyspace@0__:"
 # 单条 IN 查询的参数上限
 IN_CHUNK = 500
-# Redis 认的整数串（string2ll）：可选负号加不以 0 开头的数字，或者就是 "0"
-_REDIS_INT = re.compile(rb"0|-?[1-9][0-9]*")
 
 
 def quote(name: str) -> str:
@@ -709,10 +707,7 @@ class SQLiteStore:
         raw = self.kv_get(key)
         if raw is None:
             return 0
-        if not _REDIS_INT.fullmatch(raw):
-            return None
-        value = int(raw)
-        return value if -(1 << 63) <= value < (1 << 63) else None
+        return parse_redis_int_(raw)
 
     def kv_set(self, key: str, value: bytes) -> None:
         """`SET key value`（不过期）。只能在写事务里调用"""
@@ -772,6 +767,21 @@ class SQLiteStore:
         if row is None or (row[1] is not None and row[1] <= time.time()):
             return None
         return bytes(row[0])
+
+    def kv_get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """按 keys 的顺序批量读，不存在或已过期的为 None，同 MGET"""
+        found: dict[str, bytes] = {}
+        now = time.time()
+        for chunk in batched(keys, IN_CHUNK):
+            marks = ",".join("?" * len(chunk))
+            for key, value, expire_at in self.conn.execute(
+                f"SELECT key, value, expire_at FROM {quote(KV_TABLE)} "
+                f"WHERE key IN ({marks})",
+                chunk,
+            ):
+                if expire_at is None or expire_at > now:
+                    found[key] = bytes(value)
+        return [found.get(key) for key in keys]
 
     def kv_expire_if(self, key: str, value: bytes, ttl: float) -> bool:
         """值还是 value（且没过期）才把过期时间刷成 ttl 秒后，返回刷没刷（租约续期用的 CAS）"""

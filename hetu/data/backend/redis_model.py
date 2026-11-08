@@ -39,6 +39,7 @@ from .base import (
     member_row_id_,
     member_value_,
     normalize_int_bounds_,
+    parse_redis_int_,
     peel_bound_,
     resolve_group_,
     row_group_prefix_,
@@ -565,6 +566,13 @@ class RedisModelClient(BackendClient):
         """内部方法：按 row_ids 的顺序批量 HGETALL 这张表的行，读不到的为空 dict。子类实现"""
         raise NotImplementedError
 
+    async def kv_get_many_(self, keys: Sequence[str]) -> list[bytes | None]:
+        """
+        内部方法：按 keys 的顺序批量读字符串 key（提交序号列的计数器），不存在的为 None，同 MGET。
+        子类实现
+        """
+        raise NotImplementedError
+
     def zrange_bylex_(
         self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
     ) -> Awaitable[list[bytes]]:
@@ -814,6 +822,55 @@ class RedisModelClient(BackendClient):
             value = member_value_(member)[skip:]
             result.append((from_sortable_bytes(dtype, value), member_row_id_(member)))
         return result
+
+    # ============ 提交序号列的库外消费方：读计数器、增量读 ============
+
+    @staticmethod
+    def commit_seq_field_(comp_cls: type[BaseComponent]) -> str:
+        """内部方法：组件的提交序号列字段名，没有就抛 ValueError"""
+        field = comp_cls.commit_seq_
+        if field is None:
+            raise ValueError(
+                _("组件 `{comp}` 没有提交序号列（commit_seq）").format(
+                    comp=comp_cls.name_
+                )
+            )
+        return field
+
+    @override
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int]:
+        """批量读提交序号列的计数器，见基类"""
+        comp_cls = table_ref.comp_cls
+        field = self.commit_seq_field_(comp_cls)
+        prefix = self.cluster_prefix(table_ref)
+        # 先把分组值都校验完、key 都算好，再访问数据库
+        keys = [
+            self.seq_counter_key_(
+                prefix, comp_cls, self.group_prefix_of_(table_ref, field, group)
+            )
+            for group in groups
+        ]
+        if not keys:
+            return []
+        heads: list[int] = []
+        for key, raw in zip(keys, await self.kv_get_many_(keys), strict=True):
+            if raw is None:
+                heads.append(0)
+                continue
+            value = parse_redis_int_(raw)
+            if value is None or value < 0:
+                raise RuntimeError(
+                    _(
+                        "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。"
+                        "跑 hetu upgrade 重建索引时会把它校准回来"
+                    ).format(key=key, raw=repr(raw))
+                )
+            heads.append(value)
+        return heads
 
     @override
     async def range_read_(

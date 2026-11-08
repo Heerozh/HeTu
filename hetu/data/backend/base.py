@@ -37,6 +37,7 @@ import importlib
 import logging
 import math
 import random
+import re
 import struct
 import time
 import warnings
@@ -48,6 +49,7 @@ from collections.abc import (
     Iterable,
     Iterator,
     Mapping,
+    Sequence,
 )
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -293,6 +295,22 @@ REBUILD_PENDING_VERSION = "rebuild-pending"
 # 提交序号列（commit_seq）的号的上限（不含）：提交脚本里的数是 Lua 的 double，再往上不精确。
 # 提交时到了上限返回 SEQ 失败，重建时库里已有的号到了上限报错
 COMMIT_SEQ_LIMIT = 1 << 53
+
+# Redis 认的整数串（string2ll）：可选负号加不以 0 开头的数字，或者就是 "0"
+_REDIS_INT = re.compile(rb"0|-?[1-9][0-9]*")
+
+
+def parse_redis_int_(raw: bytes) -> int | None:
+    """
+    内部方法：按 Redis string2ll 的规则（INCRBY 认的整数）解析一个字符串值，不是整数返回 None。
+    可选的负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里；Python 的 int() 会放过
+    " 5"、"+5"、"05"、"1_0"，两个后端就对不上了
+    """
+    if not _REDIS_INT.fullmatch(raw):
+        return None
+    value = int(raw)
+    return value if -(1 << 63) <= value < (1 << 63) else None
+
 
 # 索引的存储格式版本，并进表的 schema 版本号（见 `schema_version_`）。member 的编码一变就加一：
 # 旧库每张表的版本号都对不上，服务器拒绝启动，`hetu upgrade` 按新格式重建索引。
@@ -1156,6 +1174,77 @@ class BackendClient:
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
+        """
+        raise NotImplementedError
+
+    async def seq_head(
+        self, table_ref: TableReference, group: Mapping[str, Any] | None = None
+    ) -> int:
+        """
+        Read the latest number issued by one commit_seq group.
+
+        读提交序号列（`commit_seq`）一个组最近发出的号，也就是这一组发到了第几号。还没发过号是 0，
+        易失表维护清空之后也是 0。非事务读，走副本，可能落后。
+
+        计数器和索引是两个 key，读计数器不和任何一次读在同一个快照里：只能用来发现有新号、监控
+        积压、报警，**不能**拿来把游标推过没见到行的号。库外消费方的写法见 `seq_read`。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`：带 groupby 的必须正好给出全部分组列，
+            不带 groupby 的不给。
+
+        Returns
+        -------
+        head: int
+            这一组最近发出的号，没发过号是 0。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者分组值不对。
+        RuntimeError
+            计数器的值被写坏了（不是 Redis 认的非负整数）。`hetu upgrade` 重建索引时会把它校准回来。
+
+        Notes
+        -----
+        Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
+        """
+        return (await self.seq_head_many(table_ref, [group]))[0]
+
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int]:
+        """
+        Read the latest numbers issued by many commit_seq groups in one round trip.
+
+        批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
+        一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。有一个计数器被写坏，
+        整批抛 RuntimeError。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        groups: Sequence[Mapping[str, Any] | None]
+            每一项是一个组的分组值，规则同 `seq_head` 的 `group`。
+
+        Returns
+        -------
+        heads: list[int]
+            每个组最近发出的号，没发过号是 0，顺序同 `groups`。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者某一项分组值不对（在访问数据库之前检查）。
+        RuntimeError
+            有计数器的值被写坏了，报错里带着它的 key。
         """
         raise NotImplementedError
 
