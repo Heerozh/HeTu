@@ -12,17 +12,17 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from fixtures import fake_pubsub
 from fixtures.contexts import wait_until
 from fixtures.fake_pubsub import (
     FakeNodePubSub,
     attach_fake_node,
-    make_hub,
     route_channels,
     settle,
 )
 
 from hetu.data.backend import Backend
-from hetu.data.backend.redis.mq import RedisMQClient
+from hetu.data.backend.redis.mq import PubSubHub, RedisMQClient
 from hetu.data.sub import (
     BaseSubscription,
     RowSubscription,
@@ -78,6 +78,39 @@ class FlakySub(FakeSub):
 
 # 一个 tick：get_updates 碰到没有任何更新的批次会接着等下一批，给个总时长让它结束
 TICK = 0.3
+
+# 本模块建的假 PubSubHub 和建它时的事件循环，由 _close_pubsub_hubs 在每个用例结束时关掉
+_pubsub_hubs: list[tuple[PubSubHub, asyncio.AbstractEventLoop]] = []
+
+
+def make_hub() -> tuple[PubSubHub, FakeNodePubSub]:
+    """fake_pubsub.make_hub，另外登记下来，用例结束时关掉"""
+    pubsub_hub, node = fake_pubsub.make_hub()
+    _pubsub_hubs.append((pubsub_hub, asyncio.get_running_loop()))
+    return pubsub_hub, node
+
+
+@pytest.fixture(autouse=True)
+async def _close_pubsub_hubs():
+    """
+    用例只关门面 / SubscriptionHub，关不到它们共用的假 PubSubHub（生产上它归 backend 管），
+    监听任务会一直挂着。之后某次 GC 回收它们时会打 ERROR：先是 asyncio 的 "Task was destroyed
+    but it is pending!"；关协程时取消了它在等的 future，任务被重新唤醒，对着已结束的协程报
+    RuntimeError，又被当成节点断线打 "Listener error"。落在数 ERROR 的用例里就会偶挂
+    """
+    yield
+    loop = asyncio.get_running_loop()
+    while _pubsub_hubs:
+        pubsub_hub, hub_loop = _pubsub_hubs.pop()
+        # uvloop 的用例在自己的 asyncio.run 里建 hub，监听任务随那个事件循环一起取消了
+        if hub_loop is loop:
+            await pubsub_hub.close()
+    leaked = [
+        task
+        for task in asyncio.all_tasks(loop)
+        if getattr(task.get_coro(), "__qualname__", "").endswith("_node_listener")
+    ]
+    assert not leaked, "有假 pubsub 没经过 make_hub 登记，监听任务挂着没关"
 
 
 def make_brokers(
@@ -486,7 +519,9 @@ async def test_failed_read_is_retried_without_raising(caplog):
     assert updates == {"R": {1: {"v": 1}}, "T": {5: {"v": 5}}}
     assert row.calls == [("R", None), ("R", None)]
     assert table.calls == [("T", {"5"}), ("T", {"5"})]
-    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+    assert any(
+        r.name == "HeTu.root" and r.levelno >= logging.ERROR for r in caplog.records
+    )
     await close_all(broker, node)
 
 
@@ -501,7 +536,12 @@ async def test_repeated_read_errors_are_logged_rate_limited(caplog):
         updates = await broker.get_updates(timeout=1)
     assert updates == {"S": {1: {"v": 1}}}
     assert len(sub.calls) == 6
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # 只数订阅器自己的日志：别的 logger 的 ERROR 不归这里的限流管
+    errors = [
+        r
+        for r in caplog.records
+        if r.name == "HeTu.root" and r.levelno >= logging.ERROR
+    ]
     assert len(errors) == 1
     assert errors[0].exc_info is not None
     await close_all(broker, node)
