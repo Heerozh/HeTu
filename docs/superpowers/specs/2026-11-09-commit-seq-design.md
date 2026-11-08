@@ -1,7 +1,7 @@
 # 提交序号列（`commit_seq`）— 设计稿
 
 - 日期：2026-11-09
-- 状态：已实现（分支 `feat/commit-seq`），实现记录见 §17。设计过了一轮独立审核（§16），已按审核意见改写。
+- 状态：已实现（分支 `feat/commit-seq`），实现记录见 §17，实现审核见 §18。设计过了一轮独立审核（§16），已按审核意见改写。
   - §13 是定下来的做法；
   - §14 是用户的决定（2026-11-09 全部定完）。
 - 分支：`feat/commit-seq`（基于 dev `aaf30a73`）
@@ -89,7 +89,7 @@ class WorldEvent(BaseComponent):
   - 写了 `point_sub=True`：警告并忽略。排在那条报错之前，是为了 `hidden=True, point_sub=True` 的组合也走这条，而不是直接报错。
     - 带 groupby 的，复合索引本来就会忽略 point_sub（`component.py:635-642`）。
     - 不带 groupby 的，值频道要在 Python 里按值命名，而值要到提交脚本里才有，发不出来。整个索引的区间订阅照常靠索引 key 的 keyspace 通知。
-  - default：
+  - default（实现放在下面 `warp` 阶段的 `_commit_seq_define_check` 里，行为一样）：
     - 必须等于 0。0 表示"还没发号"，号从 1 开始。
     - 写成 `0.0`、`False` 也按 0 处理，json 里统一写成 int 0。否则同一个定义会算出不同的 schema 版本。
 - **放在 `warp` 里、所有字段都经过 `_normalize_prop` 之后校验**，同 `_groupby_define_check`（`component.py:729`）。一律 `raise ValueError`：
@@ -131,7 +131,7 @@ class WorldEvent(BaseComponent):
 - **delete**：照常。号不回收（§4）。
 - **direct_set**：已经拒绝写索引列和分组列（`column_indexes_`，`redis_model.py:1185-1190`），不用改。
 - **维护工具**：`TableMaintenance.upsert_row`、迁移脚本照常整行写入，之后的重建索引会校准计数器（§8.2）。
-- **payload 兜底**：`build_commit_payload_` 里，update 改到 `commit_seq` 索引时直接报错，防的是绕过 repo 的写入路径。
+- **payload 兜底**：`build_commit_payload_` 里，update 改了号、或者改了有号（> 0）的行的分组列时直接报错，防的是绕过 repo 的写入路径；号 ≤ 0 的历史行换组照常放行。
   insert 不需要兜底：提交脚本写的号排在 HSET 参数的最后，一定会覆盖行里的值（§6.1）。
 
 ### 3.3 事务里看到的
@@ -276,17 +276,22 @@ enc(seq) 是 int64 的 `to_sortable_bytes`，即 seq + 2^63 的 8 字节大端�
 Phase 1 不变。Phase 2 开头先把这次要发的号全部拿到，要么全成，要么全不发：
 
 ```lua
-local seq_next = {}
-if seq_allocs then
+local seq_next = nil
+if seq_allocs then  -- 没有号要发时 payload 不带这一段，下面的表和循环都不建
+    seq_next = {}
     for i, alloc in ipairs(seq_allocs) do
         local last = redis.pcall("INCRBY", alloc[1], alloc[2])
         local failed = type(last) == "table"  -- pcall 出错时返回 {err = ...}
-        if failed or last >= 9007199254740992 then  -- 2^53，再往上 Lua 的 double 不精确
+        -- 发出的号要在 [1, 2^53) 里：再往上 Lua 的 double 不精确；计数器被手工改成负数时号 <= 0
+        if failed or last >= 9007199254740992 or last < alloc[2] then
             -- 把已经加上去的减回去（这一个加成功了也减），这次提交一个号都不发
             for j = 1, failed and i - 1 or i do
                 redis_call("DECRBY", seq_allocs[j][1], seq_allocs[j][2])
             end
-            return "SEQ: " .. (failed and last.err or "Counter overflow") .. " " .. alloc[1]
+            if failed then
+                return last  -- 原样返回 Redis 的错误（WRONGTYPE、OOM、READONLY……）
+            end
+            return "SEQ: Counter out of range " .. alloc[1]
         end
         seq_next[i] = last - alloc[2] + 1
     end
@@ -297,28 +302,33 @@ push 循环认 HSETSEQ：
 
 ```lua
 for _, cmd in ipairs(pushes) do
-    if cmd[1] == "HSETSEQ" then
+    if seq_next and cmd[1] == "HSETSEQ" then
         local n = seq_next[cmd[2]]
         seq_next[cmd[2]] = n + 1
-        cmd[#cmd] = string_format("%.0f", n)
+        cmd[#cmd] = string.format("%.0f", n)
         redis_call("HSET", unpack(cmd, 6))
-        redis_call("ZADD", cmd[3], 0, cmd[4] .. seq_bytes(n) .. "\0" .. cmd[5])
+        -- 号的 8 字节编码在这里内联拼（同 to_sortable_bytes），然后
+        redis_call("ZADD", cmd[3], 0, cmd[4] .. 编码 .. "\0" .. cmd[5])
     else
         redis_call(unpack(cmd))
     end
 end
 ```
 
-- **`seq_bytes(n)`**：用纯 Lua 算术拼 8 字节，不依赖 `struct` 库。n < 2^53 时，`%` 和除法都是精确的。
+- **不用提交序号列的提交不多付开销**（实现审核测出来的）：所有提交都走这个脚本。初版每次执行都建发号用的闭包和表、
+  payload 总带空的第 6 段，单行 update 在 master 上慢了约 15%。现在只有要发号时才带第 6 段、才建表。
+- **号的编码**：用纯 Lua 算术拼 8 字节，不依赖 `struct` 库。n < 2^53 时，`%` 和除法都是精确的。
   - 审核时在 Redis 8.10 上实测过：在 1、255、256、2^31、2^32、2^48、1e14、2^53-1 这些值上，和 `to_sortable_bytes(np.int64(n))` 逐字节一致。
 - **号转成字符串用 `string.format("%.0f", n)`**：
   - 不用 `%d`：Lua 5.1 的 `%d` 先转成 C 的 long，在 long 为 32 位的平台上（比如 Windows 原生的 Redis 兼容实现），2^31 以上的值会截断。
   - 不用 `tostring` 或 `..`：Lua 5.1 的数转字符串用 `%.14g`，≥ 1e14 的值会变成科学计数法。
   - 审核实测：在 Redis 8.10 上，`%.0f` 和 `%d` 对 1 到 2^53-1 的各个测试值，输出逐字节相同。
 - **发号阶段全成或全不发**：
-  - INCRBY 用 `redis.pcall`。任何一个计数器出错（比如 key 被写成了别的类型）或越界，就把前面已经加上去的减回去，然后返回 `SEQ`。
+  - INCRBY 用 `redis.pcall`。任何一个计数器出错或越界，就把前面已经加上去的减回去。
+  - 出错时原样返回 Redis 的错误（redis-py 照旧抛 WRONGTYPE、OOM、READONLY 这些异常，运维不会被误导成计数器坏了）；
+    只有发出的号不在 [1, 2^53) 时返回 `SEQ`。
   - 只有失败路径多花开销，成功路径和原来一样。
-  - DECRBY 回 0 的 key 会留着，值是 0，和 key 不存在等价。
+  - 原来没有的计数器 key，DECRBY 回 0 之后会留着，值是 0，和 key 不存在等价。
 - **先发号、再写入**：
   - Lua 运行时出错不会回滚已经执行的写入。发号排在所有写入之前，Phase 2 写到一半出错时，坏情况是留下缺口，而不是发出重号。
   - 缺口会让消费方停在缺口前面，但 §9 能确认之后跳过；重号会让消费方静默漏掉一行，所以宁可留缺口。
@@ -331,7 +341,11 @@ end
 `commit.py` 逐段对应 Lua：
 
 - `run_commit` 读第 6 段，缺省为空。
-- Phase 2 开头：先读出各计数器的当前值、检查越界，全部通过之后再写入。失败时什么都不留，和 Lua 的减回效果一致。
+- Phase 2 开头：先读出各计数器的当前值、检查越界，全部通过之后再写入。失败时什么都不留，和 Lua 的减回效果一致
+  （Redis 会留下值为 0 的 key，语义等价）。
+  - 计数器按 Redis string2ll 的规则认整数（可选负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里），
+    Python 的 `int()` 会放过 " 5"、"+5"、"05"、"1_0"。
+  - 不是整数、加了会溢出 int64 时，Redis 是 INCRBY 报错（原样抛出），这里返回同样内容的 SEQ 失败串。
 - `_run_pushes` 认 HSETSEQ：
   - 用发出的号替换占位，hset 这一行；同名字段取最后一个值，和 Redis 一致；
   - zadd 组 key。
@@ -347,7 +361,7 @@ end
 
 `store.py` 新增原语，都在调用方的写事务里执行：
 
-- `kv_get_int(key) -> int`
+- `kv_get_int(key) -> int | None`：不存在为 0，不是 Redis 认的整数为 None
 - `kv_set(key, value)`
 - `kv_delete_prefix(prefix) -> int`
 - `kv_rename_prefix(old, new)`
@@ -409,6 +423,10 @@ end
 - **在建的阶段检查**，任何一条不通过，所有旧索引和计数器都原样保留：
   - 最大号 ≥ 2^53：报错（§8.1）；
   - 组内重复：报错并列出重复的组（§14.2）。
+  - "原样保留"只在不经过迁移脚本的路径上成立（只改了索引定义、`commit_seq`，或者单纯重建）。加删改了列时，
+    迁移脚本已经把数据搬到新定义下、写了新版本的 meta，旧索引也跟着临时表删掉了，之后才重建。这时重建失败，
+    `MigrationScript.upgrade` 把 meta 的版本号写成 `REBUILD_PENDING_VERSION`，服务器拒绝启动；修好数据后再跑
+    `hetu upgrade`，`_finish_schema_migration` 认出这个版本号，按当前定义直接重建（实现审核发现，§18）。
 - **先校准、再换上索引**：把计数器设成 max(现有值, 最大号)，只升不降，然后才 RENAME。
   - 这个顺序是为了防进程中途被杀：换上之后、校准之前被杀的话，服务器照样能启动，计数器却低于库里的数据，会发出重号。
   - 只往上调计数器，永远不会产生重号。
@@ -432,7 +450,7 @@ end
 服务端消费：
 
 ```python
-# LogCursor 是消费方自己的游标表，owner 是 unique；一个游标只给一个消费方用
+# LogCursor 是消费方自己的游标表，owner 是 unique；一个游标对应一个逻辑上的消费方
 async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
     log = ctx.repo[ChangeLog]
     rows = await log.range(
@@ -440,40 +458,51 @@ async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
     )
     expected = cursor.last + 1
     for row in rows:
-        while expected < row.seq:  # 中间缺了号
-            if (missing := await log.get(seq=expected, owner=owner)) is not None:
+        if expected < row.seq:  # 中间缺了号：一次闭区间读确认整段
+            for missing in await log.range(
+                seq=(expected, row.seq - 1), owner=owner, limit=-1
+            ):
                 handle(missing)  # range 漏读了它：取行落到了进度不同的副本
-            expected += 1        # 读空的号，提交时会在 master 上确认它确实不存在
         handle(row)
         expected = row.seq + 1
     cursor.last = expected - 1
 ```
 
+（初稿是逐号 `get` 确认，代价随缺口长度线性增长：头部裁掉 5000 行时，一次消费在 Redis 上要 3.9 秒、提交脚本
+占用 master 9.6ms。实现审核改成每段缺口一次闭区间读，见 §18。）
+
 - **为什么用 `phantom_check=False`**：
   - 没读满 limit 时，观察区间开到 +inf。从读到提交之间，同组每来一条新日志，消费方的提交都会 RaceCondition 重试。
   - 消费方的逻辑不依赖"区间里没有别的行"，这正是 `range` 文档说可以关掉的场景。
-  - 读到的行仍然有 VER 校验，游标行的 VER 防止两个消费方同时推进。
-- **为什么跳过缺口是安全的**（审核时实测过提交里的检查）：
-  - `get` 读空会登记观察，提交时变成一条 CNT，在 master 上确认这一号确实没有行；
+  - 读到的行仍然有 VER 校验。一个游标对应一个逻辑上的消费方，同一个消费方的多个实例可以共用它：游标行的 VER
+    防止它们同时推进、重复处理。
+- **为什么跳过缺口是安全的**（实测过提交里的检查）：
+  - 确认缺口的那次 range 开着区间校验（默认），提交时变成一条 CNT，在 master 上确认这一段确实没有行；
+  - 区间的上界比一个已经提交的号小，新写入的行进不来，不会因为别的写入白白判竞态；
   - 后面那一行是读进来的库里行，提交时它的 VER 确认它在 master 上已经提交；
-  - 号按提交顺序发：后面的号已经提交、前面的号在 master 上没有，它就永远不会再出现（§4.5 的回退除外）；
-  - 副本落后导致 `get` 读空、而 master 上其实有这一行时，CNT 对不上，判竞态重试；
-  - 不新增 master 读：检查都在提交脚本里。每跳过一个号，提交时多一条 CNT。
+  - 号按提交顺序发：后面的号已经提交、前面这一段在 master 上没有行，以后也不会再有（§4.5 的回退除外）；
+  - 副本落后导致读空、而 master 上其实有行时，CNT 对不上，判竞态重试；取行时漏读，报 InconsistentRangeRead；
+  - 不新增 master 读：检查都在提交脚本里。每段缺口提交时多一条 CNT，和缺口长度无关。
 - **注意**：
   - `phantom_check=False` 时，range 取行读不到的行会被静默跳过：`repo.py:604-605` 只在登记了观察时才判竞态。所以缺号时一定要按上面的写法确认，不能直接越过。
   - `handle` 里如果有外部副作用（发奖励、调别的服务），重试时会重复执行，要自己做幂等。
   - 每读一行，提交时 master 多一条 VER（§10）。
 - **客户端消费**：
-  - 用 `WatchRange("seq", cursor + 1, inf, limit, group: …)`。窗口满了 limit 之后，用新的游标重新订阅，并退订旧的。同一批推送里有多行时，按号排序之后再处理。
+  - 用 `WatchRange("seq", cursor + 1, inf, limit, group: …)`。窗口满了 limit 之后，用新的游标重新订阅，并退订旧的。
+  - 游标只沿连续的号推进：同一批推送按号排好，一个号接一个号地处理，遇到缺号就停、后面的先缓存。订阅重读时取行也可能
+    落到进度不同的副本、漏掉中间一行（`sub.py` 的 `_rerange` 读不到的行先丢掉，等下一批推送补上），直接把游标推到这一批
+    最大的号会永远漏掉它。
   - 这个组的每一行都必须对这个客户端可见，比如 OWNER 组件加 `groupby="owner"`。RLS 不可见的行会占着 limit 名额、不推送，客户端会永远停在它前面。做不到全部可见的，改用服务端消费。
-  - 客户端没法在事务里确认缺口。只能保证服务端不删中间的行，或者提供一个服务端 System 来确认并跳过缺口。
-  - 想拿到刚插入那一行的号：System 返回的行里号是 0，可以订阅这一组，再用 `CallSystemAwaitPush`（`rpcs`）调用，推送里带着号。
+  - 客户端没法在事务里确认缺口。只能保证服务端不删中间的行，或者缺号一直不补时，调一个服务端 System 来确认并跳过缺口。
+  - 想拿到刚插入那一行的号：System 返回的行里号是 0，可以订阅这一组，再用 `CallSystemAwaitPush`（`rpcs`）调用，按返回的行 id
+    找推送来的那一行。前提是新行落在订阅的窗口里（比如 `desc` 订最新几行），窗口满了就不会推送。
 - **裁剪**：只删所有消费方都已经越过的头部。删中间的行会留下洞；服务端消费方能按上面的写法确认后跳过，客户端消费方会停在洞前面。
 - **易失表**：每次维护后，号从 1 重来，消费方的游标要跟着清。
 - **第三方消费方**（游标存在库外，比如把日志同步到外部系统）：
-  - 号可能被复用（§4.5）。所以除了号，还要记下那一行的雪花 id。
-  - 读的时候把游标所在那一号一起读回来，核对 id。对不上或者读不到，说明号被复用了，要往回找到 id 还对得上的位置，再继续。
-  - 发现组内最大号小于游标时，报警。
+  - 号可能被复用（§4.5）。所以除了号，还要记下那一行的雪花 id，读的时候把游标所在那一号一起读回来核对：
+    - id 对不上：号被复用了，往回找到 id 还对得上的位置，从那里继续；
+    - 读不到，组内最大号 ≥ 游标：那一行被删了（比如裁剪），照常往后读；
+    - 读不到，组内最大号 < 游标：数据回退了，报警。
   - 服务端消费方不需要这样做，原因见 §4.5。
 
 ## 10. 性能
@@ -625,7 +654,7 @@ zh 和 en 在同一个提交里手工同步。不要跑 `translate_new_content.p
    - ≤ 0 的号视为没有号；
    - 最大号 ≥ 2^53、组内重复号时报错。
 7. 第一版不返回号。
-8. 消费方的推荐写法：`phantom_check=False`，遇到缺号时在同一个事务里 `get` 确认后再跳过。
+8. 消费方的推荐写法：`phantom_check=False`，遇到缺号时在同一个事务里用一次闭区间 `range` 确认这一段后再跳过（实现审核时从逐号 `get` 改来，§18）。
 
 ## 14. 用户的决定（2026-11-09）
 
@@ -765,6 +794,52 @@ zh 和 en 在同一个提交里手工同步。不要跑 `translate_new_content.p
 - **两个后端提交脚本一致的用例**：没有加进 `test_backend_client.py`，放在 `test_commit_seq.py`、两个后端共跑。覆盖的是发号的全成或全不发、越界、HSETSEQ 最后一对覆盖残留的 0。
 - **upsert 锚定非 unique 字段从 assert 改成 raise ValueError**：`test_backend_session_basic.py::test_upsert_limit` 的预期跟着从 AssertionError 改成了 ValueError。
 - **C# 文档**：示例用 `long.MaxValue` 作整数列的上界。
-- **没有做的**：
-  - "先校准、再换上"只靠代码顺序保证，没有模拟中途被杀的用例；
-  - `LocalApp.get` / `range` 的 docstring 写的是"语义同 `repo.get` / `repo.range`"，例外已经写在 repo 那边，没有另改。
+- **LocalApp 的 docstring 没改**：`LocalApp.get` 写的是"语义同 `repo.get`"，`range` 写的是"签名与 `repo.range` 对齐"。
+  LocalApp 每次调用都是只读的新事务，不会有本事务 insert 的行，例外不适用。
+
+## 18. 实现审核记录（2026-11-09）
+
+实现完成后做了两路独立代码审核：一路看提交脚本、存储与维护，一路看定义、事务语义、文档。审核员只拿到本文与代码，
+都写了临时用例实测，没有改仓库。
+
+**核实无误的部分**：
+
+- 发号的时机、全成或全不发（包括跨组件、副本组件、一次多个号跨过 2^53），两个后端的返回串逐字节一致；
+- 号的编码、`%.0f` 与 Python 侧一致，HSETSEQ 的号放在最后一对、下标与 `seq_allocs` 的顺序一致；
+- 计数器 key 的 hash tag、在换簇 / 改名到临时表 / drop / 重建 / 副本组件时的去留；
+- 定义校验完整；全仓只有 `repo.insert` / `repo.update` 写 idmap，upsert、LocalApp、headless、Sandbox、
+  `ctx.session_commit()` 都走同一条路；
+- "未分配号的行不在这个索引上"不破坏读己之写、limit 截断、防幻读、InconsistentRangeRead、negative cache、订阅；
+- zh / en 文档逐条一致，`docs/api` 与 docstring 同步；没有新增 PUBLISH 和事务路径上的 master 读。
+
+**按审核意见修改的部分**（每条一个提交，带测试）：
+
+1. 【中】改 dtype 的迁移，迁移脚本搬完数据后重建失败（组内重复号、号到 2^53，unique 冲突也一样）：meta 已经是新版本，
+   服务器照常启动，而索引没建成、计数器没校准，会发出重号。改成重建失败时把 meta 的版本号写成
+   `REBUILD_PENDING_VERSION`，服务器拒绝启动；修好数据后再跑 `hetu upgrade`，按当前定义直接重建（§8.2）。
+   审核员另提的"迁移前按目标定义预检一遍"没有做：分不清默认脚本和改过的脚本，改过的脚本可能本来就要重新编号。
+2. 【中】消费方逐号 `get` 确认缺口，代价随缺口长度线性增长。改成每段缺口一次闭区间 range（§9），补了"确认时副本落后
+   要判竞态"和"大缺口只读一次"两条用例。
+3. 【中低】不用提交序号列的提交，在 master 上也多了 0.3–0.4µs（单行 update 多 15%）：每次都建发号用的闭包和表、payload
+   总带空的第 6 段。改成只有要发号时才带、才建（§6.2）。
+4. 【中】客户端文档"处理完把游标推到最后一个号"会永久越过临时缺号：改成只沿连续的号推进。另外写明拿新行的号要求新行
+   落在订阅窗口里。
+5. 【中低】文档说旧版 headless "读不懂"：传组件类的旧版 headless 其实能连上，并写入没有号的行。改成先升级 headless 再打开。
+6. 【低】pcall 把 INCRBY 的所有错误都改写成 SEQ：改成原样返回 Redis 的错误，只有号越界才走 SEQ；计数器被改成负数时
+   也不发（号会 ≤ 0）。
+7. 【低】两个后端在计数器异常时不一致：SQLite 改按 Redis string2ll 的规则认整数、溢出 int64 的报错对齐；重建校准不用
+   `tonumber`，被写坏的值（含不是字符串的）直接改写。
+8. 【低】第三方消费方"读不到即号被复用"和裁剪冲突：分三种结果（§9）。
+9. 【低】RLS 判定列的检查只在 OWNER / RLS 权限下生效，`rls_compare` 格式不对时不再先抛 IndexError；`property_field` 的
+   `index` 参数说明补上 groupby、commit_seq；headless 比对组件级不认识的键也判不一致。
+10. 测试缺口：NX / CNT 失败不耗号、绕过 repo 改分组列、本事务 insert 的行改号、一次提交两张提交序号表、headless 写入、
+    号为 0 / 负数的历史行、WRONGTYPE、计数器的严格解析、全成或全不发时失败的行不存在、换上索引出错时计数器已校准、
+    改 groupby 的端到端迁移。
+11. 文档：游标对应逻辑上的消费方、缺口来源补上提交脚本中途出错、第三方的复用清单补上 AOF / RDB 重启；
+    `sqlite/commit.py` 的模块说明、本文 §3.1 / §3.2 / §6.3 / §17 的出入。
+
+**没有采纳 / 记为已知问题**：
+
+- 订阅推送是连续前缀没有单独的用例：底层性质由"副本读到的总是连续前缀"的用例覆盖，审核员按组订阅实测过（1..15 都带真号）；
+- 不用提交序号列的路径没有性能守门用例；
+- `test_servant_reads_are_contiguous_prefixes` 只在有独立副本的 redis / valkey 上有意义，sqlite、cluster 上只是照跑。

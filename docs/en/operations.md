@@ -358,6 +358,14 @@ slow; pass `--no-rebuild-index` to skip it. When you add or remove `groupby`
 component's indexes even with `--no-rebuild-index`: the index definition
 changed, and the old index could not be queried.
 
+A migration that adds, drops or changes columns first has the migration script
+move the data to the new definition, and only then rebuilds the indexes. If that
+rebuild fails (e.g. a unique conflict, or duplicate numbers in a commit sequence
+group), the data has already been moved and the old indexes are gone: the table
+is marked "rebuild pending" and the server refuses to start. Fix the rows
+directly (e.g. with `TableMaintenance.upsert_row`) and run `upgrade` again; it
+rebuilds with the current definition right away.
+
 The same happens when HeTu itself changes how indexes are stored. For example,
 after rows sharing an index value started being ordered by the numeric `id`,
 indexes written by older versions sort them wrongly: after upgrading HeTu every
@@ -383,8 +391,11 @@ keep these in mind when migrating and maintaining:
 - **Turning `commit_seq` on**: on an existing sequence field the values are
   kept, and the index rebuild sets each group's counter to its largest number so
   numbering carries on; the rebuild happens even with `--no-rebuild-index`. If a
-  group has duplicate numbers or a number reaches 2^53, `upgrade` fails without
-  changing anything; write a migration script that renumbers them first. When
+  group has duplicate numbers or a number reaches 2^53, `upgrade` fails: when
+  only `commit_seq` changed it changes nothing, so write a migration script that
+  renumbers them first; when columns were also added, dropped or changed, the
+  migration script has already moved the data and the table is marked rebuild
+  pending (see above): fix the rows and run `upgrade` again. When
   you add a new `commit_seq` column, existing rows get 0, i.e. no number; to
   number them, assign 1, 2, 3… per group in the migration script.
 - **Custom migration scripts** should follow the template: rename the original
