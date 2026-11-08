@@ -618,8 +618,9 @@ namespace HeTu
         ///     检查并拷贝复合索引的分组值 {分组列: 值}，订阅入口一进来就调。null 和空字典都返回
         ///     null（不带 group）。不合法抛 <see cref="ArgumentException" />，请求不会发出去：服务端
         ///     会以 4002 断开连接，会话随之进入终态。值只收整数类型、bool、刚好是整数（且在 64 位
-        ///     整数范围内）的 double / float、string、byte[]；"整数列给了字符串"这类要看列类型的错误
-        ///     留给服务端。拷贝是新的普通 Dictionary（MessagePack 能确定地序列化，InspectorTrace
+        ///     整数范围内）的 double / float、string、byte[]；"整数列给了不是数字的字符串"这类要看
+        ///     列类型的错误留给服务端（整数列收数字字符串，和单列索引一样）。拷贝是新的普通
+        ///     Dictionary（MessagePack 能确定地序列化，InspectorTrace
         ///     认得 IDictionary），按键的 Ordinal 顺序插入，byte[] 也复制一份：之后的 payload、
         ///     恢复参数、pending 闭包、查询键都用它，调用方事后改字典不影响已发出的订阅。
         /// </summary>

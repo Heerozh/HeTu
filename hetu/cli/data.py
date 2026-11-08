@@ -71,16 +71,24 @@ def convert_value(dtype: np.dtype, raw: str, *, point: bool) -> Any:
 
 def convert_group_value(dtype: np.dtype, raw: str) -> Any:
     """
-    复合索引的分组值按字面值转换：不处理 [ / ( 前缀（分组值是等值，没有开闭区间），整数列要是
-    整数。之后交给 resolve_group_ 按列类型校验
+    复合索引的分组值按字面值转换：不处理 [ / ( 前缀（分组值是等值，没有开闭区间）。整数列和单列
+    索引的值同一套解析（exact_number_），要刚好是整数，"3.0" 也算 3。之后交给 resolve_group_
+    按列类型校验范围
     """
+    from ..data.backend.base import exact_number_
+
     if dtype.kind in "iu":
         try:
-            return int(raw)
-        except ValueError as e:
+            number = exact_number_(raw)
+        except ValueError:
+            number = None
+        if isinstance(number, float) and number.is_integer():
+            number = int(number)
+        if not isinstance(number, int):
             raise UsageError(
                 _("分组值 {raw} 不能转换成列类型 {dtype}").format(raw=raw, dtype=dtype)
-            ) from e
+            )
+        return number
     return raw.encode("utf-8") if dtype.kind == "S" else raw
 
 

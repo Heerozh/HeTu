@@ -120,6 +120,34 @@ async def test_group_subscription_uses_group_channel(broker, rank_ref, admin_ctx
     await updates_until(broker, lambda u: u[sub_id][new_id]["level"] == 7)
 
 
+async def test_group_subscription_numeric_string(broker, rank_ref, admin_ctx):
+    """
+    整数分组列收数字字符串（同单列索引）：订的是同一组的频道，推送照常。sub_id 按原值算，和整数
+    写法是两个订阅（结果一样，只是不共享）
+    """
+    backend = broker._backend
+    comp = rank_ref.comp_cls
+    await _insert(backend, comp, {"zone": 1, "level": 5}, {"zone": 2, "level": 6})
+    sub_id, rows = await broker.subscribe_range(
+        rank_ref, admin_ctx, "level", 0, 100, limit=10, group={"zone": "1"}
+    )
+    assert sub_id and [r["level"] for r in rows] == [5]
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert idx_sub.index_channel == backend.servant.index_group_channel(
+        rank_ref, "level", {"zone": 1}
+    )
+    int_sub_id, int_rows = await broker.subscribe_range(
+        rank_ref, admin_ctx, "level", 0, 100, limit=10, group={"zone": 1}
+    )
+    assert int_sub_id and int_sub_id != sub_id and int_rows == rows
+    get_id, row = await broker.subscribe_get(
+        rank_ref, admin_ctx, "level", 5, group={"zone": "1"}
+    )
+    assert get_id and row and row["level"] == 5
+    (new_id,) = await _insert(backend, comp, {"zone": 1, "level": 7})
+    await updates_until(broker, lambda u: u[sub_id][new_id]["level"] == 7)
+
+
 @pytest.mark.parametrize("desc", [False, True])
 async def test_group_subscription_leave_backfills(broker, rank_ref, admin_ctx, desc):
     """
@@ -249,7 +277,8 @@ async def test_group_subscription_rejects(broker, rank_ref, admin_ctx):
         ({}, "分组"),
         ({"group": {"zone": 1, "qty": 2}}, "正好给出"),
         ({"group": {"zone": 2**40}}, "超出"),
-        ({"group": {"zone": "1"}}, "只收数字"),
+        ({"group": {"zone": "x"}}, "不是数字"),
+        ({"group": {"zone": None}}, "只收数字"),
         ({"group": {1: 1}}, "正好给出"),
     ]
     for kwargs, match in bad:

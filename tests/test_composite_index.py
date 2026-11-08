@@ -356,6 +356,10 @@ def test_resolve_group(new_component_env):
     assert resolve_group_(comp, "level", {"zone": np.int64(3)}) == (3,)
     assert resolve_group_(comp, "level", {"zone": 3.0}) == (3,)
     assert resolve_group_(comp, "level", {"zone": True}) == (1,)
+    # 数字字符串和单列索引的查询值一样解析：先按整数、不行再按小数
+    for text in ("3", "3.0", " 3 ", b"3", np.str_("3")):
+        assert resolve_group_(comp, "level", {"zone": text}) == (3,), text
+    assert resolve_group_(comp, "level", {"zone": "-2147483648"}) == (-(2**31),)
     # 字符串按存储规则：截断到列宽、去掉结尾的 \x00
     assert resolve_group_(comp, "name", {"server": "s1\x00", "zone": 1}) == ("s1", 1)
     assert resolve_group_(comp, "name", {"server": "abcdefghij", "zone": 1}) == (
@@ -373,8 +377,17 @@ def test_resolve_group(new_component_env):
         ("level", {"zone": np.int64(2**40)}, "超出"),
         ("level", {"zone": 3.5}, "不是整数"),
         ("level", {"zone": np.nan}, "不是整数"),
-        ("level", {"zone": "3"}, "只收数字"),
+        ("level", {"zone": "3.5"}, "不是整数"),
+        ("level", {"zone": "nan"}, "不是整数"),
+        ("level", {"zone": "inf"}, "不是整数"),
+        ("level", {"zone": str(2**31)}, "超出"),
+        ("level", {"zone": "abc"}, "不是数字"),
+        ("level", {"zone": ""}, "不是数字"),
+        ("level", {"zone": "(3"}, "不是数字"),  # 开闭区间的前缀，分组值用不上
+        ("level", {"zone": "[3"}, "不是数字"),
+        ("level", {"zone": b"\xff"}, "不是数字"),
         ("level", {"zone": None}, "只收数字"),
+        ("level", {"zone": [3]}, "只收数字"),
         ("level", {"zone": 1, "owner": 2}, "正好给出"),
         ("level", {1: 3}, "正好给出"),  # 键不是 str
         ("level", [("zone", 3)], "dict"),
@@ -386,6 +399,32 @@ def test_resolve_group(new_component_env):
     for index_name, group, match in bad:
         with pytest.raises(ValueError, match=match):
             resolve_group_(comp, index_name, group)
+
+
+async def test_numeric_string_group_values(slot_ref, mod_auto_backend):
+    """
+    整数分组列收数字字符串（同单列索引）：range、组内 unique 点查、upsert 都落到数值对应的组，
+    upsert 新建的行里写的是数值
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    (row_id,) = await _insert(
+        backend, comp, _slot(comp, owner=7, slot=1, zone=1, level=5)
+    )
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert list((await repo.range(level=(0, 10), zone="1")).id) == [row_id]
+        got = await repo.range("level", 0, 10, _group={"zone": "1.0"})
+        assert list(got.id) == [row_id]
+        assert (await repo.get(slot=1, owner="7")).id == row_id
+        assert await repo.get(slot=2, owner="7") is None
+        async with repo.upsert(slot=2, owner="7") as row:
+            row.level, row.name = 6, "upserted"
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(slot=2, owner=7)
+        assert row is not None and row.owner == 7 and row.level == 6
 
 
 # ---------------------------------------------------------------- 查询

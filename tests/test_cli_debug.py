@@ -486,17 +486,20 @@ def test_get_and_range_composite_index(project):
 
 
 def test_cli_group_value_conversion():
-    """分组值的转换：不处理 [ / ( 前缀，整数列要是整数"""
+    """分组值的转换：不处理 [ / ( 前缀；整数列和单列索引同一套解析，要刚好是整数"""
     import numpy as np
 
     from hetu.cli.base import UsageError
     from hetu.cli.data import convert_group_value, parse_pairs
 
     assert convert_group_value(np.dtype("<i4"), "3") == 3
+    assert convert_group_value(np.dtype("<i4"), "3.0") == 3
+    assert type(convert_group_value(np.dtype("<i4"), "3.0")) is int
     assert convert_group_value(np.dtype("<U8"), "[g") == "[g"
     assert convert_group_value(np.dtype("S8"), "(g") == b"(g"
-    with pytest.raises(UsageError):
-        convert_group_value(np.dtype("<i4"), "1.5")
+    for bad in ("1.5", "abc", "(3", "inf", "nan"):
+        with pytest.raises(UsageError):
+            convert_group_value(np.dtype("<i4"), bad)
     assert parse_pairs(["a=1", "b==2"]) == {"a": "1", "b": "=2"}
     with pytest.raises(UsageError):
         parse_pairs(["a=1", "a=2"])

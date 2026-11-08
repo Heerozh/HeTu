@@ -276,19 +276,30 @@ def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) ->
     不能直接 `dtype.type(value)`：整数会静默回绕或截断（`np.int8(np.int64(300))` 是 44、
     `np.int8(1.5)` 是 1），python int 越界抛的又是 OverflowError；字符串也不截断，和存进库里的
     值对不上。所以整数要先按精确值判断范围，字符串按存储规则（`np.array(v, dtype)[()]`）截断到
-    列宽、去掉结尾的 `\\x00`
+    列宽、去掉结尾的 `\\x00`。
+
+    整数列也收数字字符串，和单列索引的查询值同一套解析（`exact_number_`）：先按整数、不行再按
+    小数，所以 `"3"`、`"3.0"` 都等于 3。开闭区间的 `(` / `[` 前缀分组值用不上，带了就解析不了
     """
     dtype = comp_cls.dtype_map_[col]
     kind = dtype.kind
     if kind in "iu":
         if isinstance(value, (bool, np.bool_, int, np.integer)):
             number = int(value)
-        elif isinstance(value, (float, np.floating)):
-            if not float(value).is_integer():
-                raise _group_value_error(comp_cls, col, value, _("不是整数"))
-            number = int(value)
+        elif isinstance(value, (float, np.floating, str, bytes)):
+            try:
+                exact = exact_number_(value)
+            except ValueError:  # 含 bytes 不是 utf-8 时的 UnicodeDecodeError
+                raise _group_value_error(comp_cls, col, value, _("不是数字")) from None
+            if isinstance(exact, float):
+                if not exact.is_integer():  # 小数、±inf、NaN
+                    raise _group_value_error(comp_cls, col, value, _("不是整数"))
+                exact = int(exact)
+            number = exact
         else:
-            raise _group_value_error(comp_cls, col, value, _("整数列只收数字"))
+            raise _group_value_error(
+                comp_cls, col, value, _("整数列只收数字或数字字符串")
+            )
         info = np.iinfo(dtype)
         if not info.min <= number <= info.max:
             raise _group_value_error(

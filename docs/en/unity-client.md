@@ -261,11 +261,13 @@ var member = await HeTuClient.Instance.WatchRow<GuildMember>(
 ```
 
 - **Value types**: group values must be integers, bools, integral floats,
-  `string` or `byte[]`.
+  `string` or `byte[]`. An integer column also accepts a numeric string such as
+  `"3"`, the same as single-column index queries.
 - **Thrown on the spot**: an invalid value, or a `group` on `id`, throws
   `ArgumentException` and nothing is sent.
 - **Connection closed**: a misspelled group-by column, or a value of the wrong
-  type for its column (e.g. a string for an integer column), cannot be seen by
+  type for its column (e.g. a non-numeric string for an integer column, or a
+  number for a string column), cannot be seen by
   the client; the server closes the connection with 4002, which is terminal for
   the session (it does not reconnect).
 - **The dictionary is copied**: changing it after the call does not affect the
