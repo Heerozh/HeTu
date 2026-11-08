@@ -65,6 +65,9 @@ class Property:
     `unique` 表示组内唯一。开启后强制启用 `index`。
     """
 
+    commit_seq: bool = False
+    """提交序号列：提交成功时由提交脚本发号，按组（`groupby`）从 1 连续编号。开启后强制启用 `index`。"""
+
 
 def property_field(
     default: Any,
@@ -74,6 +77,7 @@ def property_field(
     point_sub: bool = False,
     hidden: bool = False,
     groupby: str | tuple[str, ...] | list[str] = (),
+    commit_seq: bool = False,
 ) -> Any:
     """
     Define a Component field declaration helper.
@@ -156,6 +160,31 @@ def property_field(
         Each group is stored as its own zset, so group subscriptions are only woken by
         writes to their group without `point_sub` (ignored with a warning) and commits
         publish nothing for it. Group-by columns must be integer, str or bytes fields.
+    commit_seq : bool, default False
+        提交序号列：号在提交时由提交脚本发，所有检查都通过之后才发，例如
+        `seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")` 是"每个 owner
+        各自从 1 连续编号"，不写 `groupby` 就是整张表一个序列。保证：
+
+        - 提交成功才发号：冲突、重试、失败的事务都不消耗号；
+        - 组内连续、按提交顺序，不重号、不回退；
+        - 在同一个节点上读到 k 号时，1..k-1 号（没被删的）一定也读得到。
+
+        例外是主库故障切换、从备份恢复、易失表维护之后号可能被复用，消费方的写法见文档。
+        这一列由提交脚本写：insert 时必须是 0，update 不能改它；有号的行也不能改分组列。
+        事务里 insert 之后、提交之前它一直是 0，按这个索引查不到这些行。dtype 只能是
+        `np.int64`，default 必须是 0；不能同时 `unique`（组内唯一由发号保证）；`point_sub`
+        用不上，写了警告并忽略；一个组件最多一个。开启后强制启用 `index`。
+
+        Commit sequence: numbers are assigned by the commit script after every check
+        passes, consecutive within each group (`groupby`) in commit order, starting
+        at 1. Aborted, conflicting or retried transactions consume no numbers.
+        Reading k on one node means 1..k-1 (unless deleted) are visible there too.
+        Numbers may be reused after a failover, a backup restore or a volatile
+        table flush. The column is written by the commit script only: it must be 0
+        on insert, cannot be updated, and rows that have a number cannot change
+        group. Inside the transaction it stays 0 and uncommitted rows do not appear
+        on this index. Must be `np.int64` with default 0, cannot be `unique`, at
+        most one per component; `point_sub` is ignored with a warning.
 
     Returns
     -------
@@ -174,11 +203,11 @@ def property_field(
       否则 `row.size` 读到的是 numpy 的属性而不是字段值；
     - `default` 与 `dtype` 是否兼容；
     - `dtype` 是否可用于 NumPy structured array；
-    - `unique/index/point_sub/hidden/groupby` 组合是否合法。
+    - `unique/index/point_sub/hidden/groupby/commit_seq` 组合是否合法。
     """
     groupby = (groupby,) if isinstance(groupby, str) else tuple(groupby)
     if index is None:
-        index = unique or point_sub or bool(groupby)
+        index = unique or point_sub or bool(groupby) or commit_seq
     return Property(
         default=default,
         unique=unique,
@@ -187,6 +216,7 @@ def property_field(
         point_sub=point_sub,
         hidden=hidden,
         groupby=groupby,
+        commit_seq=commit_seq,
     )
 
 
@@ -221,6 +251,9 @@ class BaseComponent:
     index_groups_: dict[str, tuple[str, ...]]
     # 列名 -> 用到这一列的索引名（它自己的单列索引、以它为分组列的复合索引）
     column_indexes_: dict[str, tuple[str, ...]]
+    # 提交序号列（property_field(commit_seq=True)）的字段名，没有是 None。它的分组列就是
+    # index_groups_[commit_seq_]
+    commit_seq_: str | None = None
     json_: str  # Component定义的json字符串
     instances_: ClassVar[dict[str, dict[str, type[BaseComponent]]]] = {}  # 所有副本实例
     master_: type[BaseComponent] | None = None  # 该Component的主实例
@@ -262,6 +295,8 @@ class BaseComponent:
                         **({"hidden": True} if prop.hidden else {}),
                         # 同上；统一写成列表，"zone" 与 ("zone",) 得到同一个 schema 版本
                         **({"groupby": list(prop.groupby)} if prop.groupby else {}),
+                        # 同上
+                        **({"commit_seq": True} if prop.commit_seq else {}),
                     }
                     for name, prop in properties.items()
                 },
@@ -328,6 +363,9 @@ class BaseComponent:
         }
         comp.point_subs_ = frozenset(
             name for name, prop in comp.properties_ if prop.point_sub
+        )
+        comp.commit_seq_ = next(
+            (name for name, prop in comp.properties_ if prop.commit_seq), None
         )
         comp.hidden_fields_ = (
             "_version",
@@ -567,12 +605,14 @@ def define_component(
 
     Notes
     -----
-    `property_field(default, unique, index, dtype, point_sub, hidden, groupby)` 是Component的属性定义，可定义默认值和数据类型。
+    `property_field(default, unique, index, dtype, point_sub, hidden, groupby, commit_seq)` 是Component的属性定义，可定义默认值和数据类型。
         - `index` 表示此属性开启索引；
         - `unique` 表示属性值必须唯一，启动此项默认会同时打开index；
         - `point_sub` 表示此索引支持高效点订阅，启动此项默认会同时打开index；
         - `hidden` 表示此属性对客户端隐藏：订阅推送不带它，客户端也不能按它查询；
-        - `groupby` 表示建复合索引：按分组列分组、组内按此属性排序，启动此项默认会同时打开index。
+        - `groupby` 表示建复合索引：按分组列分组、组内按此属性排序，启动此项默认会同时打开index；
+        - `commit_seq` 表示提交序号列：提交成功时由提交脚本按组从 1 连续发号，用户不能写，
+          事务里 insert 之后、提交之前是 0，按这个索引查不到这些行，启动此项默认会同时打开index。
 
     .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
@@ -640,6 +680,26 @@ def define_component(
                 ).format(cname=cname, fname=fname)
             )
             prop.point_sub = False
+        # 提交序号列：值频道要在 Python 里按值命名，号要到提交脚本里才有，发不出来；带 groupby
+        # 的上面已经忽略过了。要排在下面 hidden + point_sub 的报错之前，hidden 的提交序号列
+        # 写了 point_sub 也是警告并忽略
+        if prop.commit_seq:
+            if prop.point_sub:
+                logger.warning(
+                    _(
+                        "⚠️ [🛠️Define] {cname}.{fname}属性设置了commit_seq，"
+                        "point_sub用不上已忽略：号要到提交时才有，发不出值频道。"
+                    ).format(cname=cname, fname=fname)
+                )
+                prop.point_sub = False
+            if not prop.index:
+                logger.warning(
+                    _(
+                        "⚠️ [🛠️Define] {cname}.{fname}属性设置了commit_seq时，"
+                        "index不能设置为False。"
+                    ).format(cname=cname, fname=fname)
+                )
+                prop.index = True
         # 开启point_sub时，同样强制index为True（值频道是索引的"某个值"）
         if prop.point_sub and not prop.index:
             logger.warning(
@@ -784,6 +844,69 @@ def define_component(
                     )
                 )
 
+    def _commit_seq_define_check(cname: str, properties: dict[str, Property]):
+        """
+        提交序号列（commit_seq）的定义检查，在所有字段都经过 _normalize_prop 之后做。default
+        规范成 int 0：写成 0.0、False 时 json 也写 0，同一个定义只有一个 schema 版本
+        """
+        fields = [name for name, prop in properties.items() if prop.commit_seq]
+        if len(fields) > 1:
+            raise ValueError(
+                _("{cname}定义出错，最多只能有一个commit_seq字段：{fields}").format(
+                    cname=cname, fields=", ".join(fields)
+                )
+            )
+        for fname in fields:
+            prop = properties[fname]
+            dtype = np.dtype(prop.dtype)
+            # 提交脚本里的数是 Lua 的 double，2^53 以内精确；窄整数会在类型上限溢出
+            if dtype.kind != "i" or dtype.itemsize != 8:
+                raise ValueError(
+                    _(
+                        "{cname}.{fname}属性定义出错，commit_seq的类型只能是np.int64，"
+                        "不能是{dtype}"
+                    ).format(cname=cname, fname=fname, dtype=dtype)
+                )
+            # 0 表示"还没发号"，号从 1 开始
+            default = prop.default
+            if not isinstance(default, (int, float, np.number)) or default != 0:
+                raise ValueError(
+                    _(
+                        "{cname}.{fname}属性定义出错，commit_seq的default必须是0："
+                        "0表示还没发号，号从1开始"
+                    ).format(cname=cname, fname=fname)
+                )
+            prop.default = 0
+            # 未分配的行都是 0：登记成 unique 的话本地检查会让同组的第二次 insert 撞车
+            if prop.unique:
+                raise ValueError(
+                    _(
+                        "{cname}.{fname}属性定义出错，commit_seq不能同时设置unique："
+                        "组内唯一由发号保证"
+                    ).format(cname=cname, fname=fname)
+                )
+            # insert 时别的索引按 Python 手里的行（号还是 0）算 member，拿它当分组列的复合
+            # 索引会把行放进号为 0 的那一组
+            for other, other_prop in properties.items():
+                if fname in other_prop.groupby:
+                    raise ValueError(
+                        _(
+                            "{cname}.{other}的groupby定义出错，commit_seq字段`{fname}`"
+                            "不能当分组列：它的号要到提交时才有"
+                        ).format(cname=cname, other=other, fname=fname)
+                    )
+            # 按发出来的号判定可见性没有意义
+            rls_col = "owner" if permission == Permission.OWNER else None
+            if rls_compare is not None:
+                rls_col = rls_compare[1]
+            if fname == rls_col:
+                raise ValueError(
+                    _(
+                        "{cname}.{fname}属性定义出错，commit_seq字段不能用作行级权限的"
+                        "判定列"
+                    ).format(cname=cname, fname=fname)
+                )
+
     def warp(cls):
         # class名合法性检测
         if csharp_keyword.iskeyword(cls.__name__):
@@ -820,6 +943,7 @@ def define_component(
             cls_name=cls.__name__
         )
         _groupby_define_check(cls.__name__, properties)
+        _commit_seq_define_check(cls.__name__, properties)
 
         # 添加保留键，如果冲突，报错
         assert "id" not in properties, _(
