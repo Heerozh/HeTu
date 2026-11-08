@@ -354,6 +354,8 @@ def list_components(namespace: str) -> list[dict]:
                     "index": name in comp.indexes_,
                     # 复合索引的分组列：查询时要一并给出
                     "groupby": list(prop.groupby),
+                    # 提交序号列：号由提交脚本发，不能写
+                    "commit_seq": bool(prop.commit_seq),
                     "hidden": bool(prop.hidden),
                 }
             )

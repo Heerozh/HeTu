@@ -22,7 +22,7 @@ Everything an app touches is exported at the top level:
 | Symbol                                                                               | Role                                                     |
 |--------------------------------------------------------------------------------------|----------------------------------------------------------|
 | `@define_component(namespace=, permission=, backend=, volatile=)`                    | Declare a typed table                                    |
-| `property_field(default, dtype=, index=, unique=, point_sub=, hidden=, groupby=)`    | Declare a column                                         |
+| `property_field(default, dtype=, index=, unique=, point_sub=, hidden=, groupby=, commit_seq=)` | Declare a column                               |
 | `BaseComponent`                                                                      | Base class for a component; `.new_row()`, `.new_rows(n)` |
 | `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC                              |
 | `@define_endpoint(namespace=, permission=)`                                          | Declare a raw (non-transactional) RPC                    |
@@ -72,6 +72,17 @@ working examples — read them first.
   int / str / bytes only. Clients subscribe with a `group` argument; each group
   is its own zset, so a group subscription only wakes on that group's writes —
   no `point_sub` needed (it is ignored on composite indexes).
+- **Commit sequence** — `seq: np.int64 = property_field(0, commit_seq=True,
+  groupby="owner")` is numbered by the commit script: per group from 1,
+  consecutive, in commit order, only for commits that succeed (retries and
+  failures consume nothing). Leave it 0 on insert and never update it; a row
+  that has a number cannot change group. Inside the transaction it stays 0 and
+  uncommitted rows don't show up on that index. For binlog-style consumers read
+  `range(seq=(cursor + 1, np.inf), owner=..., phantom_check=False)` and, when
+  numbers are missing before `row.seq`, read that span once with
+  `range(seq=(expected, row.seq - 1), owner=..., limit=-1)` (range check on)
+  before skipping it (see Advanced "Binlog-style syncing"); never derive the
+  next number yourself.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,

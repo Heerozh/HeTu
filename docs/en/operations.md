@@ -358,6 +358,14 @@ slow; pass `--no-rebuild-index` to skip it. When you add or remove `groupby`
 component's indexes even with `--no-rebuild-index`: the index definition
 changed, and the old index could not be queried.
 
+A migration that adds, drops or changes columns first has the migration script
+move the data to the new definition, and only then rebuilds the indexes. If that
+rebuild fails (e.g. a unique conflict, or duplicate numbers in a commit sequence
+group), the data has already been moved and the old indexes are gone: the table
+is marked "rebuild pending" and the server refuses to start. Fix the rows
+directly (e.g. with `TableMaintenance.upsert_row`) and run `upgrade` again; it
+rebuilds with the current definition right away.
+
 The same happens when HeTu itself changes how indexes are stored. For example,
 after rows sharing an index value started being ordered by the numeric `id`,
 indexes written by older versions sort them wrongly: after upgrading HeTu every
@@ -376,6 +384,48 @@ an older server is disconnected too. Prefer adding the composite index on a
 index. Older HeTu versions cannot read the schema of a component that uses
 `groupby`, so do not run old and new versions against the same database while
 upgrading.
+
+Commit sequence columns (`commit_seq`) are numbered from one counter per group;
+keep these in mind when migrating and maintaining:
+
+- **Turning `commit_seq` on**: on an existing sequence field the values are
+  kept, and the index rebuild sets each group's counter to its largest number so
+  numbering carries on; the rebuild happens even with `--no-rebuild-index`. If a
+  group has duplicate numbers or a number reaches 2^53, `upgrade` fails: when
+  only `commit_seq` changed it changes nothing, so write a migration script that
+  renumbers them first; when columns were also added, dropped or changed, the
+  migration script has already moved the data and the table is marked rebuild
+  pending (see above): fix the rows and run `upgrade` again. When
+  you add a new `commit_seq` column, existing rows get 0, i.e. no number; to
+  number them, assign 1, 2, 3… per group in the migration script.
+- **Custom migration scripts** should follow the template: rename the original
+  table to a temporary one, copy, then drop the temporary table — don't drop the
+  original table. The counters stay under the original table name and keep
+  going after the migration. If you rename the component or the field, or
+  change the `groupby` of the `commit_seq` field, the old counters no longer
+  apply; new ones are calibrated from the data, so numbers of deleted rows at
+  the tail may be handed out again. Counters are not cleaned up after turning
+  `commit_seq` off or removing the field.
+- **After importing only rows, or deleting a counter by hand**, the counter is
+  behind the data and would hand out duplicate numbers; run `upgrade` once (it
+  rebuilds all indexes by default) to recalibrate. Restoring the whole database
+  from a backup keeps data and counters consistent, so no calibration is needed;
+  but numbering goes back to where the backup was, and numbers handed out after
+  the backup will be handed out again — consumers that keep their cursor
+  outside the database must check snowflake ids (see "Binlog-style syncing" in
+  [Advanced](advanced.md)).
+- **Volatile tables** are cleared at every maintenance, and numbering starts
+  over from 1.
+- **Don't use an `allkeys-*` eviction policy**: counters (and data rows) can be
+  evicted, and a missing counter hands out duplicate numbers.
+- When the group value is something disposable, such as a match or a session,
+  every group keeps one counter key (about 100 bytes) even after the group is
+  emptied, so they keep piling up.
+- **Upgrade headless clients before turning `commit_seq` on**: older servers,
+  `LocalApp`, and headless clients that connect by component name fail on a
+  schema that uses `commit_seq` and refuse to start, but an older headless
+  client that connects with a component class does not fail: it keeps writing
+  rows without a number (0), which consumers never see.
 
 Before doing anything, `upgrade` checks whether any server is still running
 (on Redis backends, from the worker leases) and exits with code 1 if so,

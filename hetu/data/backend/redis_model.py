@@ -22,6 +22,7 @@ import numpy as np
 
 from ...i18n import _
 from .base import (
+    COMMIT_SEQ_LIMIT,
     BackendClient,
     InconsistentRangeRead,
     RaceCondition,
@@ -61,6 +62,89 @@ MAX_VERSION = 2**31 - 1
 # upsert(id=)、按 key 的未来调用），读到旧行的事务提交时 VER 才不会把新行当成旧行（ABA）。
 # 范围不取大，给 int32 留足改动次数的余量
 FIRST_VERSION_SPAN = 1 << 24
+
+
+class CommitSeqScan:
+    """
+    重建索引时统计提交序号列（commit_seq）：每组最大的号、组内重复的号、到了上限的号。两个后端的
+    `do_rebuild_index_` 在建的阶段逐行 `add`，建完先 `raise_for_problems`（有问题就报错，所有旧
+    索引、计数器原样保留），再按 `counters()` 把计数器只升不降地校准到每组最大的号，然后才换上
+    索引（先校准：换上之后、校准之前进程被杀的话，计数器低于库里的数据，会发出重号）。
+
+    号 ≤ 0 表示没有号（新加 commit_seq 列时历史行填的 0），不参与统计。
+    """
+
+    # 报错里最多列出几组
+    MAX_LISTED = 10
+
+    def __init__(self, comp_cls: type[BaseComponent], comp_name: str) -> None:
+        field = comp_cls.commit_seq_
+        assert field is not None
+        self.comp_cls = comp_cls
+        self.comp_name = comp_name
+        self.field = field
+        self.groups = comp_cls.index_groups_[field]
+        self.max_by_prefix: dict[bytes, int] = {}
+        self._seen: set[tuple[bytes, int]] = set()
+        self.duplicates: list[str] = []
+        self.overflows: list[str] = []
+
+    def _describe(self, struct: np.record, seq: int) -> str:
+        values = ", ".join(f"{col}={struct[col].item()!r}" for col in self.groups)
+        return f"({values}{', ' if values else ''}{self.field}={seq})"
+
+    def add(self, struct: np.record, member: bytes) -> None:
+        """一行：struct 是这一行（至少分组列和本字段已按 dtype 转好），member 是它在这个索引上的"""
+        seq = int(struct[self.field])
+        if seq <= 0:
+            return
+        # 值段是 P + 号的 8 字节编码
+        prefix = member_value_(member)[:-8]
+        if seq >= COMMIT_SEQ_LIMIT and len(self.overflows) < self.MAX_LISTED:
+            self.overflows.append(self._describe(struct, seq))
+        if (prefix, seq) in self._seen:
+            if len(self.duplicates) < self.MAX_LISTED:
+                self.duplicates.append(self._describe(struct, seq))
+            return
+        self._seen.add((prefix, seq))
+        if seq > self.max_by_prefix.get(prefix, 0):
+            self.max_by_prefix[prefix] = seq
+
+    def raise_for_problems(self) -> None:
+        """组内有重复的号、有号到了上限：报错，要求先写迁移脚本重新编号"""
+        if self.duplicates:
+            raise RuntimeError(
+                _(
+                    "组件{comp_name}的提交序号列`{field}`在重建索引时发现组内重复的号：{rows}"
+                    "（最多列出{limit}个）。重复的号会让消费方静默漏掉后一行，请先写迁移脚本"
+                    "重新编号。"
+                ).format(
+                    comp_name=self.comp_name,
+                    field=self.field,
+                    rows=", ".join(self.duplicates),
+                    limit=self.MAX_LISTED,
+                )
+            )
+        if self.overflows:
+            raise RuntimeError(
+                _(
+                    "组件{comp_name}的提交序号列`{field}`在重建索引时发现号达到了上限 2^53："
+                    "{rows}（最多列出{limit}个），之后这些组每次提交都会失败。请先写迁移脚本"
+                    "重新编号。"
+                ).format(
+                    comp_name=self.comp_name,
+                    field=self.field,
+                    rows=", ".join(self.overflows),
+                    limit=self.MAX_LISTED,
+                )
+            )
+
+    def counters(self, cluster_prefix: str) -> list[tuple[str, int]]:
+        """[(计数器 key, 这一组最大的号)]，没有行的组不在里面（计数器不动）"""
+        return [
+            (RedisModelClient.seq_counter_key_(cluster_prefix, self.comp_cls, p), seq)
+            for p, seq in self.max_by_prefix.items()
+        ]
 
 
 class RedisModelClient(BackendClient):
@@ -152,6 +236,29 @@ class RedisModelClient(BackendClient):
         带着 P，查询、UNIQ、CNT 照样分得开，只是订阅多被叫醒一次
         """
         return f"{idx_key}:{sortable_token(prefix)}" if prefix else idx_key
+
+    @staticmethod
+    def seq_counter_key_(
+        cluster_prefix: str, comp_cls: type[BaseComponent], prefix: bytes
+    ) -> str:
+        """
+        内部方法：提交序号列（commit_seq）一个组的计数器 key，值是这一组最近发出的号。prefix 是组前缀
+        P，不分组时为 b""。
+
+        - 用 P 的完整 hex，不用组 key 的 `sortable_token`：超过 32 字节的 P 会被它取成摘要，摘要碰撞时
+          两组共用组 key 无害（member 带着 P），共用计数器就会让两组的号交错、各自出现缺口；
+        - 带上分组列名：改了 groupby（比如 owner 改成 guild，都是 int64）之后新组的 P 可能和旧组的 P
+          字节相同，不带列名就会接着旧组的号发、开头出现缺口。
+
+        在 `{cluster_prefix}` 下：cluster 下和行同 slot，换簇时跟着搬，易失表 flush 时一起删
+        """
+        field = comp_cls.commit_seq_
+        assert field is not None
+        groups = comp_cls.index_groups_[field]
+        head = f"{cluster_prefix}:seq:{field}"
+        if not groups:
+            return head
+        return f"{head}:{','.join(groups)}:{prefix.hex()}"
 
     @classmethod
     def composite_entry_(
@@ -881,7 +988,12 @@ class RedisModelClient(BackendClient):
     def build_commit_payload_(self, idmap: IdentityMap) -> tuple[list[str], list]:
         """
         把 IdentityMap 里的修改组装成提交脚本的输入：返回 (keys, payload)，payload 为
-        `[checks, pushes, deleted, table_pubs, value_chans]`（格式见 `redis/commit_v2.lua`）。
+        `[checks, pushes, deleted, table_pubs, value_chans, seq_allocs]`（格式见
+        `redis/commit_v2.lua`），没有号要发时不带最后的 `seq_allocs`。
+
+        提交序号列（commit_seq）的组件，insert 的 HSET 换成 HSETSEQ：号由提交脚本在检查都通过
+        之后发（`seq_allocs` 是这次每个计数器要发几个），写进这一行、拼出这一行在这个索引上的
+        member（见 `seq_counter_key_`、设计稿 docs/superpowers/specs/2026-11-09-commit-seq-design.md）。
         """
 
         def _key_must_not_exist(_key: str, _race: bool, _label: str):
@@ -929,16 +1041,53 @@ class RedisModelClient(BackendClient):
             ):
                 value_chans[self.value_channel_(_idx_key, _value)] = None
 
-        def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
-            """添加hset的push命令"""
-            # 版本+1，到上限回绕（见 MAX_VERSION）
+        def _hset_args(_old_version, _update: dict[str, str | bytes]) -> list:
+            """hset 的字段参数：_version 加一（到上限回绕，见 MAX_VERSION）在前，接着是要写的字段"""
             _ver = int(_old_version) + 1
             if _ver > MAX_VERSION:
                 _ver = 1
             _update.pop("_version", None)  # 无视用户传入的_version字段
-            # 组合hset, 别忘记写_version
-            _kvs = itertools.chain.from_iterable(_update.items())
-            pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
+            return [
+                "_version",
+                str(_ver),
+                *itertools.chain.from_iterable(_update.items()),
+            ]
+
+        def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
+            """添加hset的push命令"""
+            pushes.append(["HSET", _key, *_hset_args(_old_version, _update)])
+
+        def _hsetseq_key(
+            _key: str,
+            _update: dict[str, str | bytes],
+            _seq_name: str,
+            _counter_key: str,
+            _zset_key: str,
+            _prefix: bytes,
+            _b_row_id: bytes,
+        ):
+            """
+            添加 HSETSEQ：提交脚本按 seq_allocs 的第 _slot 项发号，写进这一行（号放在 HSET 的最后
+            一对，中间要是还留着 0 也会被它盖掉），再把 P + 号的编码 + 0x00 + id 段 ZADD 到组 key
+            """
+            # 下标按第一次出现的顺序从 1 起（Lua 数组从 1 开始），和 seq_counts 的顺序一致
+            _slot = seq_slots.setdefault(_counter_key, len(seq_slots) + 1)
+            seq_counts[_counter_key] = seq_counts.get(_counter_key, 0) + 1
+            _update.pop(_seq_name, None)  # 行里的 0 不写，号由提交脚本填
+            _args = _hset_args(random.randrange(FIRST_VERSION_SPAN), _update)
+            pushes.append(
+                [
+                    "HSETSEQ",
+                    _slot,
+                    _zset_key,
+                    _prefix,
+                    _b_row_id,
+                    _key,
+                    *_args,
+                    _seq_name,
+                    "",
+                ]
+            )
 
         def _del_key(_key):
             """添加del的push命令"""
@@ -964,7 +1113,7 @@ class RedisModelClient(BackendClient):
         # pushes有hset/zadd/zrem/del
         race_checks: list[list[str | bytes]] = []
         strict_checks: list[list[str | bytes]] = []
-        pushes: list[list[str | bytes]] = []
+        pushes: list[list[str | bytes | int]] = []
         # 本事务删掉的行：{id 段: True}，id 段同索引 member 末尾的（见 ROW_ID_TOKEN_LEN）
         deleted: dict[bytes, bool] = {}
         # 主动 PUBLISH 的通知只有两种，都只给声明了的组件/索引发（PUBLISH 很贵，见
@@ -974,10 +1123,16 @@ class RedisModelClient(BackendClient):
         # - 值频道 channel（消息为空串）：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条
         table_pubs: list[list[str | bytes]] = []
         value_chans: dict[str, None] = {}  # 有序去重
+        # 提交序号列这次要发的号：计数器 key → 个数，按第一次出现的顺序，最后变成 payload 的
+        # seq_allocs [[计数器 key, 个数], …]；seq_slots 是计数器 key → 在其中的下标（从 1 起），
+        # HSETSEQ 按下标取号
+        seq_counts: dict[str, int] = {}
+        seq_slots: dict[str, int] = {}
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
-            id_prefix = self.cluster_prefix(ref) + ":id:"
-            idx_prefix = self.cluster_prefix(ref) + ":index:"
+            cluster_prefix = self.cluster_prefix(ref)
+            id_prefix = cluster_prefix + ":id:"
+            idx_prefix = cluster_prefix + ":index:"
             comp_cls = ref.comp_cls
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
@@ -986,6 +1141,7 @@ class RedisModelClient(BackendClient):
             absent_rows = absent_by_ref.get(ref, {})
             dtype_map = comp_cls.dtype_map_
             index_groups = comp_cls.index_groups_
+            seq_name = comp_cls.commit_seq_
             # 索引全部转换为bytes索引（score统一用0，不需要score排序），测试下来lex和score
             # 排序性能是一样的。member 是值段 + 0x00 + id 段（定宽，见 ROW_ID_TOKEN_LEN），值段见
             # index_value_bytes_；单列索引的值段就是本字段的编码，热路径上直接编码。复合索引每组
@@ -1000,6 +1156,8 @@ class RedisModelClient(BackendClient):
                 )
                 entries: list[tuple[str, str, bytes]] = []  # (索引名, zset key, 值段)
                 for name in indexes:
+                    if name == seq_name:
+                        continue  # 号由提交脚本发，member 由 HSETSEQ 拼
                     if index_groups[name]:
                         idx_key, value = self.composite_entry_(
                             comp_cls, idx_prefix + name, name, insert
@@ -1016,9 +1174,25 @@ class RedisModelClient(BackendClient):
                             name in absent,
                             f"{_index_label(comp_cls, name)} id={row_id} insert",
                         )
-                # 版本号随机起步（见 FIRST_VERSION_SPAN）
-                _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
                 b_row_id = row_id_token_(int(row_id))
+                if seq_name is None:
+                    # 版本号随机起步（见 FIRST_VERSION_SPAN）
+                    _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
+                else:
+                    seq_prefix = (
+                        row_group_prefix_(comp_cls, seq_name, insert)
+                        if index_groups[seq_name]
+                        else b""
+                    )
+                    _hsetseq_key(
+                        key,
+                        insert,
+                        seq_name,
+                        self.seq_counter_key_(cluster_prefix, comp_cls, seq_prefix),
+                        self.index_zset_key_(idx_prefix + seq_name, seq_prefix),
+                        seq_prefix,
+                        b_row_id,
+                    )
                 for name, idx_key, value in entries:
                     _enter_channel(comp_cls, name, idx_key, value)
                     pushes.append(["ZADD", idx_key, "0", value + b"\x00" + b_row_id])
@@ -1033,6 +1207,17 @@ class RedisModelClient(BackendClient):
                 touched = {
                     name for col in new_row for name in column_indexes.get(col, ())
                 }
+                if seq_name in touched and (
+                    seq_name in new_row or int(old_row[seq_name]) > 0
+                ):
+                    # repo 的 update 已经拦过，这里防绕过 repo 的写入：号只能由提交脚本写，有号的
+                    # 行搬到别的组会和那一组的号重复。库里号 ≤ 0（没有号）的历史行可以换组
+                    raise ValueError(
+                        _(
+                            "{comp_name}.{field} 是 commit_seq 列：不能改它，有号的行也不能改"
+                            "分组列（id={row_id}）"
+                        ).format(comp_name=comp_name, field=seq_name, row_id=row_id)
+                    )
                 # 复合索引的新值段要用合成后的整行（旧值上覆盖改动列），用到时才合成
                 merged = new_row
                 # (索引名, 旧 zset key, 旧值段, 新 zset key, 新值段)：复合索引换组时新旧 key 不同
@@ -1130,11 +1315,20 @@ class RedisModelClient(BackendClient):
         checks = race_checks + range_checks + strict_checks
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
-        return keys, [checks, pushes, deleted, table_pubs, list(value_chans)]
+        payload: list[Any] = [checks, pushes, deleted, table_pubs, list(value_chans)]
+        if seq_counts:
+            # 没有号要发时不带这一段：提交脚本读到 nil，就不建发号用的表、不进发号的循环
+            payload.append([[key, count] for key, count in seq_counts.items()])
+        return keys, payload
 
     @staticmethod
     def raise_for_commit_response_(resp: bytes) -> None:
-        """提交脚本的返回串 → 异常：`RACE` 可重试，`UNIQUE` 是确定性冲突"""
+        """
+        提交脚本的返回串 → 异常：`RACE` 可重试，`UNIQUE` 是确定性冲突，`SEQ` 是提交序号列发号失败
+        （发出的号会超出 [1, 2^53)：计数器到了上限，或者被手工改成了负数），一个号都没发、什么都
+        没写，不重试。计数器上的 Redis 命令出错（比如 key 被写成了别的类型）时，提交脚本把已经
+        加上去的计数器减回去，再原样返回 Redis 的错误，由 redis-py 抛出
+        """
         text = resp.decode("utf-8")
         if text != "committed":
             if text.startswith("RACE"):
@@ -1142,6 +1336,10 @@ class RedisModelClient(BackendClient):
             elif text.startswith("UNIQUE"):
                 # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
                 raise UniqueViolation(text)
+            elif text.startswith("SEQ"):
+                raise RuntimeError(
+                    _("提交序号列发号失败，本次提交没有写入：{resp}").format(resp=text)
+                )
             else:
                 raise RuntimeError(_("未知的提交错误：{resp}").format(resp=text))
 

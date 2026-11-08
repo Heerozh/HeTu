@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from hetu.data import BaseComponent
 from hetu.i18n import _
 
-from .backend.base import schema_version_, schema_versions_
+from .backend.base import REBUILD_PENDING_VERSION, schema_version_, schema_versions_
 from .backend.table import TableReference
 
 if TYPE_CHECKING:
@@ -113,6 +113,10 @@ class MigrationScript:
         # 读取table迁移脚本
         # 首先看old_meta里的版本号，然后搜索该版本号开头的文件
         old_version = old_meta.version
+        if old_version == REBUILD_PENDING_VERSION:
+            # 上次迁移搬完数据、重建失败（见 upgrade），之后又改了定义：数据已经是 meta 里那个定义的
+            # 形状，按它的版本号找脚本。哨兵是所有组件共用的，拿它找会捡到别的组件的脚本
+            old_version = schema_version_(old_meta.json)
         new_version = schema_version_(table_ref.comp_cls.json_)
         # 旧版 HeTu 生成的脚本按旧索引格式的版本号命名，升到当前定义的也算到头：索引格式的变化
         # 不用脚本处理，脚本迁移完会按当前格式重建索引、按当前格式写 meta
@@ -214,7 +218,21 @@ class MigrationScript:
                     "  ✔️ [💾MIGRATION][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
                 ).format(comp_name=self.ref.comp_name, count=len(row_ids))
             )
-            maint.do_rebuild_index_(target_table)
+            try:
+                maint.do_rebuild_index_(target_table)
+            except Exception as exc:
+                # 数据已经按新定义搬完（默认脚本连原表都删了），meta 也已经是新定义的版本：不管的话
+                # 服务器照常启动，而索引没建成、提交序号列的计数器没校准（会发出重号）。把版本号
+                # 标成对不上的值，服务器拒绝启动，修好数据后再跑 hetu upgrade 会直接重建
+                maint.do_update_meta_(target_table, version=REBUILD_PENDING_VERSION)
+                raise RuntimeError(
+                    _(
+                        "[💾MIGRATION][{comp_name}组件] 数据已经按新定义搬完，但重建索引失败："
+                        "{error}。在修好之前服务器会拒绝启动：请直接修改表里的数据（比如用 "
+                        "TableMaintenance 的 upsert_row 给重复的号重新编号），再跑一次 hetu "
+                        "upgrade，它会按当前定义直接重建索引"
+                    ).format(comp_name=self.ref.comp_name, error=exc)
+                ) from exc
             logger.warning(
                 _("  ✔️ [💾MIGRATION][{comp_name}组件] 已重建Index").format(
                     comp_name=self.ref.comp_name

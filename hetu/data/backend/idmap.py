@@ -780,6 +780,9 @@ class IdentityMap:
             local.forget(row_ids)
         states = self._row_states[table_ref]
         clean_rows = self._row_clean[table_ref]
+        # 提交序号列：本事务 insert 的行还没有号（是 0），它在这个索引上的位置要到提交时才定，
+        # 不放进结果。按 0 放的话会排在组的最前面，desc 取"最新 N 条"会把它当成最老的一行
+        place_inserts = index_name != table_ref.comp_cls.commit_seq_
         updated: list[int] = []
         for row_id in row_ids:
             state = states.get(row_id)
@@ -788,7 +791,7 @@ class IdentityMap:
             elif state == RowState.INSERT or state == RowState.UPDATE:
                 if row_id in clean_rows:
                     updated.append(row_id)
-                else:
+                elif place_inserts:
                     local.place(row_id)  # 本事务 insert 的
             # 没有状态的：本事务 insert 了又删掉，当它没插过
         if updated:

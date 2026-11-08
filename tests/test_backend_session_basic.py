@@ -1160,10 +1160,10 @@ async def test_unique_table(new_component_env, mod_auto_backend):
 
 
 async def test_upsert_limit(mod_item_model):
-    """测试upsert不能用于非unique字段"""
+    """测试upsert不能用于非unique字段（raise ValueError，-O 下也拦得住）"""
     backend = Backend.__new__(Backend)
     backend._master = None  # type: ignore
-    with pytest.raises(AssertionError, match="unique"):
+    with pytest.raises(ValueError, match="unique"):
         async with backend.session("pytest", 1) as session:
             item_repo = session.using(mod_item_model)
             async with item_repo.upsert(used=True) as _:

@@ -22,6 +22,7 @@ from ..base import (
     member_value_,
     schema_version_,
 )
+from ..redis_model import CommitSeqScan
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -156,7 +157,13 @@ class RedisTableMaintenance(TableMaintenance):
     # 无需drop_table, 此类操作适合人工删除
 
     def do_rename_table_(self, from_: TableReference, to_: TableReference):
-        """重命名组件表"""
+        """
+        重命名组件表。
+
+        提交序号列的计数器（`{cluster_prefix}:seq:…`）只在组件名不变（换簇）时跟着搬：默认迁移
+        脚本先把原表改名成临时表、拷完再删掉临时表，计数器跟着搬就会被一起删掉，之后只能按剩下
+        的行校准，删掉的尾部号会被复用。留在原名下，新表的 cluster_prefix 和原表相同，接着用
+        """
         # 重命名key
         from_prefix = f"{self.client.cluster_prefix(from_)}:"
         from_prefix_len = len(from_prefix)
@@ -168,6 +175,9 @@ class RedisTableMaintenance(TableMaintenance):
             target_nodes=RedisCluster.PRIMARIES,
         )
         from_keys = cast(list[bytes], from_keys)
+        if from_.comp_name != to_.comp_name:
+            seq_head = (from_prefix + "seq:").encode()
+            from_keys = [key for key in from_keys if not key.startswith(seq_head)]
         for b_from_key in from_keys:
             from_key = b_from_key.decode()
             to_key = to_prefix + from_key[from_prefix_len:]
@@ -196,12 +206,14 @@ class RedisTableMaintenance(TableMaintenance):
         )
 
     @override
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义，不动表数据"""
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据，见基类"""
         json_ = table_ref.comp_cls.json_
         meta: dict[FieldT, EncodableT] = {
             "json": json_,
-            "version": schema_version_(json_),
+            "version": version or schema_version_(json_),
             "cluster_id": table_ref.cluster_id,
         }
         self.client.io.hset(self.meta_key(table_ref), mapping=meta)
@@ -282,6 +294,9 @@ class RedisTableMaintenance(TableMaintenance):
         复合索引每组一个 zset，按组建临时 key；换上之后，删掉这个索引名下不在新结果里的 key：
         已经空了的旧组、改成复合之前的单个 key、改回单列之前的组 key。表里一行都没有时，索引里
         剩下的都是残留，直接删掉。上次中断留下的临时 key 在开头清掉。
+
+        提交序号列：建的阶段统计每组最大的号，组内有重复、有号到了上限时报错（见
+        `CommitSeqScan`）；检查通过后先把计数器校准到每组最大的号（只升不降），再换上索引。
         """
         from .client import RedisBackendClient
 
@@ -304,6 +319,12 @@ class RedisTableMaintenance(TableMaintenance):
         struct = comp_cls.new_row(id_=0)
         # {索引名: {zset key: 临时 key}}
         renames: dict[str, dict[str, str]] = {}
+        # 提交序号列：建的时候统计每组最大的号，建完先检查、再校准计数器，最后才换上
+        scan = (
+            CommitSeqScan(comp_cls, table_ref.comp_name)
+            if comp_cls.commit_seq_
+            else None
+        )
         try:
             for idx_name in comp_cls.indexes_:
                 idx_key = self.client.index_key(table_ref, idx_name)
@@ -345,6 +366,8 @@ class RedisTableMaintenance(TableMaintenance):
                                     f"唯一变成了全局唯一）导致。"
                                 )
                             seen.add(value)
+                        if scan is not None and idx_name == scan.field:
+                            scan.add(struct, member)
                         by_key.setdefault(zset_key, {})[member] = 0
                     pipe = io.pipeline()
                     for zset_key, members in by_key.items():
@@ -353,6 +376,11 @@ class RedisTableMaintenance(TableMaintenance):
                             targets[zset_key] = tmp_key
                         pipe.zadd(tmp_key, members)
                     pipe.execute()
+            if scan is not None:
+                # 组内重复、到了上限：报错，旧索引、计数器都不动。先校准、再换上：只往上调计数器
+                # 不会产生重号，换上之后才校准的话，中途被杀会留下偏低的计数器
+                scan.raise_for_problems()
+                self._raise_counters(scan.counters(cluster_prefix))
         except BaseException:
             self._delete_keys(
                 [tmp for targets in renames.values() for tmp in targets.values()]
@@ -377,3 +405,30 @@ for i = 1, #KEYS, 2 do
 end
 return #KEYS / 2
 """
+
+    # KEYS 是计数器，ARGV 是对应的最大号：只升不降。被写坏了的（不是字符串、不是整数串）直接
+    # 改写：规则同 INCRBY 认的整数，和 SQLite 的 kv_get_int 一致，不用 tonumber（它还认
+    # "0x10"、"5.5"、"1e3"）
+    _RAISE_COUNTERS_LUA = """
+for i = 1, #KEYS do
+    local raw = redis.pcall("GET", KEYS[i])
+    local current = nil
+    if type(raw) == "string" and (raw == "0" or string.match(raw, "^%-?[1-9]%d*$")) then
+        current = tonumber(raw)
+    end
+    if current == nil or current < tonumber(ARGV[i]) then
+        redis.call("SET", KEYS[i], ARGV[i])
+    end
+end
+return #KEYS
+"""
+
+    def _raise_counters(self, counters: list[tuple[str, int]]) -> None:
+        """
+        提交序号列的计数器校准到每组最大的号，只升不降。一批一条脚本：比较和写入之间不会插进别的
+        提交。计数器都带同一个 {CLU} hash tag，cluster 模式下在同一个 slot
+        """
+        for batch in batched(counters, 1000):
+            keys = [key for key, _seq in batch]
+            values = [str(seq) for _key, seq in batch]
+            self.client.io.eval(self._RAISE_COUNTERS_LUA, len(keys), *keys, *values)
