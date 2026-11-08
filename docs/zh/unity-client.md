@@ -209,6 +209,26 @@ var member = await HeTuClient.Instance.WatchRow<GuildMember>(
 - **唤醒范围**：订阅只会被本组的写入叫醒，别的组的写入不会叫醒它；服务端不需要为此声明 `point_sub`。
 - **服务器版本**：带 `group` 的订阅需要支持复合索引的服务器（v2025.11.1 之后的版本）。旧服务器不认识 `group`，会以 4002 断开连接。不带 `group` 的订阅发出的报文和以前完全一样。
 
+### 在客户端消费提交序号列
+
+服务端用 `property_field(commit_seq=True, groupby=...)` 声明的提交序号列（见[概念](concepts.md)），号在提交时
+按组从 1 连续发。客户端可以订阅这一组、按号往后消费：
+
+```csharp
+// 订 owner 这一组里号大于游标的日志，窗口 100 行
+var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
+    "seq", cursor + 1, long.MaxValue, 100,
+    group: new Dictionary<string, object> { ["owner"] = myId });
+```
+
+- **按号排序再处理**：同一批推送里有多行时，按 `seq` 排好再处理，处理完把游标推到最后一个号。
+- **窗口满了要换订阅**：订阅只推窗口（`limit` 行）里的行。处理到窗口末尾后，用新的游标重新订阅，并退订旧的。
+- **组里的每一行都要对这个客户端可见**：比如 `OWNER` 组件加 `groupby="owner"`。RLS 看不到的行照样占着窗口的名额、
+  又不推送，客户端会永远停在它前面；做不到全部可见的，改在服务端消费（见[高级功能](advanced.md)的「binlog 式同步」）。
+- **缺号**：客户端没法确认缺号是不是永久的，只能保证服务端不删中间的行，或者调一个服务端 `System` 来确认、跳过缺口。
+- **拿到刚插入那一行的号**：`System` 里 insert 的行，号要到提交之后才有，`System` 返回的行里是 0。订阅这一组，再用
+  `CallSystemAwaitPush` 调用，返回时推送已经到了，推送的行里带着号。
+
 ## 类型化组件 vs `DictComponent`
 
 服务器可以通过 `hetu build` 从你的 `Component` 定义生成匹配的 C# 类。结果实现了

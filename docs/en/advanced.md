@@ -565,6 +565,97 @@ in the version check, but rows added to the range are ignored. The
 `[RaceCondition]` lines in `replay.log` carry the reason (e.g.
 `Range changed Item.owner`), which helps find the ranges that conflict a lot.
 
+## Binlog-style syncing: commit sequence columns
+
+Writers append rows to a log table; a consumer remembers "consumed up to
+number N" and reads onward by number. If numbers are handed out before the
+commit (a counter outside the transaction, or reading and bumping a counter row
+inside it), then with several processes number 2 may commit before number 1 and
+the consumer has to stop and wait; a transaction that took a number and then
+conflicted, retried or failed leaves that number empty forever; and a counter
+row makes every write to the same group conflict and retry. With a commit
+sequence column the number is handed out at commit:
+
+```python
+@hetu.define_component(namespace="ssw", permission=hetu.Permission.OWNER)
+class ChangeLog(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0)
+    # numbered from 1 per owner; without groupby the whole table is one sequence
+    seq: np.int64 = hetu.property_field(0, commit_seq=True, groupby="owner")
+    kind: np.int16 = hetu.property_field(0)
+```
+
+Writers insert as usual and leave `seq` at 0. A server-side consumer looks like
+this (one consumer per cursor):
+
+```python
+@hetu.define_component(namespace="ssw")
+class LogCursor(hetu.BaseComponent):  # the consumer's own cursor per owner
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    last: np.int64 = hetu.property_field(0)
+
+
+@hetu.define_system(namespace="ssw", components=(ChangeLog, LogCursor))
+async def consume(ctx: hetu.SystemContext, owner: int):
+    async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
+        log = ctx.repo[ChangeLog]
+        rows = await log.range(
+            seq=(cursor.last + 1, np.inf), owner=owner, limit=100, phantom_check=False
+        )
+        expected = cursor.last + 1
+        for row in rows:
+            while expected < row.seq:  # a number is missing
+                if (missing := await log.get(seq=expected, owner=owner)) is not None:
+                    handle(missing)  # this read missed it: rows came from a lagging replica
+                expected += 1  # an empty read is confirmed on the master at commit
+            handle(row)
+            expected = row.seq + 1
+        cursor.last = expected - 1
+```
+
+- **`phantom_check=False`**: when fewer than `limit` rows come back, the range
+  read stays open up to `inf`, so every new log row in the group between the
+  read and the commit would make the consumer race and retry. The consumer
+  doesn't depend on "nothing else is in the range", so turn the check off; the
+  rows it read are still version-checked, and the cursor row's version check
+  keeps two consumers from advancing the same cursor at once.
+- **Confirm a missing number before skipping it**: numbers are normally
+  consecutive. A number can be missing in two ways: behind a read/write
+  splitting proxy that routes per command, or on native cluster with several
+  replicas, one read may fetch rows from replicas at different replication
+  points and miss a row in the middle (temporary); or the row was deleted
+  (permanent). The `get` above handles the row when it finds it. When it reads
+  nothing, the commit confirms on the master that the number has no row and
+  that the row after it has been committed; numbers are handed out in commit
+  order, so that number will never show up and can be skipped. If the empty
+  read came from a lagging replica while the master does have the row, the
+  commit races and retries. Don't just step over a missing number: with
+  `phantom_check=False` rows that fail to fetch are skipped silently.
+- **Cost**: every row read into the transaction gets a version check on the
+  master at commit, about 1µs of master time per consumed row. Where the log can
+  be consumed by a client through a subscription, prefer that: it doesn't touch
+  the master.
+- **External side effects in `handle`** (granting rewards, calling other
+  services) run again when the transaction retries; make them idempotent.
+- **Trimming**: only delete the head that every consumer has passed. Deleting a
+  row in the middle leaves a hole: server-side consumers confirm and skip it as
+  above, client-side consumers stop in front of it.
+- **Volatile tables**: numbering starts over from 1 after every maintenance;
+  reset consumer cursors along with it.
+- **Third-party consumers** (cursors kept outside the database, e.g. syncing the
+  log to an external system): after a failover that lost the last commits, a
+  restore of the whole database from a backup, or clearing a volatile table,
+  numbers are reused and one number may now belong to another row. So besides
+  the number, remember that row's snowflake id; on every read, read back the row
+  at the cursor too and compare ids. A different id, or no row, means the
+  number was reused: walk back to the position whose id still matches and
+  continue from there. Raise an alert when the group's largest number is below
+  the cursor. Server-side consumers don't need this: their cursor and the log
+  roll back together, in the same transaction.
+- **Client-side consumers**: subscribe with
+  `WatchRange("seq", cursor + 1, inf, limit, group: …)`, see
+  [Unity Client SDK](unity-client.md).
+
 ## NumPy patterns for range queries
 
 `await ctx.repo[Comp].range(...)` returns a NumPy **recarray** — a
@@ -971,7 +1062,7 @@ It has exactly one principle: **writes go through the very same `Session.commit(
 When the server creates a table it stores the component's schema and `cluster_id` in the table meta. `connect()` only reads that meta; it never recomputes clusters locally:
 
 - Table missing → `TableNotFound`. Creating and migrating tables is the server's job; run `hetu start` once, then connect.
-- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index, groupby. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"). Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
+- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index, groupby, commit_seq. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"); a column property in the meta that this version doesn't know (added by a newer HeTu) also counts as a difference, so upgrade headless clients together with the server. Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
 - Passing a **component name**: a class is generated from the schema in the meta, so the process shares no code at all; when you need the class, take `client.table("BattleReport").comp_cls` and use `new_row(id_=...)` as usual.
 
 ### Reading: `Table.servant_*`

@@ -280,6 +280,38 @@ var member = await HeTuClient.Instance.WatchRow<GuildMember>(
   `group` and close the connection with 4002. Subscriptions without `group`
   send exactly the same frames as before.
 
+### Consuming a commit sequence column on the client
+
+A commit sequence column declared on the server with
+`property_field(commit_seq=True, groupby=...)` (see [Concepts](concepts.md)) is
+numbered from 1 per group at commit. A client can watch that group and consume
+it by number:
+
+```csharp
+// rows of my owner group numbered after the cursor, a window of 100 rows
+var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
+    "seq", cursor + 1, long.MaxValue, 100,
+    group: new Dictionary<string, object> { ["owner"] = myId });
+```
+
+- **Sort by number first**: when one push carries several rows, sort them by
+  `seq` before handling them, then move the cursor to the last number.
+- **Re-subscribe when the window is full**: a subscription only pushes rows in
+  its window (`limit` rows). Once you reach the end of the window, subscribe
+  again from the new cursor and unsubscribe the old one.
+- **Every row of the group must be visible to this client**, e.g. an `OWNER`
+  component with `groupby="owner"`. A row hidden by RLS still takes a slot in
+  the window but is never pushed, so the client stops in front of it forever;
+  if that can't be guaranteed, consume on the server instead (see
+  "Binlog-style syncing" in [Advanced](advanced.md)).
+- **Missing numbers**: the client cannot tell whether a missing number is
+  permanent. Either make sure the server never deletes rows in the middle, or
+  call a server `System` that confirms and skips the gap.
+- **Getting the number of a row you just inserted**: a row inserted in a
+  `System` only gets its number at commit, so the row the `System` returns
+  still has 0. Watch the group and call with `CallSystemAwaitPush`: by the time
+  it returns, the push has arrived and carries the number.
+
 ## Typed components vs `DictComponent`
 
 The server can generate matching C# classes from your `Component` definitions

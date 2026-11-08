@@ -140,6 +140,8 @@ get(
 主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
 None（不再查询数据库），commit 时若该值已被并发写入则判为 [`RaceCondition`](exceptions.md#racecondition) 重试。
 结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
+例外是提交序号列（`commit_seq`）：本事务 insert 的行还没有号（是 0），按这一列查不到它们，
+按 id、按别的索引能查到。
 
 非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
 副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回的
@@ -197,7 +199,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:448`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L448)</small>
+<small>Source: [`hetu/data/backend/repo.py:462`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L462)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -205,7 +207,8 @@ range(
 结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
 会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
 结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）命中本事务从库里
-读过、这一列没改过的行时，直接返回、不去数据库。
+读过、这一列没改过的行时，直接返回、不去数据库。例外是提交序号列（`commit_seq`）的
+索引：本事务 insert 的行还没有号（是 0），它的位置要到提交时才定，不在结果里。
 
 读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
 区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -283,7 +286,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:801`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L801)</small>
+<small>Source: [`hetu/data/backend/repo.py:816`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L816)</small>
 
 向Session中添加一行待插入数据。
 
@@ -294,6 +297,8 @@ insert(row: numpy.record) -> None
 
 本事务删掉的库里的行，不能再用同一个 id insert（`upsert` 锚定这个 id 新建也一样），
 抛 `ValueError`：要改这行请直接 `update`。
+
+提交序号列（`commit_seq`）由提交脚本发号，insert 时它必须是 0，否则抛 `ValueError`。
 
 
 **Parameters**
@@ -315,12 +320,16 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:852`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L852)</small>
+<small>Source: [`hetu/data/backend/repo.py:881`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L881)</small>
 
 向Session中添加一行待更新数据。
 
 只在本地 IdentityMap 检查 unique（同事务内重复 → 立即抛 [`UniqueViolation`](exceptions.md#uniqueviolation)）；
 与数据库既有数据的冲突由 `commit()` 判定，规则同 `insert`。
+
+提交序号列（`commit_seq`）不能改；库里已经有号的行也不能改它的分组列（搬到别的组会和那
+一组的号重复），都抛 `ValueError`。本事务 insert、还没提交的行，以及库里号 ≤ 0（没有号的
+历史行）可以改分组列。
 
 
 **Parameters**
@@ -344,7 +353,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:888`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L888)</small>
+<small>Source: [`hetu/data/backend/repo.py:958`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L958)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -384,7 +393,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:922`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L922)</small>
+<small>Source: [`hetu/data/backend/repo.py:996`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L996)</small>
 
 向Session中添加一行待删除数据。
 
@@ -711,7 +720,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:844`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L844)</small>
+<small>Source: [`hetu/data/backend/base.py:848`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L848)</small>
 
 从数据库直接获取单行数据。
 
@@ -758,7 +767,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:974`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L974)</small>
+<small>Source: [`hetu/data/backend/base.py:978`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L978)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -824,7 +833,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1153`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1153)</small>
+<small>Source: [`hetu/data/backend/base.py:1157`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1157)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

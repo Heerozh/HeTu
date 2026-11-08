@@ -91,6 +91,34 @@ A few invariants that surprise new users:
   string group values can take up to 1.5–3.7× as much. Older HeTu versions
   cannot read the schema of a component that uses `groupby`, so do not run old
   and new versions against the same database while upgrading.
+- **Commit sequence columns: numbered at commit.**
+  `seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")`
+  declares a column numbered by the commit script, only after every check has
+  passed: each group (the whole table without `groupby`) is numbered from 1,
+  consecutively and in commit order, and conflicting, retried or failed
+  transactions consume no numbers. Numbers only grow; deleting a row does not
+  give its number back. Reading number k on one node means 1..k-1 (unless
+  deleted) are readable there too, which suits binlog-style syncing; see
+  "Binlog-style syncing" in [Advanced](advanced.md) for the consumer side.
+    - The column is written by the commit script only: it must be 0 on insert,
+      cannot be updated, and a row that already has a number cannot change its
+      group-by columns. It must be `np.int64` with default 0, cannot be
+      `unique` (numbering already keeps it unique within the group), there is
+      at most one per component, and it cannot be another index's group-by
+      column.
+    - Inside the transaction it stays 0 after insert, and those rows do not
+      show up on this index (they do by id and on other indexes); rows read
+      back after commit, and pushed by subscriptions, carry the real number. A
+      stored 0 (or a negative value) means "no number", e.g. existing rows when
+      the column is added to a table that already has data.
+    - Numbers can be reused: a failover that lost the last commits, a primary
+      restarted from AOF / RDB after a crash, or restoring the whole database
+      from a backup rolls back both data and numbers; a volatile table is
+      cleared at every maintenance and starts over from 1; after importing only
+      rows, or deleting a counter by hand, run `hetu upgrade` once to
+      recalibrate.
+    - Older HeTu versions (headless clients included) cannot read a component
+      that uses `commit_seq`; upgrade them together.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the

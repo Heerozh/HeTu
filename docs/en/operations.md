@@ -377,6 +377,42 @@ index. Older HeTu versions cannot read the schema of a component that uses
 `groupby`, so do not run old and new versions against the same database while
 upgrading.
 
+Commit sequence columns (`commit_seq`) are numbered from one counter per group;
+keep these in mind when migrating and maintaining:
+
+- **Turning `commit_seq` on**: on an existing sequence field the values are
+  kept, and the index rebuild sets each group's counter to its largest number so
+  numbering carries on; the rebuild happens even with `--no-rebuild-index`. If a
+  group has duplicate numbers or a number reaches 2^53, `upgrade` fails without
+  changing anything; write a migration script that renumbers them first. When
+  you add a new `commit_seq` column, existing rows get 0, i.e. no number; to
+  number them, assign 1, 2, 3… per group in the migration script.
+- **Custom migration scripts** should follow the template: rename the original
+  table to a temporary one, copy, then drop the temporary table — don't drop the
+  original table. The counters stay under the original table name and keep
+  going after the migration. If you rename the component or the field, or
+  change the `groupby` of the `commit_seq` field, the old counters no longer
+  apply; new ones are calibrated from the data, so numbers of deleted rows at
+  the tail may be handed out again. Counters are not cleaned up after turning
+  `commit_seq` off or removing the field.
+- **After importing only rows, or deleting a counter by hand**, the counter is
+  behind the data and would hand out duplicate numbers; run `upgrade` once (it
+  rebuilds all indexes by default) to recalibrate. Restoring the whole database
+  from a backup keeps data and counters consistent, so no calibration is needed;
+  but numbering goes back to where the backup was, and numbers handed out after
+  the backup will be handed out again — consumers that keep their cursor
+  outside the database must check snowflake ids (see "Binlog-style syncing" in
+  [Advanced](advanced.md)).
+- **Volatile tables** are cleared at every maintenance, and numbering starts
+  over from 1.
+- **Don't use an `allkeys-*` eviction policy**: counters (and data rows) can be
+  evicted, and a missing counter hands out duplicate numbers.
+- When the group value is something disposable, such as a match or a session,
+  every group keeps one counter key (about 100 bytes) even after the group is
+  emptied, so they keep piling up.
+- Older HeTu versions (headless clients included) cannot read a component that
+  uses `commit_seq`; upgrade them together.
+
 Before doing anything, `upgrade` checks whether any server is still running
 (on Redis backends, from the worker leases) and exits with code 1 if so,
 leaving everything untouched: migrating, wiping volatile tables and rebuilding

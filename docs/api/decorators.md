@@ -26,7 +26,7 @@ define_component(
 ) -> collections.abc.Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:495`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L495)</small>
+<small>Source: [`hetu/data/component.py:533`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L533)</small>
 
 
 
@@ -103,12 +103,14 @@ subscriptions on other components are rejected.
 
 
 ### Notes
-`property_field(default, unique, index, dtype, point_sub, hidden, groupby)` 是Component的属性定义，可定义默认值和数据类型。
+`property_field(default, unique, index, dtype, point_sub, hidden, groupby, commit_seq)` 是Component的属性定义，可定义默认值和数据类型。
     - `index` 表示此属性开启索引；
     - `unique` 表示属性值必须唯一，启动此项默认会同时打开index；
     - `point_sub` 表示此索引支持高效点订阅，启动此项默认会同时打开index；
     - `hidden` 表示此属性对客户端隐藏：订阅推送不带它，客户端也不能按它查询；
-    - `groupby` 表示建复合索引：按分组列分组、组内按此属性排序，启动此项默认会同时打开index。
+    - `groupby` 表示建复合索引：按分组列分组、组内按此属性排序，启动此项默认会同时打开index；
+    - `commit_seq` 表示提交序号列：提交成功时由提交脚本按组从 1 连续发号，用户不能写，
+      事务里 insert 之后、提交之前是 0，按这个索引查不到这些行，启动此项默认会同时打开index。
 
 .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
@@ -442,10 +444,11 @@ property_field(
     point_sub: bool = False,
     hidden: bool = False,
     groupby: str | tuple[str, ...] | list[str] = (),
+    commit_seq: bool = False,
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:69`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L69)</small>
+<small>Source: [`hetu/data/component.py:72`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L72)</small>
 
 
 
@@ -522,6 +525,31 @@ Each group is stored as its own zset, so group subscriptions are only woken by
 writes to their group without `point_sub` (ignored with a warning) and commits
 publish nothing for it. Group-by columns must be integer, str or bytes fields.
 
+- **`commit_seq`** (bool, default `False`) — 提交序号列：号在提交时由提交脚本发，所有检查都通过之后才发，例如
+`seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")` 是"每个 owner
+各自从 1 连续编号"，不写 `groupby` 就是整张表一个序列。保证：
+
+- 提交成功才发号：冲突、重试、失败的事务都不消耗号；
+- 组内连续、按提交顺序，不重号、不回退；
+- 在同一个节点上读到 k 号时，1..k-1 号（没被删的）一定也读得到。
+
+例外是主库故障切换、从备份恢复、易失表维护之后号可能被复用，消费方的写法见文档。
+这一列由提交脚本写：insert 时必须是 0，update 不能改它；有号的行也不能改分组列。
+事务里 insert 之后、提交之前它一直是 0，按这个索引查不到这些行。dtype 只能是
+`np.int64`，default 必须是 0；不能同时 `unique`（组内唯一由发号保证）；`point_sub`
+用不上，写了警告并忽略；一个组件最多一个。开启后强制启用 `index`。
+
+Commit sequence: numbers are assigned by the commit script after every check
+passes, consecutive within each group (`groupby`) in commit order, starting
+at 1. Aborted, conflicting or retried transactions consume no numbers.
+Reading k on one node means 1..k-1 (unless deleted) are visible there too.
+Numbers may be reused after a failover, a backup restore or a volatile
+table flush. The column is written by the commit script only: it must be 0
+on insert, cannot be updated, and rows that have a number cannot change
+group. Inside the transaction it stays 0 and uncommitted rows do not appear
+on this index. Must be `np.int64` with default 0, cannot be `unique`, at
+most one per component; `point_sub` is ignored with a warning.
+
 
 
 
@@ -559,7 +587,7 @@ publish nothing for it. Group-by columns must be integer, str or bytes fields.
   否则 `row.size` 读到的是 numpy 的属性而不是字段值；
 - `default` 与 `dtype` 是否兼容；
 - `dtype` 是否可用于 NumPy structured array；
-- `unique/index/point_sub/hidden/groupby` 组合是否合法。
+- `unique/index/point_sub/hidden/groupby/commit_seq` 组合是否合法。
 
 
 

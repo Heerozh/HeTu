@@ -346,6 +346,68 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 新增的行。`replay.log` 里的 `[RaceCondition]` 行带着冲突原因（如 `Range changed Item.owner`），可以据此
 找出冲突多的区间。
 
+## binlog 式同步：提交序号列
+
+写入方往一张日志表里追加行，消费方记下"消费到了第几号"、按号往后读。号要是在提交之前发（事务外的计数器、
+或者事务里先读改写一行计数器），要么多进程下 2 号先提交、1 号后提交，消费方只能停下来等；要么拿了号的事务
+冲突重试、失败，号永远空着；读改写计数器行还会让同一组的写入全部撞车重试。用提交序号列，号在提交时才发：
+
+```python
+@hetu.define_component(namespace="ssw", permission=hetu.Permission.OWNER)
+class ChangeLog(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0)
+    # 每个 owner 各自从 1 连续编号；不写 groupby 就是整张表一个序列
+    seq: np.int64 = hetu.property_field(0, commit_seq=True, groupby="owner")
+    kind: np.int16 = hetu.property_field(0)
+```
+
+写入方照常 insert，`seq` 留 0，不用管号。消费方在服务端这样写（一个游标只给一个消费方用）：
+
+```python
+@hetu.define_component(namespace="ssw")
+class LogCursor(hetu.BaseComponent):  # 消费方自己的游标：每个 owner 消费到了第几号
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    last: np.int64 = hetu.property_field(0)
+
+
+@hetu.define_system(namespace="ssw", components=(ChangeLog, LogCursor))
+async def consume(ctx: hetu.SystemContext, owner: int):
+    async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
+        log = ctx.repo[ChangeLog]
+        rows = await log.range(
+            seq=(cursor.last + 1, np.inf), owner=owner, limit=100, phantom_check=False
+        )
+        expected = cursor.last + 1
+        for row in rows:
+            while expected < row.seq:  # 中间缺了号
+                if (missing := await log.get(seq=expected, owner=owner)) is not None:
+                    handle(missing)  # 这次读漏了它：取行落到了进度不同的副本
+                expected += 1  # 读空的号，提交时会在 master 上确认它确实不存在
+            handle(row)
+            expected = row.seq + 1
+        cursor.last = expected - 1
+```
+
+- **`phantom_check=False`**：没读满 `limit` 时，读到的区间一直开到 `inf`，从读到提交之间同组每来一条新日志，
+  消费方都要判竞态重试。消费方不依赖"区间里没有别的行"，可以关掉；读到的行照样有版本校验，游标行的版本校验
+  保证两个消费方不会同时推进同一个游标。
+- **缺号时先确认再跳过**：正常情况下号是连续的。缺号有两种：读写分离代理按命令分流、原生 cluster 下有多个副本
+  时，一次读的取行可能落到复制进度不同的副本上，漏掉中间的行（临时的）；中间的行被删了（永久的）。上面的
+  `get` 读到了就补上处理；读空时，提交时会在 master 上确认这一号确实没有行、后面那一行确实已经提交，号又是按
+  提交顺序发的，所以它永远不会再出现，可以跳过；副本落后导致读空、而 master 上其实有，提交时判竞态重试。不要
+  直接越过缺号：`phantom_check=False` 时读不到的行会被静默跳过。
+- **代价**：读进事务的每一行，提交时都要在 master 上做一次版本校验，每消费一行 master 多约 1µs。能在客户端用
+  订阅消费的，优先客户端消费，不占 master。
+- **`handle` 里的外部副作用**（发奖励、调别的服务）会随事务重试重复执行，要自己做成幂等。
+- **裁剪**：只删所有消费方都已经越过的头部。删中间的行会留下洞：服务端消费方能按上面的写法确认后跳过，客户端
+  消费方会停在洞前面。
+- **易失表**：每次维护后号从 1 重来，消费方的游标要跟着清。
+- **第三方消费方**（游标存在库外，比如把日志同步到外部系统）：主库故障切换丢了最后几次提交、整库从备份恢复、
+  易失表清空之后，号会被复用，同一个号可能对应另一行。所以除了号还要记下那一行的雪花 id，每次读时把游标那一号
+  一起读回来核对：id 对不上或者读不到，说明号被复用了，往回找到 id 还对得上的位置再继续；发现组内最大号小于
+  游标时报警。服务端消费方的游标和日志在同一个事务里，会一起回退，不需要这样做。
+- **客户端消费**：订阅 `WatchRange("seq", cursor + 1, inf, limit, group: …)`，见[Unity 客户端 SDK](unity-client.md)。
+
 ## 用于范围查询的 NumPy 模式
 
 `await ctx.repo[Comp].range(...)` 返回一个 NumPy **recarray**——一个类型化的 C 结构体数组，而不是 Python 列表。如果你从未使用过 NumPy，跳过以下特性，退回到 `for row in rows:` 是*正确的*，但会浪费 HeTu 的 NumPy 存储所设计实现的吞吐量优势。对于一个 1000 行的 recarray，通过向量化表达式运行的代价大约相当于一个 5 行的 Python `for` 循环。
@@ -628,7 +690,7 @@ client = await hetu.headless.connect(
 服务器建表时会把组件的 schema 和 `cluster_id` 写进表 meta。`connect()` 只读 meta，不本地重算簇：
 
 - 表不存在 → `TableNotFound`。建表 / 迁移权归服务器，先 `hetu start` 一次再连。
-- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index、groupby——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
+- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index、groupby、commit_seq——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）；meta 里有本版本不认识的列属性（更新版本的 HeTu 加的）也算不一致，headless 客户端要和服务器一起升级。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
 - 传**组件名**：直接用 meta 里的 schema 生成类，进程里零共享代码；需要类时取 `client.table("BattleReport").comp_cls`，`new_row(id_=...)` 照常用。
 
 ### 读：`Table.servant_*`
