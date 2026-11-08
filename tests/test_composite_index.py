@@ -444,6 +444,41 @@ async def test_query_errors(slot_ref, mod_auto_backend):
         backend.servant.check_range_(slot_ref, "level", 0, 10, 10, False)
 
 
+async def test_kwargs_edge_cases(new_component_env, mod_auto_backend):
+    """
+    kwargs 写法的几处边角：upsert 只在 unique 索引里匹配；只给一个 kwarg 时可以用 _group 给
+    分组值，kwargs 和 _group 同时给分组值报错（不静默丢掉一边）；区间可以是两项的 ndarray
+    """
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class Seat(BaseComponent):
+        # owner 按 slot 分组（非 unique）、slot 按 owner 分组（组内唯一）：键集合 {slot, owner}
+        # 两个索引都能匹配，upsert 只认 unique 的那个
+        owner: np.int64 = property_field(0, groupby="slot")
+        slot: np.int16 = property_field(0, unique=True, groupby="owner")
+        rank: np.int32 = property_field(0, groupby="owner")
+
+    backend: Backend = mod_auto_backend()
+    create_ref(Seat, backend)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(Seat)
+        async with repo.upsert(slot=1, owner=7) as row:
+            row.rank = 3
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(Seat)
+        assert (await repo.get(slot=1, _group={"owner": 7})).rank == 3
+        got = await repo.range(rank=(0, 10), _group={"owner": 7})
+        assert list(got.slot) == [1]
+        got = await repo.range(rank=np.array([0, 10]), owner=7)
+        assert list(got.slot) == [1]
+        with pytest.raises(ValueError, match="_group"):
+            await repo.range(rank=(0, 10), owner=7, _group={"owner": 8})
+        with pytest.raises(ValueError, match="_group"):
+            await repo.get(slot=1, owner=7, _group={"owner": 8})
+
+
 async def test_kwargs_matching_two_indexes(new_component_env, mod_auto_backend):
     """a 按 b 分组、b 又按 a 分组时，get(a=, b=) 两个都能匹配，要用位置参数写法指定"""
     from hetu.data import BaseComponent, define_component, property_field

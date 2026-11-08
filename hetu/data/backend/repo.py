@@ -59,9 +59,11 @@ def _to_py(value: IndexScalar) -> PyScalar:
 
 def _is_bounds(value: object) -> bool:
     """
-    kwargs 写法里"字段=(下界, 上界)"的判定：两项的 tuple / list。str、bytes、np 标量都不算，
-    长度为 2 的 "s1"、b"ab" 是复合索引的分组值，不能被拆成区间
+    kwargs 写法里"字段=(下界, 上界)"的判定：两项的 tuple / list / 一维 ndarray。str、bytes、np
+    标量都不算，长度为 2 的 "s1"、b"ab" 是复合索引的分组值，不能被拆成区间
     """
+    if isinstance(value, np.ndarray):
+        return value.shape == (2,)
     return isinstance(value, (tuple, list)) and len(value) == 2
 
 
@@ -249,23 +251,35 @@ class SessionRepository:
         return row
 
     def _point_kwargs(
-        self, kwargs: dict[str, IndexScalar]
-    ) -> tuple[str, IndexScalar, dict[str, Any] | None]:
+        self,
+        kwargs: dict[str, IndexScalar],
+        explicit_group: Mapping[str, Any] | None = None,
+        unique_only: bool = False,
+    ) -> tuple[str, IndexScalar, Mapping[str, Any] | None]:
         """
-        get / upsert 的 kwargs 写法 → (索引名, 查询值, 分组值)。只给一个 kwarg 就是单列写法（复合
-        索引漏了分组值由之后的 resolve_group_ 报错）；给了多个时，键集合要正好是某个索引的
-        {本字段} ∪ 分组列
+        get / upsert 的 kwargs 写法 → (索引名, 查询值, 分组值)。只给一个 kwarg 就是单列写法，分组值
+        可以另用 `_group` 给（复合索引漏了分组值由之后的 resolve_group_ 报错）；给了多个时，键
+        集合要正好是某个索引的 {本字段} ∪ 分组列，这时不能再给 `_group`。unique_only（upsert）
+        只在 unique 索引里匹配
         """
+        comp_cls = self.ref.comp_cls
         if len(kwargs) == 1:
             ((index_name, query_value),) = kwargs.items()
-            return index_name, query_value, None
-        comp_cls = self.ref.comp_cls
+            return index_name, query_value, explicit_group
+        if explicit_group is not None:
+            raise ValueError(
+                _(
+                    "{comp_name} 的查询：kwargs 写法里分组值直接写成 字段=值，不要再给 _group"
+                ).format(comp_name=comp_cls.name_)
+            )
         index_groups = comp_cls.index_groups_
         keys = set(kwargs)
         matched = [
             name
             for name in kwargs
-            if name in index_groups and keys == {name, *index_groups[name]}
+            if name in index_groups
+            and keys == {name, *index_groups[name]}
+            and (not unique_only or name in comp_cls.uniques_)
         ]
         if not matched:
             raise ValueError(
@@ -275,6 +289,15 @@ class SessionRepository:
                 ).format(comp_name=comp_cls.name_, keys=sorted(keys))
             )
         if len(matched) > 1:
+            if unique_only:
+                raise ValueError(
+                    _(
+                        "{comp_name} 的 upsert 条件 {keys} 同时匹配了 {matched} 几个 unique "
+                        "索引，无法区分"
+                    ).format(
+                        comp_name=comp_cls.name_, keys=sorted(keys), matched=matched
+                    )
+                )
             raise ValueError(
                 _(
                     "{comp_name} 的查询条件 {keys} 同时匹配了 {matched} 几个索引，"
@@ -328,7 +351,7 @@ class SessionRepository:
             返回 np.record (c-struct) 格式。
         """
         if index_name is None or query_value is None:
-            index_name, query_value, _group = self._point_kwargs(kwargs)
+            index_name, query_value, _group = self._point_kwargs(kwargs, _group)
 
         comp_cls = self.ref.comp_cls
 
@@ -499,9 +522,17 @@ class SessionRepository:
                 )
             index_name = ranged[0]
             _left, _right = cast(tuple[IndexScalar, IndexScalar], kwargs[index_name])
-            _group = {
+            group_kwargs = {
                 name: value for name, value in kwargs.items() if name != index_name
-            } or None
+            }
+            if group_kwargs and _group is not None:
+                raise ValueError(
+                    _(
+                        "{comp_name} 的查询：kwargs 写法里分组值直接写成 字段=值，不要再给 "
+                        "_group"
+                    ).format(comp_name=self.ref.comp_cls.name_)
+                )
+            _group = group_kwargs or _group
         else:
             assert index_name, _("不使用kwargs形式时，index_name不能为空")
             assert _left is not None, _("不使用kwargs形式时，left不能为空")
@@ -857,7 +888,7 @@ class SessionRepository:
             组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
             `upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
         """
-        index_name, query_value, group = self._point_kwargs(kwargs)
+        index_name, query_value, group = self._point_kwargs(kwargs, unique_only=True)
 
         # 检查index_name存在且为unique索引
         comp_cls = self.ref.comp_cls
