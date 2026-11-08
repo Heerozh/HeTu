@@ -494,6 +494,19 @@ def peel_bound_(
     return value, None
 
 
+def literal_bound_(value: Any) -> Any:
+    """
+    内部方法：点查的值按字面比较时用的区间边界。str / bytes 以 `(` / `[` 开头时前面补一个 `[`：
+    `peel_bound_` 只剥掉补上的这一个，剩下的原样比较，开头的 `(` / `[` 不会被当成开 / 闭区间
+    标记。get、upsert、订阅单行这类点查用它；range 的边界照旧解释前缀
+    """
+    if isinstance(value, str) and value[:1] in ("(", "["):
+        return "[" + value
+    if isinstance(value, bytes) and value[:1] in (b"(", b"["):
+        return b"[" + value
+    return value
+
+
 def inverted_bounds_error_(lower: Any, upper: Any) -> ValueError:
     """内部方法：区间下界大于上界（多半是参数传反了）的报错，两个后端共用这一句"""
     return ValueError(

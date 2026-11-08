@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from hetu.data.backend import RaceCondition
-from hetu.data.backend.base import RowFormat
+from hetu.data.backend.base import RowFormat, literal_bound_
 
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..i18n import _
@@ -82,10 +82,10 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
         repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）。前面加 [：
+            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）。按字面查：
             # 代理头给的 IPv6 带方括号，开头的 [ 会被 range 当成闭区间标记剥掉，查不到
             same_ips = await repo.range(
-                "address", "[" + address, limit=1000, phantom_check=False
+                "address", literal_bound_(address), limit=1000, phantom_check=False
             )
             same_ip_guests = same_ips[same_ips.owner == 0]
             # 不含正在建的这一条：已经有 MAX 条就不再放行
