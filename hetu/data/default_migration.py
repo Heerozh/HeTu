@@ -100,10 +100,16 @@ def prepare() -> str:
                 logger.error(msg)
                 raise ValueError(msg)
             if target_props[target_column].unique:
+                # 复合索引（groupby）的 unique 是组内唯一：同组的行才会撞
+                scope = (
+                    f"（按 {', '.join(target_props[target_column].groupby)} 组内唯一）"
+                    if target_props[target_column].groupby
+                    else ""
+                )
                 logger.warning(
                     f"  ⚠️ [💾MIGRATION][{name}组件] "
-                    f"新增属性 {target_column} 带有unique唯一标记，若表中已有多行数据，"
-                    f"迁移会因所有行被填入相同默认值而触发唯一性冲突。"
+                    f"新增属性 {target_column} 带有unique唯一标记{scope}，若表中已有多行"
+                    f"数据，迁移会因所有行被填入相同默认值而触发唯一性冲突。"
                     f"届时请在本迁移脚本的 upgrade() 中为每行的 {target_column} "
                     f"赋予不同的唯一值，或在开发阶段清空数据库后重建。"
                 )
