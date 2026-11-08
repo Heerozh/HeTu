@@ -133,6 +133,20 @@ _COMPARED_PROPERTY_KEYS = (
     "commit_seq",
 )
 _KNOWN_PROPERTY_KEYS = frozenset((*_COMPARED_PROPERTY_KEYS, "default"))
+# 组件级本版本认识的全部键（见 make_json）
+_KNOWN_COMPONENT_KEYS = frozenset(
+    (
+        "namespace",
+        "name",
+        "permission",
+        "rls_compare",
+        "volatile",
+        "readonly",
+        "backend",
+        "table_sub",
+        "properties",
+    )
+)
 
 
 def _schema_diff(
@@ -141,7 +155,7 @@ def _schema_diff(
     """比对本地组件类与服务器 meta 的定义，返回 ``(必须一致的差异, 只告警的差异)``。
 
     比数据布局：``namespace`` 和 ``properties`` 的列名 / dtype / unique /
-    index / groupby / commit_seq，不认识的列属性键（更新版本的 HeTu 加的）也算不一致；以及通知声明 ``table_sub`` / 各列 ``point_sub`` / ``hidden``——headless 写入走
+    index / groupby / commit_seq，不认识的组件键、列属性键（更新版本的 HeTu 加的）也算不一致；以及通知声明 ``table_sub`` / 各列 ``point_sub`` / ``hidden``——headless 写入走
     同一条 commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新（整表订阅组件的
     commit 不为只改了 hidden 列的行发表频道，RLS 判定用的列除外，所以这时 ``rls_compare``
     也要一致）。``default`` 差异只告警；``permission / volatile / readonly / backend`` 与
@@ -161,6 +175,9 @@ def _schema_diff(
     )
     if local_ts != remote_ts:
         errors.append(f"table_sub: {remote_ts} -> {local_ts}")
+    # 组件级不认识的键同样判为不一致（理由同下面的列属性）
+    for key in sorted((set(local_d) | set(remote_d)) - _KNOWN_COMPONENT_KEYS):
+        errors.append(f"{key}: unknown component property")
     local_p = local_d["properties"]
     remote_p = remote_d["properties"]
     for col in sorted(set(local_p) | set(remote_p)):

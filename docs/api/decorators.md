@@ -467,12 +467,12 @@ HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullab
 
 - **`index`** (bool | None, default `None`) — 是否建立索引。
 
-- `None` 表示沿用 `unique or point_sub` 的值；
+- `None` 表示沿用 `unique or point_sub or groupby or commit_seq` 的值；
 - `False` 表示不建立普通索引；
 - `True` 表示建立普通索引。
 
-当 `unique=True` 或 `point_sub=True` 时，即使显式传入 `False`，后续定义阶段
-也会被强制修正为 `True`。
+当 `unique`、`point_sub`、`groupby`、`commit_seq` 任一项开启时，即使显式传入
+`False`，后续定义阶段也会警告并强制修正为 `True`。
 
 - **`dtype`** (str | type, default `""`) — 字段数据类型。留空时默认使用属性的 type hint。
 

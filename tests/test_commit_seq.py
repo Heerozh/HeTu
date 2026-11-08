@@ -199,6 +199,26 @@ def test_define_commit_seq_rls_column(new_component_env):
         class BadRls(BaseComponent):
             seq: np.int64 = property_field(0, commit_seq=True)
 
+    # 不是 RLS 权限时 rls_compare 不起作用，不拦
+    @define_component(
+        namespace="pytest", rls_compare=("le", "seq", "caller"), force=True
+    )
+    class StrayRls(BaseComponent):
+        seq: np.int64 = property_field(0, commit_seq=True)
+
+    assert StrayRls.commit_seq_ == "seq"
+    # rls_compare 格式不对时，照旧由 RLS 的定义检查给出提示，而不是 IndexError
+    with pytest.raises(AssertionError, match="rls_compare"):
+
+        @define_component(
+            namespace="pytest",
+            permission=Permission.RLS,
+            rls_compare=("le",),
+            force=True,
+        )
+        class Malformed(BaseComponent):
+            seq: np.int64 = property_field(0, commit_seq=True)
+
 
 def test_define_commit_seq_point_sub_ignored(new_component_env, caplog):
     """
@@ -259,6 +279,11 @@ def test_headless_schema_diff_commit_seq(new_component_env):
     newer["properties"]["kind"]["future_flag"] = True
     errors, _warns = headless._schema_diff(comp, json.dumps(newer))
     assert errors == ["~ col kind.future_flag: unknown property"]
+    # 组件级不认识的键也一样
+    newer = json.loads(comp.json_)
+    newer["future_table_flag"] = True
+    errors, _warns = headless._schema_diff(comp, json.dumps(newer))
+    assert errors == ["future_table_flag: unknown component property"]
 
 
 def test_cli_list_shows_commit_seq(new_component_env, monkeypatch):

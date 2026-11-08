@@ -103,12 +103,12 @@ def property_field(
     index : bool | None, default None
         是否建立索引。
 
-        - `None` 表示沿用 `unique or point_sub` 的值；
+        - `None` 表示沿用 `unique or point_sub or groupby or commit_seq` 的值；
         - `False` 表示不建立普通索引；
         - `True` 表示建立普通索引。
 
-        当 `unique=True` 或 `point_sub=True` 时，即使显式传入 `False`，后续定义阶段
-        也会被强制修正为 `True`。
+        当 `unique`、`point_sub`、`groupby`、`commit_seq` 任一项开启时，即使显式传入
+        `False`，后续定义阶段也会警告并强制修正为 `True`。
     dtype : str | type, default ""
         字段数据类型。留空时默认使用属性的 type hint。
 
@@ -895,9 +895,16 @@ def define_component(
                             "不能当分组列：它的号要到提交时才有"
                         ).format(cname=cname, other=other, fname=fname)
                     )
-            # 按发出来的号判定可见性没有意义
-            rls_col = "owner" if permission == Permission.OWNER else None
-            if rls_compare is not None:
+            # 按发出来的号判定可见性没有意义。只看真正生效的判定列：别的权限带了 rls_compare
+            # 也不起作用；rls_compare 格式不对的，留给后面的 _rls_define_check 给出提示
+            rls_col = None
+            if permission == Permission.OWNER:
+                rls_col = "owner"
+            elif (
+                permission == Permission.RLS
+                and isinstance(rls_compare, (tuple, list))
+                and len(rls_compare) == 3
+            ):
                 rls_col = rls_compare[1]
             if fname == rls_col:
                 raise ValueError(
