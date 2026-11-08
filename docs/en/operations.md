@@ -410,8 +410,11 @@ keep these in mind when migrating and maintaining:
 - When the group value is something disposable, such as a match or a session,
   every group keeps one counter key (about 100 bytes) even after the group is
   emptied, so they keep piling up.
-- Older HeTu versions (headless clients included) cannot read a component that
-  uses `commit_seq`; upgrade them together.
+- **Upgrade headless clients before turning `commit_seq` on**: older servers,
+  `LocalApp`, and headless clients that connect by component name fail on a
+  schema that uses `commit_seq` and refuse to start, but an older headless
+  client that connects with a component class does not fail: it keeps writing
+  rows without a number (0), which consumers never see.
 
 Before doing anything, `upgrade` checks whether any server is still running
 (on Redis backends, from the worker leases) and exits with code 1 if so,

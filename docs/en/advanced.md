@@ -604,10 +604,11 @@ async def consume(ctx: hetu.SystemContext, owner: int):
         )
         expected = cursor.last + 1
         for row in rows:
-            while expected < row.seq:  # a number is missing
-                if (missing := await log.get(seq=expected, owner=owner)) is not None:
+            if expected < row.seq:  # numbers are missing: confirm the whole gap in one read
+                for missing in await log.range(
+                    seq=(expected, row.seq - 1), owner=owner, limit=-1
+                ):
                     handle(missing)  # this read missed it: rows came from a lagging replica
-                expected += 1  # an empty read is confirmed on the master at commit
             handle(row)
             expected = row.seq + 1
         cursor.last = expected - 1
@@ -617,19 +618,26 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   read stays open up to `inf`, so every new log row in the group between the
   read and the commit would make the consumer race and retry. The consumer
   doesn't depend on "nothing else is in the range", so turn the check off; the
-  rows it read are still version-checked, and the cursor row's version check
-  keeps two consumers from advancing the same cursor at once.
-- **Confirm a missing number before skipping it**: numbers are normally
-  consecutive. A number can be missing in two ways: behind a read/write
+  rows it read are still version-checked. A cursor belongs to one logical
+  consumer, and several instances of that consumer may share it: the cursor
+  row's version check keeps them from advancing it at once and handling rows
+  twice.
+- **Confirm missing numbers before skipping them**: numbers are normally
+  consecutive. Numbers can be missing in two ways: behind a read/write
   splitting proxy that routes per command, or on native cluster with several
   replicas, one read may fetch rows from replicas at different replication
-  points and miss a row in the middle (temporary); or the row was deleted
-  (permanent). The `get` above handles the row when it finds it. When it reads
-  nothing, the commit confirms on the master that the number has no row and
-  that the row after it has been committed; numbers are handed out in commit
-  order, so that number will never show up and can be skipped. If the empty
-  read came from a lagging replica while the master does have the row, the
-  commit races and retries. Don't just step over a missing number: with
+  points and miss a row in the middle (temporary); or the rows were deleted
+  (permanent — in rare cases a commit script that fails halfway on Redis leaves
+  such a gap too). When numbers are missing, read that span once with a closed
+  `range`: rows it finds are handled; the read keeps the range check (the
+  default), so the commit confirms on the master that the span has no rows. The
+  span ends below a number that has already been committed, so new writes
+  can't land in it and won't make the read race for nothing; numbers are
+  handed out in commit order, so the span will never get rows later and can be
+  skipped. If the empty read came from a lagging replica while the master does
+  have the rows, the commit races and retries. Each gap costs one read however
+  long it is: after a long head has been trimmed, a new consumer starting from
+  0 only reads once more. Don't just step over missing numbers: with
   `phantom_check=False` rows that fail to fetch are skipped silently.
 - **Cost**: every row read into the transaction gets a version check on the
   master at commit, about 1µs of master time per consumed row. Where the log can
@@ -644,14 +652,20 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   reset consumer cursors along with it.
 - **Third-party consumers** (cursors kept outside the database, e.g. syncing the
   log to an external system): after a failover that lost the last commits, a
-  restore of the whole database from a backup, or clearing a volatile table,
-  numbers are reused and one number may now belong to another row. So besides
-  the number, remember that row's snowflake id; on every read, read back the row
-  at the cursor too and compare ids. A different id, or no row, means the
-  number was reused: walk back to the position whose id still matches and
-  continue from there. Raise an alert when the group's largest number is below
-  the cursor. Server-side consumers don't need this: their cursor and the log
-  roll back together, in the same transaction.
+  primary restarted from AOF / RDB after a crash, a restore of the whole
+  database from a backup, or clearing a volatile table, numbers are reused and
+  one number may now belong to another row. So besides the number, remember
+  that row's snowflake id, and on every read, read back the row at the cursor
+  too and check it:
+
+  | Result | Meaning | What to do |
+  |---|---|---|
+  | The id differs | The number was reused | Walk back to the position whose id still matches and continue from there |
+  | No row, and the group's largest number ≥ the cursor | The row was deleted (e.g. trimmed) | Read on as usual |
+  | No row, and the group's largest number < the cursor | The data rolled back | Raise an alert and handle it as a rollback |
+
+  Server-side consumers don't need this: their cursor and the log roll back
+  together, in the same transaction.
 - **Client-side consumers**: subscribe with
   `WatchRange("seq", cursor + 1, inf, limit, group: …)`, see
   [Unity Client SDK](unity-client.md).

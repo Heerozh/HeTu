@@ -294,8 +294,14 @@ var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
     group: new Dictionary<string, object> { ["owner"] = myId });
 ```
 
-- **Sort by number first**: when one push carries several rows, sort them by
-  `seq` before handling them, then move the cursor to the last number.
+- **Advance the cursor only over consecutive numbers**: when one push carries
+  several rows, sort them by `seq` and handle them one number after another
+  from the cursor plus one, moving the cursor as you go. Stop at a missing
+  number and buffer the rows after it: behind a read/write splitting proxy that
+  routes per command, or on native cluster with several replicas, the server
+  may miss a row in the middle when it reads the batch back, and a later push
+  fills it in. Don't jump the cursor to the largest number in the batch; the
+  missed row would never be handled.
 - **Re-subscribe when the window is full**: a subscription only pushes rows in
   its window (`limit` rows). Once you reach the end of the window, subscribe
   again from the new cursor and unsubscribe the old one.
@@ -304,13 +310,18 @@ var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
   the window but is never pushed, so the client stops in front of it forever;
   if that can't be guaranteed, consume on the server instead (see
   "Binlog-style syncing" in [Advanced](advanced.md)).
-- **Missing numbers**: the client cannot tell whether a missing number is
-  permanent. Either make sure the server never deletes rows in the middle, or
-  call a server `System` that confirms and skips the gap.
+- **A missing number that never fills in**: the client cannot tell whether a
+  missing number is permanent (e.g. the row was deleted). Either make sure the
+  server never deletes rows in the middle, or, when it still hasn't filled in
+  after a while, call a server `System` that confirms and skips the gap.
 - **Getting the number of a row you just inserted**: a row inserted in a
   `System` only gets its number at commit, so the row the `System` returns
   still has 0. Watch the group and call with `CallSystemAwaitPush`: by the time
-  it returns, the push has arrived and carries the number.
+  it returns, the push has arrived; find the pushed row by the id the `System`
+  returned to get its number. This needs the new row to fall inside the
+  subscription's window, e.g. watch the latest rows with `desc: true`, or make
+  sure the window isn't full; otherwise the new row is not pushed and
+  `CallSystemAwaitPush` still returns, without the number.
 
 ## Typed components vs `DictComponent`
 

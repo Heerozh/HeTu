@@ -117,8 +117,12 @@ A few invariants that surprise new users:
       cleared at every maintenance and starts over from 1; after importing only
       rows, or deleting a counter by hand, run `hetu upgrade` once to
       recalibrate.
-    - Older HeTu versions (headless clients included) cannot read a component
-      that uses `commit_seq`; upgrade them together.
+    - Don't mix old and new versions. Older servers, `LocalApp`, and headless
+      clients that connect by component name fail on a schema that uses
+      `commit_seq` and refuse to start; but **an older headless client that
+      connects with a component class does not fail**: it keeps writing rows
+      without a number (0), which consumers never see. Upgrade headless clients
+      before turning `commit_seq` on.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the

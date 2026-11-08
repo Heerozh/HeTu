@@ -954,8 +954,9 @@ async def _until_committed(make_txn) -> None:
 
 async def _consume_once(backend: Backend, log, cursor_comp, done, owner, limit=3):
     """
-    设计稿 §9 的服务端消费写法：从游标往后读，缺号时 get 确认（读空就跳过，提交时 CNT 确认它在
-    master 上也不存在），处理记录写进 Done（同一个事务，重复处理会撞 unique）。返回游标的新位置
+    设计稿 §9 的服务端消费写法：从游标往后读，缺号时用一次闭区间 range 确认整段（读到的补上处理，
+    读空的由提交时的 CNT 在 master 上确认这一段确实没有行），处理记录写进 Done（同一个事务，重复
+    处理会撞 unique）。返回游标的新位置
     """
     async with (
         backend.session("pytest", 1) as session,
@@ -974,10 +975,11 @@ async def _consume_once(backend: Backend, log, cursor_comp, done, owner, limit=3
         )
         expected = cursor.last + 1
         for row in rows:
-            while expected < row.seq:  # 中间缺了号
-                if (missing := await repo.get(seq=expected, owner=owner)) is not None:
+            if expected < row.seq:  # 中间缺了号：一次闭区间读确认整段
+                for missing in await repo.range(
+                    seq=(expected, int(row.seq) - 1), owner=owner, limit=-1
+                ):
                     await handle(missing)  # range 漏读了它
-                expected += 1  # 读空的号，提交时会确认它确实不存在
             await handle(row)
             expected = int(row.seq) + 1
         cursor.last = expected - 1
@@ -1148,3 +1150,204 @@ async def test_consumer_skips_permanent_gap(new_component_env, mod_auto_backend)
     await _delete_seqs(backend, log, 7, (3,))
     assert await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10) == 5
     assert await _done_seqs(backend, done) == [1, 2, 4, 5]
+
+
+async def test_consumer_gap_confirm_on_lagging_replica_races(
+    new_component_env, mod_auto_backend, monkeypatch
+):
+    """
+    缺号确认这一步本身也可能落到落后的副本、读空，而 master 上其实有这一行：提交时的 CNT 对不上，
+    必须判竞态，不能把这一号跳过去。重试之后照常处理
+    """
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    cursor_comp, done, _hot = _def_consumer_tables()
+    create_ref(cursor_comp, backend)
+    create_ref(done, backend)
+    ids = await _insert(backend, log, *(_log(log, 7) for _ in range(4)))
+    dropped = {ids[2]}  # 第一次读取行时漏掉 3 号
+    stale = [True]  # 确认缺号的那次读，假装副本还没有 3 号
+
+    def patch(client):
+        fetch, read = client.get_many_array_, client.range_read_
+
+        async def patched_fetch(ref, row_ids):
+            rows, missing = await fetch(ref, row_ids)
+            if ref.comp_cls is log and dropped & set(row_ids):
+                lost = dropped.pop()
+                rows, missing = rows[rows["id"] != lost], [*missing, lost]
+            return rows, missing
+
+        async def patched_read(ref, index_name, left, right, limit, desc, **kwargs):
+            row_ids, obs = await read(
+                ref, index_name, left, right, limit, desc, **kwargs
+            )
+            if ref.comp_cls is log and limit == -1 and stale and stale.pop():
+                del obs.ids[:], obs.members[:]
+                row_ids = []
+            return row_ids, obs
+
+        monkeypatch.setattr(client, "get_many_array_", patched_fetch)
+        monkeypatch.setattr(client, "range_read_", patched_read)
+
+    for client in {id(c): c for c in (backend.master, backend.servant)}.values():
+        patch(client)
+    with pytest.raises(RaceCondition):
+        await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10)
+    assert await _done_seqs(backend, done) == []
+    assert await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10) == 4
+    assert await _done_seqs(backend, done) == [1, 2, 3, 4]
+
+
+async def test_consumer_large_gap_is_one_read(
+    new_component_env, mod_auto_backend, monkeypatch
+):
+    """
+    头部裁掉一大段之后，新消费方（游标为 0）确认这一整段缺口只读一次：每段缺口一次闭区间读、提交时
+    一条 CNT，代价不随缺口长度增长
+    """
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    cursor_comp, done, _hot = _def_consumer_tables()
+    create_ref(cursor_comp, backend)
+    create_ref(done, backend)
+    await _insert(backend, log, *(_log(log, 7) for _ in range(203)))
+    await _delete_seqs(backend, log, 7, range(1, 201))  # 裁掉头部 1..200
+    calls = []
+
+    def count(client):
+        read = client.range_read_
+
+        async def counted(ref, *args, **kwargs):
+            if ref.comp_cls is log:
+                calls.append(args[:2])
+            return await read(ref, *args, **kwargs)
+
+        monkeypatch.setattr(client, "range_read_", counted)
+
+    for client in {id(c): c for c in (backend.master, backend.servant)}.values():
+        count(client)
+    assert (
+        await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10) == 203
+    )
+    assert len(calls) == 2  # 往后读一次、确认 1..200 这段缺口一次
+    assert await _done_seqs(backend, done) == [201, 202, 203]
+
+
+# ---------------------------------------------------------------- 实现审核补充
+
+
+async def test_nx_and_cnt_failures_consume_no_number(log_ref, mod_auto_backend):
+    """主键撞车（NX）、区间被并发插入（CNT）的提交失败，都不消耗号"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    with pytest.raises(UniqueViolation, match="Key already exists"):
+        await _insert(backend, comp, _log(comp, 7, id=row_id))
+    assert _counter(backend, log_ref, owner=7) == 1
+    with pytest.raises(RaceCondition, match="Range changed"):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            await repo.range(seq=(1, np.inf), owner=7, limit=-1)
+            await _insert(backend, comp, _log(comp, 7))  # 并发插进这个区间
+            await repo.insert(_log(comp, 7))
+    assert _counter(backend, log_ref, owner=7) == 2
+    assert [seq for seq, _kind in await _seqs(backend, comp, owner=7)] == [1, 2]
+
+
+async def test_payload_rejects_group_move_bypassing_repo(log_ref, mod_auto_backend):
+    """绕过 repo 改有号行的分组列：提交时 payload 兜底报错，什么都不写"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    with pytest.raises(ValueError, match="commit_seq 列"):
+        async with backend.session("pytest", 1) as session:
+            row = await session.using(comp).get(id=row_id)
+            row.owner = 8
+            session.idmap.update(log_ref, row)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+    assert await _seqs(backend, comp, owner=8) == []
+
+
+async def test_pending_insert_cannot_set_seq_by_update(log_ref, mod_auto_backend):
+    """本事务 insert 的行也不能用 update 改号"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = _log(comp, 7)
+        await repo.insert(row)
+        row.seq = 5
+        with pytest.raises(ValueError, match="不能修改"):
+            await repo.update(row)
+        session.discard()
+
+
+async def test_two_seq_tables_in_one_commit(log_ref, mod_auto_backend):
+    """同一次提交里两张提交序号表（字段名、分组值都相同）各自计数"""
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    @define_component(namespace="pytest", permission=Permission.USER, force=True)
+    class Audit(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    audit_ref = create_ref(Audit, backend)
+    await _insert(backend, comp, _log(comp, 7), _log(comp, 7))
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(_log(comp, 7))
+        row = Audit.new_row()
+        row.owner = 7
+        await session.using(Audit).insert(row)
+    await backend.wait_for_synced()
+    assert _counter(backend, log_ref, owner=7) == 3
+    assert _counter(backend, audit_ref, owner=7) == 1
+
+
+async def test_headless_session_assigns_seq(log_ref, mod_auto_backend):
+    """headless 客户端的写入走同一条提交路径，照常发号"""
+    from hetu import headless
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    client = await headless.HeadlessClient.from_backend(backend, "pytest", [comp])
+    try:
+        async with client.session(comp) as session:
+            row = _log(comp, 7)
+            row.id = 777
+            await session[comp].insert(row)
+    finally:
+        await client.close()
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+
+
+async def test_unnumbered_rows_on_the_index(log_ref, mod_auto_backend):
+    """
+    库里号为 0 的历史行和本事务 insert 的行同组时，get(seq=0) 返回的是历史行；负号的历史行也
+    可以换组
+    """
+    from fixtures.backends import raw_hset
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    zero_id, negative_id = await _insert(backend, comp, _log(comp, 7), _log(comp, 7))
+    raw_hset(backend, log_ref, zero_id, seq="0")
+    raw_hset(backend, log_ref, negative_id, seq="-3")
+    backend.get_table_maintenance().do_rebuild_index_(log_ref)
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(_log(comp, 7))
+        assert (await repo.get(seq=0, owner=7)).id == zero_id
+        old = await repo.get(id=negative_id)
+        old.owner = 9
+        await repo.update(old)
+    await backend.wait_for_synced()
+    assert [seq for seq, _kind in await _seqs(backend, comp, owner=9)] == [-3]
+    assert [seq for seq, _kind in await _seqs(backend, comp, owner=7)] == [0, 3]

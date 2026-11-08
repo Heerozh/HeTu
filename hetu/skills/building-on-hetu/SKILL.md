@@ -78,9 +78,11 @@ working examples — read them first.
   failures consume nothing). Leave it 0 on insert and never update it; a row
   that has a number cannot change group. Inside the transaction it stays 0 and
   uncommitted rows don't show up on that index. For binlog-style consumers read
-  `range(seq=(cursor + 1, np.inf), owner=..., phantom_check=False)` and, when a
-  number is missing, `get(seq=k, owner=...)` it before skipping (see Advanced
-  "Binlog-style syncing"); never derive the next number yourself.
+  `range(seq=(cursor + 1, np.inf), owner=..., phantom_check=False)` and, when
+  numbers are missing before `row.seq`, read that span once with
+  `range(seq=(expected, row.seq - 1), owner=..., limit=-1)` (range check on)
+  before skipping it (see Advanced "Binlog-style syncing"); never derive the
+  next number yourself.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
