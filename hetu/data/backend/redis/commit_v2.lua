@@ -21,6 +21,9 @@ local value_chans = payload[5]
 if checks then
     -- 同一 payload 内两条 UNIQ 指向同一 (索引, 值) 的兜底（正常由本地 IdentityMap 拦住）
     local seen_uniq = {}
+    -- 本次 pushes 要 ZREM 的 (索引 key, member)，UNIQ 查到已有的 member 时才建（常见路径用不到）。
+    -- 键带索引 key：同一行两个 unique 列同值时 member 字节一样，只按 member 会把另一列一起豁免
+    local removed = nil
     for _, check in ipairs(checks) do
         local op = check[1]
 
@@ -69,7 +72,23 @@ if checks then
                 local row_id = string_match(res[1], ".*%z(.*)$")
                 -- 唯一索引指向的行在本次事务中被删除了，则不算冲突
                 if not deleted[row_id] then
-                    return code .. ": Unique violation " .. label
+                    -- 本次提交会把这个 member 移走（同一事务里把值挪到了别的行，比如换槽位）也不算：
+                    -- 被移走的行都有 VER 钉住，库里它的 member 就是本次要 ZREM 的那个
+                    if removed == nil then
+                        removed = {}
+                        if pushes then
+                            for _, cmd in ipairs(pushes) do
+                                if cmd[1] == "ZREM" then
+                                    for i = 3, #cmd do
+                                        removed[cmd[2] .. "\0" .. cmd[i]] = true
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if not removed[idx_key .. "\0" .. res[1]] then
+                        return code .. ": Unique violation " .. label
+                    end
                 end
             end
 
@@ -102,7 +121,8 @@ end
 -- payload 搬运），而且每个副本都要再执行一遍（数据见 benchmark/redis_publish_cost_result.md）。
 -- 所以只保留这两个调用点，Python 侧只给声明了的组件 / 索引准备数据：
 -- - 表频道：table_sub 组件，一个事务一张表一条，消息是 msgpack 的 row_id 列表；
--- - 值频道：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条，消息为空串。
+-- - 值频道：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条，消息为空串；复合索引（groupby）
+--   发的是组频道，一个事务每个 (索引, 组) 一条。
 -- 不要在这里加新的调用点、也不要往消息里塞内容：tests/test_arch_publish.py 守门。
 -- （原生 cluster 下 PUBLISH 会经 cluster bus 发到所有节点；推荐用 proxy 反代，没有这个问题）
 if table_pubs then
