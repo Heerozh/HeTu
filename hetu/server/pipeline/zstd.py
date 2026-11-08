@@ -86,13 +86,20 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             ref = TableReference(_comp, "", 0)
+            index_name = str(rng.choice(["id"] + list(row_dict.keys())))
+            # 复合索引的订阅 sub_id 末尾带着分组值
+            group = {
+                col: int(rng.integers(0, np.iinfo(np.int64).max))
+                for col in _comp.index_groups_.get(index_name, ())
+            }
             sub_id = SubscriptionBroker.make_query_id_(
                 ref,
-                rng.choice(["id"] + list(row_dict.keys())),
+                index_name,
                 rng.integers(0, np.iinfo(np.int64).max),
                 rng.integers(0, np.iinfo(np.int64).max),
                 rng.integers(1, 100),
                 rng.choice([True, False]),
+                group or None,
             )
 
             return ["updt", sub_id, row_dict]

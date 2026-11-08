@@ -7,7 +7,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 
 namespace HeTu
 {
@@ -575,10 +577,153 @@ namespace HeTu
                 CompletePushCall(call);
         }
 
+        // 带 group 的查询键以它开头。服务端的 sub_id 以组件名开头，组件名里不会有控制字符，所以
+        // 这种键永远不等于任何服务端 sub_id——两者在同一张表里查（SubscriptionManager.TryGet
+        // 先按服务端 sub_id 查，再按客户端键的别名查）
+        private const string GroupKeyMarker = "\u0001";
+
+        // 客户端拼的订阅键，发 sub 之前用来查重。单列查询的格式同服务端 sub_id（只是边界的格式化
+        // 可能不同，对不上时靠 SubscriptionManager 的别名表）。带 group（复合索引的分组值）时是
+        // GroupKeyMarker + 单列格式 + {键=类型标记,...}：键按 Ordinal 排序；整数、bool、刚好是
+        // 整数的浮点记作 n:<十进制整数>（bool 记 1 / 0，服务端把 True 和 1 当作同一组），string
+        // 记作 s:<UTF-8 字节数>:<原文>，byte[] 记作 b:<小写 hex>。同一组语义相同的值得到同一个键，
+        // 不同的组得到不同的键（键里不含 '='，见 CopyGroup；left / right 的既有格式不变）
         internal static string MakeSubId(string table, string index, object left,
             object right,
-            int limit, bool desc) =>
-            $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
+            int limit, bool desc,
+            IReadOnlyDictionary<string, object> group = null)
+        {
+            var subId =
+                $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
+            if (group == null || group.Count == 0)
+                return subId;
+
+            var keys = group.Keys.ToList();
+            keys.Sort(StringComparer.Ordinal);
+            var sb = new StringBuilder(GroupKeyMarker,
+                subId.Length + 16 * keys.Count + 2);
+            sb.Append(subId).Append('{');
+            for (var i = 0; i < keys.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(',');
+                var key = keys[i];
+                sb.Append(key).Append('=').Append(GroupValueTag(key, group[key]));
+            }
+
+            return sb.Append('}').ToString();
+        }
+
+        /// <summary>
+        ///     检查并拷贝复合索引的分组值 {分组列: 值}，订阅入口一进来就调。null 和空字典都返回
+        ///     null（不带 group）。不合法抛 <see cref="ArgumentException" />，请求不会发出去：服务端
+        ///     会以 4002 断开连接，会话随之进入终态。值只收整数类型、bool、刚好是整数（且在 64 位
+        ///     整数范围内）的 double / float、string、byte[]；"整数列给了不是数字的字符串"这类要看
+        ///     列类型的错误留给服务端（整数列收数字字符串，和单列索引一样）。拷贝是新的普通
+        ///     Dictionary（MessagePack 能确定地序列化，InspectorTrace
+        ///     认得 IDictionary），按键的 Ordinal 顺序插入，byte[] 也复制一份：之后的 payload、
+        ///     恢复参数、pending 闭包、查询键都用它，调用方事后改字典不影响已发出的订阅。
+        /// </summary>
+        internal static Dictionary<string, object> CopyGroup(string index,
+            IReadOnlyDictionary<string, object> group)
+        {
+            if (group == null || group.Count == 0)
+                return null;
+            // WatchRow 在 id 上走预测的 sub_id，group 会被丢掉；id 也不可能是复合索引
+            if (index == IndexId)
+                throw new ArgumentException(
+                    "id 不是复合索引，不能带 group。The id index takes no group.",
+                    nameof(group));
+
+            var pairs = group.ToList();
+            pairs.Sort((a, b) => string.CompareOrdinal(a.Key, b.Key));
+            var copy = new Dictionary<string, object>(pairs.Count);
+            foreach (var (key, value) in pairs)
+            {
+                // 分组列名是 Python 标识符；键里有 '=' 会让查询键不再单射
+                if (string.IsNullOrEmpty(key) || key.IndexOf('=') >= 0)
+                    throw new ArgumentException(
+                        $"group 的键 \"{key}\" 不是分组列名（不能为空、不能含 '='）。" +
+                        "Group keys must be group column names.", nameof(group));
+                GroupValueTag(key, value); // 只为检查类型
+                var stored = value is byte[] bytes ? (byte[])bytes.Clone() : value;
+                if (!copy.TryAdd(key, stored))
+                    throw new ArgumentException(
+                        $"group 的键 \"{key}\" 重复了。Duplicate group key.", nameof(group));
+            }
+
+            return copy;
+        }
+
+        // 分组值在查询键里的类型标记（见 MakeSubId），同时就是分组值的类型白名单：拼不出标记的
+        // 抛 ArgumentException
+        private static string GroupValueTag(string key, object value)
+        {
+            switch (value)
+            {
+                case string s:
+                    return "s:" + Encoding.UTF8.GetByteCount(s)
+                        .ToString(CultureInfo.InvariantCulture) + ":" + s;
+                case byte[] bytes:
+                    return "b:" + ToLowerHex(bytes);
+                case bool b:
+                    return b ? "n:1" : "n:0";
+                case int v:
+                    return IntegerTag(v);
+                case long v:
+                    return IntegerTag(v);
+                case short v:
+                    return IntegerTag(v);
+                case sbyte v:
+                    return IntegerTag(v);
+                case byte v:
+                    return IntegerTag(v);
+                case ushort v:
+                    return IntegerTag(v);
+                case uint v:
+                    return IntegerTag(v);
+                case ulong v:
+                    return "n:" + v.ToString(CultureInfo.InvariantCulture);
+                case double d when IsIntegral(d):
+                    return IntegralTag(d);
+                case float f when IsIntegral(f):
+                    return IntegralTag(f);
+                default:
+                    var shown = value == null
+                        ? "null"
+                        : $"{value}（{value.GetType().Name}）";
+                    throw new ArgumentException(
+                        $"group 的值 {key}={shown} 不能用作分组值：只收整数、bool、刚好是整数的" +
+                        $"浮点、string、byte[]。Invalid group value for \"{key}\".", "group");
+            }
+        }
+
+        private static string IntegerTag(long value) =>
+            "n:" + value.ToString(CultureInfo.InvariantCulture);
+
+        // 刚好是整数、并且在 64 位整数的范围 [-2^63, 2^64) 里。超出的不可能是任何整数列的合法值，
+        // 浮点又不能做分组列，发出去只会被服务端断开
+        private static bool IsIntegral(double value) =>
+            Math.Floor(value) == value &&
+            value >= -9223372036854775808.0 && value < 18446744073709551616.0;
+
+        private static string IntegralTag(double value) =>
+            value < 9223372036854775808.0
+                ? IntegerTag((long)value)
+                : "n:" + ((ulong)value).ToString(CultureInfo.InvariantCulture);
+
+        private static string ToLowerHex(byte[] bytes)
+        {
+            const string digits = "0123456789abcdef";
+            var chars = new char[bytes.Length * 2];
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                chars[2 * i] = digits[bytes[i] >> 4];
+                chars[2 * i + 1] = digits[bytes[i] & 0xF];
+            }
+
+            return new string(chars);
+        }
 
         /// <summary>整表订阅的 sub_id，与服务端 SubscriptionBroker.subscribe_table 一致。</summary>
         internal static string MakeTableSubId(string table) => $"{table}.table";
@@ -635,30 +780,47 @@ namespace HeTu
         /// <param name="value">索引值。</param>
         /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
+        /// <param name="group">
+        ///     复合索引（服务端 <c>property_field(groupby=...)</c>）的分组值 {分组列: 值}，要给出
+        ///     全部分组列；单列索引不给。值只能是整数、bool、刚好是整数的浮点、string、byte[]，
+        ///     不合法、或在 <c>id</c> 上给了 group 时抛 <see cref="ArgumentException" />。字典会被
+        ///     拷贝，之后再改不影响这次订阅。需要支持复合索引的服务器。
+        ///     Group values {group column: value} of a composite (groupby) index; all
+        ///     group columns are required. Leave null for single-column indexes. Throws
+        ///     <see cref="ArgumentException" /> on invalid values. The dictionary is
+        ///     copied.
+        /// </param>
         public void WatchRowSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
-            string componentName = null)
+            string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
+            // 一进来就检查、拷贝 group：调用方事后改字典不影响这次订阅
+            var groupCopy = CopyGroup(index, group);
             // 每个调用方发一个自己的句柄，同一订阅的句柄共用一个核心
             var creationTrace = CaptureCreationTrace();
             WatchRowCoreSync<T>(index, value,
                 (core, canceled, ex) =>
                     onResponse(core?.CreateHandle(creationTrace), canceled, ex),
-                componentName, null, creationTrace);
+                componentName, null, creationTrace, groupCopy);
         }
 
         // 核心级的 WatchRow：已订阅过就回已有的核心，否则发 sub、建核心并登记。回调拿到的
         // 核心可能还没有句柄，由调用方发句柄。reusable：会话恢复时把回复绑回原来的核心。
+        // group：调用方已用 CopyGroup 检查、拷贝过（id 上不会有 group）
         internal void WatchRowCoreSync<T>(
             string index, object value,
             Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName,
             ManagedRowCore<T> reusable,
-            StackTrace creationTrace)
+            StackTrace creationTrace,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
+            if (group is { Count: 0 })
+                group = null;
             if (!EnsureConnected("WatchRowSync"))
             {
                 onResponse(null, true, null);
@@ -678,8 +840,10 @@ namespace HeTu
                 }
             }
 
-            // 向服务器订阅
-            var payload = new[] { CommandSub, componentName, QueryGet, index, value };
+            // 向服务器订阅。只在有 group 时才发第 6 项，旧服务器照旧收 5 项
+            var payload = group == null
+                ? new[] { CommandSub, componentName, QueryGet, index, value }
+                : new[] { CommandSub, componentName, QueryGet, index, value, group };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
             SendSubRequest(payload, (response, cancel) =>
@@ -736,11 +900,13 @@ namespace HeTu
         /// <summary>
         ///     同 WatchRowSync<T>，但使用默认字典类型。
         /// </summary>
+        /// <param name="group">复合索引的分组值，见 WatchRowSync&lt;T&gt;。</param>
         public void WatchRowSync(
             string index, object value,
             Action<RowSubscription<DictComponent>, bool, Exception> onResponse,
-            string componentName = null) =>
-            WatchRowSync<DictComponent>(index, value, onResponse, componentName);
+            string componentName = null,
+            IReadOnlyDictionary<string, object> group = null) =>
+            WatchRowSync<DictComponent>(index, value, onResponse, componentName, group);
 
         /// <summary>
         ///     订阅索引范围数据。（Range)
@@ -763,30 +929,47 @@ namespace HeTu
         /// <param name="desc">是否降序。</param>
         /// <param name="force">无数据时是否仍保持订阅。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
+        /// <param name="group">
+        ///     复合索引（服务端 <c>property_field(groupby=...)</c>）的分组值 {分组列: 值}，要给出
+        ///     全部分组列，例如 <c>level</c> 按 <c>zone</c> 分组时，订阅 zone=3 里 level 在
+        ///     [left, right] 的行要给 <c>{ ["zone"] = 3 }</c>；单列索引不给。值只能是整数、bool、
+        ///     刚好是整数的浮点、string、byte[]，不合法时抛 <see cref="ArgumentException" />。
+        ///     字典会被拷贝，之后再改不影响这次订阅及其重连恢复。需要支持复合索引的服务器。
+        ///     Group values {group column: value} of a composite (groupby) index; all
+        ///     group columns are required. Leave null for single-column indexes. Throws
+        ///     <see cref="ArgumentException" /> on invalid values. The dictionary is
+        ///     copied.
+        /// </param>
         public void WatchRangeSync<T>(
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
-            string componentName = null)
+            string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
+            // 一进来就检查、拷贝 group：调用方事后改字典不影响这次订阅
+            var groupCopy = CopyGroup(index, group);
             var creationTrace = CaptureCreationTrace();
             WatchRangeCoreSync<T>(index, left, right, limit,
                 (core, canceled, ex) =>
                     onResponse(core?.CreateHandle(creationTrace), canceled, ex),
-                desc, force, componentName, null, creationTrace);
+                desc, force, componentName, null, creationTrace, groupCopy);
         }
 
-        // 核心级的 WatchRange，见 WatchRowCoreSync
+        // 核心级的 WatchRange，见 WatchRowCoreSync。group：调用方已用 CopyGroup 检查、拷贝过
         internal void WatchRangeCoreSync<T>(
             string index, object left, object right, int limit,
             Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             bool desc, bool force,
             string componentName,
             ManagedIndexCore<T> reusable,
-            StackTrace creationTrace)
+            StackTrace creationTrace,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
+            if (group is { Count: 0 })
+                group = null;
             if (!EnsureConnected("WatchRangeSync"))
             {
                 onResponse(null, true, null);
@@ -797,7 +980,7 @@ namespace HeTu
 
             // 先要组合sub_id看看是否已订阅过
             var predictID = MakeSubId(
-                componentName, index, left, right, limit, desc);
+                componentName, index, left, right, limit, desc, group);
             if (TryGetExistingCore<ManagedIndexCore<T>, T>(predictID,
                     out var existingCore) && existingCore != reusable)
             {
@@ -805,12 +988,18 @@ namespace HeTu
                 return;
             }
 
-            // 发送订阅请求
-            var payload = new[]
-            {
-                CommandSub, componentName, QueryRange, index, left, right, limit,
-                desc, force
-            };
+            // 发送订阅请求。只在有 group 时才发第 10 项，旧服务器照旧收 9 项
+            var payload = group == null
+                ? new[]
+                {
+                    CommandSub, componentName, QueryRange, index, left, right, limit,
+                    desc, force
+                }
+                : new[]
+                {
+                    CommandSub, componentName, QueryRange, index, left, right, limit,
+                    desc, force, group
+                };
             var traceId = InspectorCollector.InterceptRequest(QueryRange,
                 componentName, payload);
             SendSubRequest(payload, (response, cancel) =>
@@ -849,11 +1038,12 @@ namespace HeTu
                         }
 
                         idxCore.ConfigureRestoreQuery(
-                            index, left, right, limit, desc, force);
+                            index, left, right, limit, desc, force, group);
                         Subscriptions.Add(subID, idxCore);
                     }
 
-                    // 客户端拼的 predictID 可能和服务端的 sub_id 格式不同，记下来供下次查重
+                    // 客户端拼的 predictID 可能和服务端的 sub_id 格式不同（带 group 时一定不同），
+                    // 记下来供下次查重
                     if (idxCore != null)
                         Subscriptions.AddAlias(predictID, subID);
                 }
@@ -874,11 +1064,14 @@ namespace HeTu
         /// <summary>
         ///     按字典类型，订阅索引范围数据。（Range)
         /// </summary>
+        /// <param name="group">复合索引的分组值，见 WatchRangeSync&lt;T&gt;。</param>
         public void WatchRangeSync(
             string componentName, string index, object left, object right, int limit,
             Action<IndexSubscription<DictComponent>, bool, Exception> onResponse,
-            bool desc = false, bool force = true) =>
-            WatchRangeSync(index, left, right, limit, onResponse, desc, force, componentName);
+            bool desc = false, bool force = true,
+            IReadOnlyDictionary<string, object> group = null) =>
+            WatchRangeSync(index, left, right, limit, onResponse, desc, force,
+                componentName, group);
 
         /// <summary>
         ///     订阅整张表。（Table）

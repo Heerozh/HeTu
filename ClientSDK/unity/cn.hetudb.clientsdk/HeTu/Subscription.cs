@@ -729,6 +729,7 @@ namespace HeTu
             ForEachHandle<RowSubscription<T>>(static h => h.RaiseResynced());
         }
 
+        // 按首次解析出的行 id 恢复：最初是按复合索引（带 group）找到的行也一样，不再带 group
         public override void Restore(
             IHeTuSessionTransport transport,
             Action<bool> onCompleted,
@@ -785,6 +786,9 @@ namespace HeTu
         internal bool RestoreDesc { get; private set; }
         internal bool RestoreForce { get; private set; } = true;
 
+        // 复合索引的分组值（订阅入口检查、拷贝过的那份）；单列索引为 null
+        internal IReadOnlyDictionary<string, object> RestoreGroup { get; private set; }
+
         // 为 true 表示这是 WatchTable 建立的整表订阅，断线重连时重发 table 而非 range
         internal bool RestoreAsTable { get; private set; }
 
@@ -838,7 +842,8 @@ namespace HeTu
             object right,
             int limit,
             bool desc,
-            bool force)
+            bool force,
+            IReadOnlyDictionary<string, object> group = null)
         {
             RestoreIndex = index;
             RestoreLeft = left;
@@ -846,6 +851,7 @@ namespace HeTu
             RestoreLimit = limit;
             RestoreDesc = desc;
             RestoreForce = force;
+            RestoreGroup = group;
             RestoreAsTable = false;
         }
 
@@ -905,7 +911,8 @@ namespace HeTu
                 RestoreDesc,
                 RestoreForce,
                 ComponentName,
-                this);
+                this,
+                group: RestoreGroup);
         }
 
         private void ReplaceSnapshot(List<T> rows)

@@ -33,13 +33,18 @@ def _lua_str(value: Any) -> bytes:
     return str(value).encode()
 
 
-def _run_checks(store: SQLiteStore, checks: list, deleted: dict) -> bytes | None:
+def _run_checks(
+    store: SQLiteStore, checks: list, deleted: dict, pushes: list
+) -> bytes | None:
     """
     Phase 1: Checks。顺序即优先级：Python 把竞态类（VER、带 RACE 标记的 NX/UNIQ、区间的 CNT）排在
     确定性类前面，这里首个失败即返回，所以同时存在两类冲突时先报 RACE。
     """
     # 同一 payload 内两条 UNIQ 指向同一 (索引, 值) 的兜底（正常由本地 IdentityMap 拦住）
     seen_uniq: set[bytes] = set()
+    # 本次 pushes 要 ZREM 的 (索引 key, member)，UNIQ 查到已有的 member 时才建（常见路径用不到）。
+    # 键带索引 key：同一行两个 unique 列同值时 member 字节一样，只按 member 会把另一列一起豁免
+    removed: set[bytes] | None = None
     for check in checks:
         op = check[0]
         if op == b"VER":
@@ -77,7 +82,17 @@ def _run_checks(store: SQLiteStore, checks: list, deleted: dict) -> bytes | None
                 row_id = res[0].rsplit(b"\x00", 1)[-1]
                 # 唯一索引指向的行在本次事务中被删除了，则不算冲突
                 if not deleted.get(row_id):
-                    return code + b": Unique violation " + label
+                    # 本次提交会把这个 member 移走（同一事务里把值挪到了别的行）也不算：被移走的
+                    # 行都有 VER 钉住，库里它的 member 就是本次要 ZREM 的那个
+                    if removed is None:
+                        removed = {
+                            cmd[1] + b"\x00" + member
+                            for cmd in pushes
+                            if cmd[0] == b"ZREM"
+                            for member in cmd[2:]
+                        }
+                    if idx_key + b"\x00" + res[0] not in removed:
+                        return code + b": Unique violation " + label
         elif op == b"CNT":
             # 检查区间行数 (range 读的防幻读校验) ["CNT", index_key, min, max, count, label]
             if store.zlexcount(check[1].decode(), check[2], check[3]) != check[4]:
@@ -140,7 +155,7 @@ def run_commit(
     value_chans: list = payload[4] or []
     with store.write_txn():
         # 校验只读：没通过时什么都还没写，不用回滚
-        failure = _run_checks(store, checks, deleted)
+        failure = _run_checks(store, checks, deleted, pushes)
         if failure is None:
             channels = _run_pushes(store, pushes)
             # Phase 3: 表频道（payload 是 msgpack 的 row_id 列表）/ 索引值频道（无 payload）

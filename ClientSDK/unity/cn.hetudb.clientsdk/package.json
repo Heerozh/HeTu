@@ -1,6 +1,6 @@
 {
     "name": "cn.hetudb.clientsdk",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "displayName": "HeTu ClientSDK",
     "description": "Client SDK For HeTu.\n\nHeTu is the backend platform for Logic-Heavy apps. \nBuilt for Game Servers, Real-time Simulations, \nand AI Agents that need persistent memory context.",
     "unity": "2022.3",

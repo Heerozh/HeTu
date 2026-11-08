@@ -242,8 +242,14 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 
 `upgrade` 默认每次都按行数据重建持久 `Component` 的索引，修掉索引残留：比如维护脚本只删了行、没删
 索引，服务器日志会报"索引和行数据对不上"，读到这一行的 `System` 一直重试。重建要**停服**执行（扫描行
-与覆盖索引之间的写入会丢），每个索引建好后才原子替换旧索引，中途失败旧索引原样保留。数据量大时重建较慢，
-可以用 `--no-rebuild-index` 跳过。
+与覆盖索引之间的写入会丢），全部索引都建好、检查通过后才统一替换旧索引，中途失败旧索引原样保留。数据量大时
+重建较慢，可以用 `--no-rebuild-index` 跳过。给索引加上或去掉 `groupby`（复合索引）、改 `unique` / `index`
+时，即使加了 `--no-rebuild-index`，迁移也会重建这个组件的索引：索引的定义变了，不重建就查不到。
+
+把正在使用的单列索引改成复合索引是**破坏性变更**：之后所有不带分组值的查询都会报错，旧版客户端 SDK 订阅
+这个索引会被服务器断开（4002，SDK 视为终态、不重连），新版 SDK 带着分组值连旧服务器也一样。建议先在
+**新字段**上建复合索引，服务端代码和客户端都换过去之后，再删掉旧索引。用了 `groupby` 的组件，旧版 HeTu
+读不了它的 schema，升级时新旧版本不要混跑同一个库。
 
 `upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
 不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
@@ -279,7 +285,9 @@ hetu call --as 1001 --group gm gm_kick 2002
 hetu call send_mail --args-file args.json # 参数从 JSON 数组文件读（- 为 stdin）
 hetu call add_gold 1001 500 --dry-run     # 执行但不提交，看它会写什么
 hetu get Player owner=1001                # 按 id 或带索引的字段读一行
+hetu get Item template=3 owner=1001       # 复合索引：本字段加全部分组列（匹配到多个索引时用 --index 指定）
 hetu range Item owner 1001 --limit 50     # 省略右界即精确匹配；( / [ 前缀表示开 / 闭区间
+hetu range Rank level 10 20 --group zone=3  # 复合索引：每个分组列给一次 --group，值按字面值
 hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player', owner=1001))"
 ```
 

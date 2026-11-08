@@ -7,6 +7,7 @@
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast, final, override
 
@@ -63,10 +64,12 @@ class RedisTableMaintenance(TableMaintenance):
         left: Any,
         right: Any = None,
         limit: int = 10,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         idx_key, b_left, b_right, empty = self.client.zrange_args_(
-            ref, index_name, left, right, False
+            ref, index_name, left, right, False, group
         )
         if empty:
             return []
@@ -226,58 +229,148 @@ class RedisTableMaintenance(TableMaintenance):
     # 一大块内存
     REBUILD_BATCH = 10000
 
+    def _delete_keys(self, keys: list[str]) -> None:
+        """
+        分批 UNLINK：旧的单列索引可能很大，DEL 会阻塞 Redis；复合索引的组 key 可能很多，一条命令
+        塞不下。空列表什么也不做（不带参数的命令会报错，盖住调用方要抛的异常）
+        """
+        for batch in batched(keys, 1000):
+            self.client.io.unlink(*batch)
+
+    def _table_keys(
+        self, table_ref: TableReference
+    ) -> tuple[list[str], list[str], dict[str, list[str]]]:
+        """
+        这张表（这个簇）名下的 key，一次 KEYS 拿到再按种类分开：(行 key, 上次重建中断留下的临时
+        key, {索引名: 这个索引名下的 zset key})。KEYS 每次都要扫整个库，hetu upgrade 默认重建
+        所有表，按种类、按索引各扫一次会把停服时间拉长好几倍
+        """
+        cluster_prefix = self.client.cluster_prefix(table_ref)
+        found = self.client.io.keys(
+            cluster_prefix + ":*", target_nodes=RedisCluster.PRIMARIES
+        )
+        row_head = cluster_prefix + ":id:"
+        idx_head = cluster_prefix + ":index:"
+        tmp_head = cluster_prefix + ":rebuilding:"
+        rows: list[str] = []
+        leftover: list[str] = []
+        indexes: dict[str, list[str]] = {}
+        for raw in cast(list[bytes], found):
+            key = raw.decode()
+            if key.startswith(row_head):
+                rows.append(key)
+            elif key.startswith(idx_head):
+                # 索引名（字段名）和组 key 的 token 里都没有 ":"：{idx_key} 或 {idx_key}:{token}
+                name = key[len(idx_head) :].split(":", 1)[0]
+                indexes.setdefault(name, []).append(key)
+            elif key.startswith(tmp_head):
+                leftover.append(key)
+        return rows, leftover, indexes
+
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
-        按行数据重建组件表的索引，返回行数。每个索引先建到临时 key，建好、unique 检查通过后
-        再 RENAME 覆盖旧索引：中途失败（中断、超时、unique 冲突）旧索引原样保留，不会留下
-        空的或半截的索引。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        按行数据重建组件表的索引，返回行数。分两阶段：先把每个索引都建到临时 key、通过 unique
+        检查，全部建好之后再统一 RENAME 覆盖旧索引。建的阶段失败（中断、超时、unique 冲突）所有
+        旧索引原样保留：逐个建、逐个换的话，后面的索引失败时前面的已经换成新定义的格式（比如复合
+        索引），而 meta 还是旧定义，回退代码就读不懂了。换上阶段很短，在那里出错时，已换上的索引
+        是新的，出错的索引原来的 key 还在（先换上、后删残留），重跑一次即可恢复（设计稿 §14.6）。
+
+        复合索引每组一个 zset，按组建临时 key；换上之后，删掉这个索引名下不在新结果里的 key：
+        已经空了的旧组、改成复合之前的单个 key、改回单列之前的组 key。表里一行都没有时，索引里
+        剩下的都是残留，直接删掉。上次中断留下的临时 key 在开头清掉。
         """
         from .client import RedisBackendClient
 
         io = self.client.io
-        keys = io.keys(
-            self.client.cluster_prefix(table_ref) + ":id:*",
-            target_nodes=RedisCluster.PRIMARIES,
-        )
-        keys = cast(list[bytes], keys)
+        cluster_prefix = self.client.cluster_prefix(table_ref)
+        keys, leftover, existing = self._table_keys(table_ref)
         comp_cls = table_ref.comp_cls
+        # 临时 key 带同一个 {CLU} hash tag（cluster 模式下同 slot 才能 RENAME），又不在
+        # `{idx_key}:` 下，不会被当成组 key。先删掉上次中断留下的
+        idx_head = cluster_prefix + ":index:"
+        tmp_head = cluster_prefix + ":rebuilding:"
+        self._delete_keys(leftover)
 
-        for idx_name in comp_cls.indexes_:
-            idx_key = self.client.index_key(table_ref, idx_name)
-            if not keys:
-                io.delete(idx_key)
-                continue
-            # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id。临时 key 带同一个
-            # {CLU} hash tag，cluster 模式下和索引同 slot，才能 RENAME
-            tmp_key = f"{idx_key}:rebuilding"
-            io.delete(tmp_key)  # 上次中断留下的
-            is_unique = idx_name in comp_cls.uniques_
-            is_bytes = idx_name in comp_cls.bytes_fields_
-            seen: set[bytes] = set()
-            # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
-            struct = comp_cls.new_row(id_=0)
-            for chunk in batched(keys, self.REBUILD_BATCH):
-                pipe = io.pipeline()
-                for key in chunk:
-                    pipe.hget(key.decode(), idx_name)
-                values: list[bytes] = pipe.execute()
-                members: dict[bytes, int] = {}
-                for key, value in zip(chunk, values):
-                    if is_unique:
-                        if value in seen:
-                            io.delete(tmp_key)
+        if not keys:
+            for idx_name in comp_cls.indexes_:
+                self._delete_keys(existing.get(idx_name, []))
+            return 0
+
+        # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
+        struct = comp_cls.new_row(id_=0)
+        # {索引名: {zset key: 临时 key}}
+        renames: dict[str, dict[str, str]] = {}
+        try:
+            for idx_name in comp_cls.indexes_:
+                idx_key = self.client.index_key(table_ref, idx_name)
+                targets = renames.setdefault(idx_name, {})
+                # 复合索引要读分组列和本字段
+                columns = (*comp_cls.index_groups_[idx_name], idx_name)
+                is_unique = idx_name in comp_cls.uniques_
+                seen: set[bytes] = set()
+                for chunk in batched(keys, self.REBUILD_BATCH):
+                    pipe = io.pipeline()
+                    for key in chunk:
+                        pipe.hmget(key, columns)
+                    rows: list[list[bytes | None]] = pipe.execute()
+                    # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id
+                    by_key: dict[str, dict[bytes, int]] = {}
+                    for key, raws in zip(chunk, rows):
+                        if any(raw is None for raw in raws):
                             raise RuntimeError(
-                                f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时"
-                                f"发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                f"Unique标记导致。"
+                                f"组件{table_ref.comp_name}的行{key}缺少索引"
+                                f"`{idx_name}`要用的字段{columns}，重建索引失败。"
                             )
-                        seen.add(value)
-                    # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
-                    member = RedisBackendClient.rebuild_member_(
-                        struct, idx_name, value, is_bytes, key.split(b":")[-1]
-                    )
-                    members[member] = 0
-                io.zadd(tmp_key, members)
-            io.rename(tmp_key, idx_key)
+                        # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
+                        zset_key, member = RedisBackendClient.rebuild_entry_(
+                            comp_cls,
+                            idx_key,
+                            idx_name,
+                            struct,
+                            dict(zip(columns, cast(list[bytes], raws))),
+                            key.rsplit(":", 1)[-1].encode(),
+                        )
+                        if is_unique:
+                            # 按值段（复合索引带组前缀）查重，同组同值才算冲突
+                            value = member.rsplit(b"\x00", 1)[0]
+                            if value in seen:
+                                raise RuntimeError(
+                                    f"组件{table_ref.comp_name}的unique索引`{idx_name}`"
+                                    f"（列 {columns}）在重建时发现违反unique约束，可能是迁移时"
+                                    f"缩短了值类型、新增了Unique标记、或去掉了groupby（组内"
+                                    f"唯一变成了全局唯一）导致。"
+                                )
+                            seen.add(value)
+                        by_key.setdefault(zset_key, {})[member] = 0
+                    pipe = io.pipeline()
+                    for zset_key, members in by_key.items():
+                        if (tmp_key := targets.get(zset_key)) is None:
+                            tmp_key = tmp_head + zset_key[len(idx_head) :]
+                            targets[zset_key] = tmp_key
+                        pipe.zadd(tmp_key, members)
+                    pipe.execute()
+        except BaseException:
+            self._delete_keys(
+                [tmp for targets in renames.values() for tmp in targets.values()]
+            )
+            raise
+        for idx_name, targets in renames.items():
+            # 先换上、后删残留：换到一半出错（超时、中断）时，这个索引原来的 key 还在，回退到旧
+            # 定义照样能读。一批一条脚本：少些往返，一批之内是原子的。cluster 模式的管道不让发
+            # RENAME，脚本的 key 都带同一个 {CLU} hash tag，在同一个 slot
+            for batch in batched(targets.items(), self.REBUILD_BATCH):
+                names = [name for zset_key, tmp in batch for name in (tmp, zset_key)]
+                io.eval(self._RENAME_LUA, len(names), *names)
+            # 这个索引名下（开头列出的）不在新结果里的：空了的旧组、另一种格式的 key
+            stale = [key for key in existing.get(idx_name, []) if key not in targets]
+            self._delete_keys(stale)
         return len(keys)
+
+    # KEYS 依次是 (临时 key, 目标 key) 对
+    _RENAME_LUA = """
+for i = 1, #KEYS, 2 do
+    redis.call("RENAME", KEYS[i], KEYS[i + 1])
+end
+return #KEYS / 2
+"""

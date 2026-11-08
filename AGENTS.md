@@ -38,7 +38,9 @@ worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己
 
 - **Component** (`@define_component`)：数据 schema 由 NumPy structured arrays 支撑（类似 C
   struct 的 row）。定义在用户 app 代码中，存储在 Redis。每个 component 都是一张 table，通过
-  `property_field()` 定义带类型的 columns。 支持字段 `unique`/`index`。权限级别：
+  `property_field()` 定义带类型的 columns。 支持字段 `unique`/`index`；`groupby` 建复合索引
+  （按分组列分组、组内按本字段排序，查询要给出全部分组列，设计见
+  `docs/superpowers/specs/2026-11-08-composite-index-design.md`）。权限级别：
   `EVERYBODY`、`USER`、`OWNER`/`RLS`、
   `ADMIN`（`OWNER` = 行级私有：自动只让 client 订阅到 `owner==ctx.caller` 的行， 等价
   `rls_compare=("eq", "owner", "caller")`，组件需有 `owner` 字段；服务端代码不受限）。

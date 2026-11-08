@@ -9,8 +9,9 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, final, override
+from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
 
@@ -92,10 +93,12 @@ class SQLiteTableMaintenance(TableMaintenance):
         left: Any,
         right: Any = None,
         limit: int = 10,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         idx_key, b_left, b_right, empty = self.client.zrange_args_(
-            ref, index_name, left, right, False
+            ref, index_name, left, right, False, group
         )
         if empty:
             return []
@@ -237,59 +240,78 @@ class SQLiteTableMaintenance(TableMaintenance):
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
-        按行数据重建组件表的索引，返回行数。member 的算法与 Redis 后端、与 commit 写索引时相同
-        （`rebuild_member_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途失败
-        （unique 冲突）旧索引原样保留。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        按行数据重建组件表的索引，返回行数。member 与 zset key 的算法与 Redis 后端、与 commit 写
+        索引时相同（`rebuild_entry_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途
+        失败（unique 冲突）旧索引原样保留。复合索引每组一个 zset，替换时这个索引名下的旧 key 全部
+        删掉（单列的 key 与复合的组 key），不留另一种格式或空了的组。表里一行都没有时，索引里
+        剩下的都是残留，直接删掉。
         """
         comp_cls = table_ref.comp_cls
         table = self.client.cluster_prefix(table_ref)
         row_count = len(self._run(SQLiteStore.row_ids, table))
-        new_indexes: dict[str, list[bytes]] = {}
+        # {索引 key: {zset key: members}}
+        new_indexes: dict[str, dict[str, list[bytes]]] = {}
         # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
         struct = comp_cls.new_row(id_=0)
         for idx_name in comp_cls.indexes_:
-            members: list[bytes] = []
+            idx_key = self.client.index_key(table_ref, idx_name)
+            by_key: dict[str, list[bytes]] = {}
             if row_count:
+                # 复合索引要读分组列和本字段
+                columns = (*comp_cls.index_groups_[idx_name], idx_name)
                 is_unique = idx_name in comp_cls.uniques_
-                is_bytes = idx_name in comp_cls.bytes_fields_
-                seen: set[bytes | None] = set()
-                for row_id, value in self._run(
-                    SQLiteStore.row_field_values, table, idx_name
+                seen: set[bytes] = set()
+                for row_id, raws in self._run(
+                    SQLiteStore.row_field_values, table, columns
                 ):
+                    for col, raw in zip(columns, raws):
+                        if raw is None:
+                            raise RuntimeError(
+                                _(
+                                    "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
+                                    "无法重建索引"
+                                ).format(
+                                    comp_name=table_ref.comp_name,
+                                    row_id=row_id,
+                                    idx_name=col,
+                                )
+                            )
+                    zset_key, member = self.client.rebuild_entry_(
+                        comp_cls,
+                        idx_key,
+                        idx_name,
+                        struct,
+                        dict(zip(columns, cast(tuple[bytes, ...], raws))),
+                        str(row_id).encode(),
+                    )
                     if is_unique:
+                        # 按值段（复合索引带组前缀）查重，同组同值才算冲突
+                        value = member.rsplit(b"\x00", 1)[0]
                         if value in seen:
                             raise RuntimeError(
                                 _(
-                                    "组件{comp_name}的unique索引`{idx_name}`在重建时"
-                                    "发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                    "Unique标记导致。"
+                                    "组件{comp_name}的unique索引`{idx_name}`（列 {columns}）"
+                                    "在重建时发现违反unique约束，可能是迁移时缩短了值类型、"
+                                    "新增了Unique标记、或去掉了groupby（组内唯一变成了全局"
+                                    "唯一）导致。"
                                 ).format(
-                                    comp_name=table_ref.comp_name, idx_name=idx_name
+                                    comp_name=table_ref.comp_name,
+                                    idx_name=idx_name,
+                                    columns=columns,
                                 )
                             )
                         seen.add(value)
-                    if value is None:
-                        raise RuntimeError(
-                            _(
-                                "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
-                                "无法重建索引"
-                            ).format(
-                                comp_name=table_ref.comp_name,
-                                row_id=row_id,
-                                idx_name=idx_name,
-                            )
-                        )
-                    members.append(
-                        self.client.rebuild_member_(
-                            struct, idx_name, value, is_bytes, str(row_id).encode()
-                        )
-                    )
-            new_indexes[self.client.index_key(table_ref, idx_name)] = members
+                    by_key.setdefault(zset_key, []).append(member)
+            new_indexes[idx_key] = by_key
 
         def _replace(store: SQLiteStore):
             with store.write_txn():
-                for idx_key, idx_members in new_indexes.items():
-                    store.zreplace(idx_key, idx_members)
+                for idx_key, by_key in new_indexes.items():
+                    # 前缀带 ":"：不会删到名字以本索引名开头的别的索引（level 与 level2）
+                    store.zreplace(idx_key, ())
+                    store.zdelete_prefix(idx_key + ":")
+                    for zset_key, members in by_key.items():
+                        store.zreplace(zset_key, members)
 
         self._run(_replace)
         return row_count

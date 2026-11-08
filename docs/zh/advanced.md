@@ -306,30 +306,35 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 - **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
   整个背包付费。
 
-### 热路径：unique 锚定 + `upsert`
+### 热路径：组内唯一 + `upsert`
 
-给组合键建一个 unique 字段，用 `upsert` 锚定它，事务只碰一行：
+给组合键建一个组内唯一的复合索引（`unique=True, groupby=...`），`upsert` 同时给出本字段和分组列来锚定
+它，事务只碰一行：
 
 ```python
 @hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
 class Item(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
-    template: np.int32 = hetu.property_field(0)
+    # 每个玩家的每种道具只有一行：按 owner 分组、组内唯一
+    template: np.int32 = hetu.property_field(0, unique=True, groupby="owner")
     qty: np.int32 = hetu.property_field(0)
-    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
 
 
 @hetu.define_system(
     namespace="game", components=(Item,), permission=hetu.Permission.USER
 )
 async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
-    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
-        item.owner, item.template = ctx.caller, tpl
-        item.qty += n
+    async with ctx.repo[Item].upsert(template=tpl, owner=ctx.caller) as item:
+        item.qty += n  # 新建的行已经写好了 template 和 owner
 ```
 
-两个事务同时走到插入分支时，后提交的那个撞上 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
-代价是多一个 unique 索引；道具换主人时要同步改 `slot`；给已有数据加这个字段时要先回填。
+两个事务同时走到插入分支时，后提交的那个撞上组内 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
+代价是多一个复合索引；给已有组件加这个索引要跑 `hetu upgrade` 重建索引，已有数据里有组内重复会报错。
+以前的写法是拼一个字符串 `f"{owner}:{template}"` 当 unique 键，现在不需要了：复合索引不用多存一列，
+道具换主人时也不用同步改键。
+
+同一个事务里在行之间挪 unique 值（换槽位后补位、借一个中间值互换两行）可以正常提交：提交时只要被占的
+值这次会从原来的行上移走，就不算冲突。
 
 ### 关掉区间校验
 
@@ -384,7 +389,7 @@ mine = rows[rows.owner == ctx.caller]
 critical = rows[(rows.hp < 30) & (rows.shield == 0)]
 ```
 
-这是**复合查询**的推荐模式：使用一个索引列从数据库拉取一个小窗口，然后在内存中用 NumPy 进行细化。要求后端评估复合谓词会更慢，因为数据库解释查询而 NumPy 使用 SIMD。
+条件是"某一组里按某字段取区间"（某个 zone 里 10～20 级、某个玩家最新的 N 条）时，直接声明复合索引（`property_field(groupby=...)`，见[概念](concepts.md)），数据库只读这一组。其他组合条件，推荐的模式是：使用一个索引列从数据库拉取一个小窗口，然后在内存中用 NumPy 进行细化。要求后端评估复合谓词会更慢，因为数据库解释查询而 NumPy 使用 SIMD。
 
 ```python
 # 使用真实索引拉取一个小窗口，然后在内存中过滤。
@@ -620,7 +625,7 @@ client = await hetu.headless.connect(
 服务器建表时会把组件的 schema 和 `cluster_id` 写进表 meta。`connect()` 只读 meta，不本地重算簇：
 
 - 表不存在 → `TableNotFound`。建表 / 迁移权归服务器，先 `hetu start` 一次再连。
-- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
+- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index、groupby——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
 - 传**组件名**：直接用 meta 里的 schema 生成类，进程里零共享代码；需要类时取 `client.table("BattleReport").comp_cls`，`new_row(id_=...)` 照常用。
 
 ### 读：`Table.servant_*`

@@ -512,34 +512,43 @@ Two things to watch:
   the master, so a player with many items pays for the whole inventory on
   every item added.
 
-### Hot paths: unique anchor + `upsert`
+### Hot paths: unique within a group + `upsert`
 
-Give the compound key its own unique field and anchor an `upsert` on it; the
-transaction touches a single row:
+Give the compound key a composite index that is unique within a group
+(`unique=True, groupby=...`), and anchor an `upsert` on it by giving both the
+field and the group-by columns; the transaction touches a single row:
 
 ```python
 @hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
 class Item(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
-    template: np.int32 = hetu.property_field(0)
+    # one row per item kind per player: grouped by owner, unique within it
+    template: np.int32 = hetu.property_field(0, unique=True, groupby="owner")
     qty: np.int32 = hetu.property_field(0)
-    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
 
 
 @hetu.define_system(
     namespace="game", components=(Item,), permission=hetu.Permission.USER
 )
 async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
-    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
-        item.owner, item.template = ctx.caller, tpl
-        item.qty += n
+    async with ctx.repo[Item].upsert(template=tpl, owner=ctx.caller) as item:
+        item.qty += n  # a new row already has template and owner filled in
 ```
 
 When two transactions both reach the insert branch, the later commit hits
-the unique constraint and is treated as a race; on retry the `upsert` finds
-the other row and updates it instead. The price: one more unique index,
-`slot` must be kept in sync when an item changes owner, and existing rows
-need a backfill when you add the field.
+the unique-within-group constraint and is treated as a race; on retry the
+`upsert` finds the other row and updates it instead. The price: one more
+composite index, and adding it to an existing component needs `hetu upgrade`
+to rebuild the index (duplicates within a group in existing data raise an
+error). The old workaround — a concatenated string such as
+`f"{owner}:{template}"` as the unique key — is no longer needed: a composite
+index stores no extra column, and nothing has to be kept in sync when an item
+changes owner.
+
+Moving unique values between rows within one transaction (refilling a slot
+after moving an item away, swapping two rows through a temporary value)
+commits fine: a taken value is not a conflict if this commit moves it off its
+current row.
 
 ### Turning the range check off
 
@@ -610,9 +619,12 @@ version raises:
 critical = rows[(rows.hp < 30) & (rows.shield == 0)]
 ```
 
-This is the recommended pattern for **compound queries**: pull a small
-window from the database with one indexed column, refine in memory with
-NumPy. Asking the backend to evaluate compound predicates is slower
+When the condition is "a range of one field within a group" (levels 10–20 in
+one zone, a player's latest N entries), declare a composite index
+(`property_field(groupby=...)`, see [Concepts](concepts.md)) so the database
+reads only that group. For other **compound queries** the recommended pattern
+is: pull a small window from the database with one indexed column, refine in
+memory with NumPy. Asking the backend to evaluate compound predicates is slower
 because the database interprets a query while NumPy uses SIMD.
 
 ```python
@@ -954,7 +966,7 @@ It has exactly one principle: **writes go through the very same `Session.commit(
 When the server creates a table it stores the component's schema and `cluster_id` in the table meta. `connect()` only reads that meta; it never recomputes clusters locally:
 
 - Table missing → `TableNotFound`. Creating and migrating tables is the server's job; run `hetu start` once, then connect.
-- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"). Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
+- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index, groupby. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"). Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
 - Passing a **component name**: a class is generated from the schema in the meta, so the process shares no code at all; when you need the class, take `client.table("BattleReport").comp_cls` and use `new_row(id_=...)` as usual.
 
 ### Reading: `Table.servant_*`

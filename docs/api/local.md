@@ -297,7 +297,8 @@ get(comp: Any, **query: Any) -> np.record | None
 按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
 
 `comp` 可传 Component 类或其名字字符串；`query` 只允许一个带索引的字段，
-如 `get("Player", owner=1234)`。已知行必然存在时，改用 `must_get` 可免去判空。
+如 `get("Player", owner=1234)`；复合索引（groupby）要同时给出全部分组列，如
+`get("Rank", level=5, zone=3)`。已知行必然存在时，改用 `must_get` 可免去判空。
 
 
 
@@ -314,7 +315,7 @@ get(comp: Any, **query: Any) -> np.record | None
 must_get(comp: Any, **query: Any) -> np.record
 ```
 
-<small>Source: [`hetu/local.py:391`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L391)</small>
+<small>Source: [`hetu/local.py:392`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L392)</small>
 
 同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
 
@@ -341,13 +342,15 @@ range(
 ) -> np.recarray
 ```
 
-<small>Source: [`hetu/local.py:400`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L400)</small>
+<small>Source: [`hetu/local.py:401`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L401)</small>
 
 按索引区间读多行。默认闭区间 `[left, right]`。
 
 签名与 `repo.range` 对齐，两种形态都支持：位置参数
 `range(comp, "value", 1.0, 2.0)`，或 kwarg 区间 `range(comp, value=(1.0, 2.0))`。
-`comp` 可传 Component 类或其名字字符串；索引字段必须带 index/unique。
+复合索引（groupby）要同时给出全部分组列：`range(comp, level=(1, 10), zone=3)`，或位置
+参数加 `_group={"zone": 3}`。`comp` 可传 Component 类或其名字字符串；索引字段必须带
+index/unique。
 `limit` 默认 10（与 `repo.range` 一致，注意超出会静默截断），负数表示不限制；
 `desc=True` 降序。返回 `numpy.recarray`（c-struct array），无数据时为空数组。
 
@@ -366,7 +369,7 @@ range(
 insert(comp: Any, **fields: Any) -> int
 ```
 
-<small>Source: [`hetu/local.py:424`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L424)</small>
+<small>Source: [`hetu/local.py:427`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L427)</small>
 
 插入一行并返回其 `id`，省去手写 `new_row()` + `repo.insert(row)` 的样板。
 
@@ -391,7 +394,7 @@ insert(comp: Any, **fields: Any) -> int
 upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
 ```
 
-<small>Source: [`hetu/local.py:451`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L451)</small>
+<small>Source: [`hetu/local.py:454`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L454)</small>
 
 以 `async with` 语法 upsert 一行，镜像 `repo.upsert`：按 unique 字段锚定
 查询，块内修改字段，退出块时自动 update/insert 并 commit。
@@ -401,7 +404,8 @@ upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
     async with app.upsert(RLSComp, owner=1001) as row:
         row.value = 50
 
-`anchor` 只能给一个 **unique** 字段（如 `owner=...`/`id=...`）。直接落库。
+`anchor` 只能给一个 **unique** 字段（如 `owner=...`/`id=...`）；组内唯一的复合
+索引要同时给出全部分组列（如 `name="x", zone=3`）。直接落库。
 
 
 
@@ -418,7 +422,7 @@ upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
 aclose() -> None
 ```
 
-<small>Source: [`hetu/local.py:472`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L472)</small>
+<small>Source: [`hetu/local.py:476`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L476)</small>
 
 释放发号租约（写精确水位），再关闭全部后端连接。
 
@@ -486,7 +490,7 @@ open_local_app(
 ) -> hetu.local.LocalApp
 ```
 
-<small>Source: [`hetu/local.py:524`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L524)</small>
+<small>Source: [`hetu/local.py:528`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L528)</small>
 
 
 

@@ -1185,7 +1185,7 @@ async def test_range_query_hidden_rows_are_not_pushed(
     assert sub_id and len(visible) == 22
     assert await broker.get_updates(timeout=0.5) == {}
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
-    assert idx_sub.point_value is None and len(idx_sub.row_subs) == 25
+    assert not idx_sub.enter_only and len(idx_sub.row_subs) == 25
 
     async with backend.session("pytest", 1) as session:
         repo = session.using(comp)

@@ -157,7 +157,9 @@ def _schema_diff(
         if col not in local_p:
             errors.append(f"- col {col} ({remote_p[col]['dtype']})")
             continue
-        for key in ("dtype", "unique", "index", "point_sub", "hidden"):
+        # groupby（复合索引的分组列）对不上的话，headless 的 commit 按本地定义维护索引，
+        # 会把服务器上的索引写坏
+        for key in ("dtype", "unique", "index", "point_sub", "hidden", "groupby"):
             local_v = local_p[col].get(key, False)
             remote_v = remote_p[col].get(key, False)
             if local_v != remote_v:

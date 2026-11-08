@@ -242,6 +242,44 @@ names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
 names.OnDelete += (sub, id) => RemoveNameTag(id);
 ```
 
+### Watching a group of a composite index
+
+For a composite index declared on the server with `property_field(groupby=...)`
+(see [Concepts](concepts.md)), pass the values of every group-by column in the
+last parameter, `group`, to watch just that group. Both `WatchRow` and
+`WatchRange` take it:
+
+```csharp
+// level grouped by zone: rows of zone 3 with level in [10, 20], ordered by level
+var zone3 = await HeTuClient.Instance.WatchRange<Monster>(
+    "level", 10, 20, 100,
+    group: new Dictionary<string, object> { ["zone"] = 3 });
+
+// a composite index unique within a group: one row by (guild, name)
+var member = await HeTuClient.Instance.WatchRow<GuildMember>(
+    "name", "Ann", group: new Dictionary<string, object> { ["guild"] = guildId });
+```
+
+- **Value types**: group values must be integers, bools, integral floats,
+  `string` or `byte[]`. An integer column also accepts a numeric string such as
+  `"3"`, the same as single-column index queries.
+- **Thrown on the spot**: an invalid value, or a `group` on `id`, throws
+  `ArgumentException` and nothing is sent.
+- **Connection closed**: a misspelled group-by column, or a value of the wrong
+  type for its column (e.g. a non-numeric string for an integer column, or a
+  number for a string column), cannot be seen by
+  the client; the server closes the connection with 4002, which is terminal for
+  the session (it does not reconnect).
+- **The dictionary is copied**: changing it after the call does not affect the
+  subscription, and a reconnect restores with the `group` given at subscribe
+  time. `WatchRow` still restores by the row's `id` once the row is resolved.
+- **What wakes it up**: only writes in its own group; writes in other groups
+  never wake it. The server does not need `point_sub` for this.
+- **Server version**: subscriptions with `group` need a server that supports
+  composite indexes (later than v2025.11.1). Older servers do not understand
+  `group` and close the connection with 4002. Subscriptions without `group`
+  send exactly the same frames as before.
+
 ## Typed components vs `DictComponent`
 
 The server can generate matching C# classes from your `Component` definitions
