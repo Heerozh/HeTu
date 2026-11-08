@@ -115,12 +115,14 @@ def property_field(
         `right` 或 `left == right`）只在有行进入 / 离开 `v` 时被叫醒；代价是每次有行
         "进入"某个值（insert、或字段改成该值），commit 都要多发一条 PUBLISH。
         不开启时，该索引上的点查询订阅退化为区间订阅：该索引任何写入都会叫醒它（服务器会
-        打印警告）。常用于 `owner`、`zone` 这类"每人只订自己那个值"的索引。
+        打印警告）。常用于 `owner`、`zone` 这类"每人只订自己那个值"的索引。复合索引
+        （`groupby`）用不上它，写了会警告并忽略，见 `groupby`。
 
         Whether point subscriptions on this index are efficient: a point query
         subscription only wakes up when rows enter or leave its value, at the cost of
         one PUBLISH per "enter" on commit. Without it, point subscriptions fall back to
         range-subscription behavior (woken by any write to the index) with a warning.
+        Not used by composite (`groupby`) indexes: ignored with a warning.
     hidden : bool, default False
         是否对客户端隐藏该字段。开启后订阅（行 / 范围 / 整表）推给客户端的行不带这个字段，
         管理员连接也一样；只改了 hidden 字段的写入，客户端看不出变化，不推送。客户端也不能按
@@ -142,15 +144,18 @@ def property_field(
         `level = property_field(0, groupby="zone")` 是"每个 zone 里按 level 排序"。
         索引名仍是本字段名；查询时要同时给出全部分组列的值，比如
         `range(level=(10, 20), zone=3)`、`get(name="abc", zone=3)`。`unique=True` 表示组内
-        唯一，不同组可以同值；`point_sub=True` 时按组发通知，按组订阅只被本组的写入叫醒
-        （代价：本组里本字段每变一次 commit 都多发一条 PUBLISH）。分组列只能是整数、str、
-        bytes 字段，可以修改，索引会跟着搬到新组。开启后强制启用 `index`。
+        唯一，不同组可以同值。每组单独存成一个 zset，按组订阅只被本组的写入叫醒，不需要也
+        用不上 `point_sub`（写了会警告并忽略），commit 不为它多发 PUBLISH。分组列只能是整数、
+        str、bytes 字段，可以修改，索引会跟着搬到新组。开启后强制启用 `index`。组很小（一两行）
+        而分组值又是长字符串时，每组一个 key 的内存开销最大，约为单个大索引的 1.5~3.7 倍；
+        常见的整数分组列、每组几行以上时反而更省。
 
         Group-by columns: builds a composite index, ordered by this field within each
         group. Queries must give every group-by column, e.g.
-        `range(level=(10, 20), zone=3)`; `unique=True` means unique within a group;
-        `point_sub=True` notifies per group. Group-by columns must be integer, str or
-        bytes fields.
+        `range(level=(10, 20), zone=3)`; `unique=True` means unique within a group.
+        Each group is stored as its own zset, so group subscriptions are only woken by
+        writes to their group without `point_sub` (ignored with a warning) and commits
+        publish nothing for it. Group-by columns must be integer, str or bytes fields.
 
     Returns
     -------
@@ -625,6 +630,16 @@ def define_component(
                     ).format(cname=cname, fname=fname)
                 )
             prop.index = True
+        # 复合索引用不上 point_sub：每组一个 zset，按组订阅订这一组 key 的 keyspace 通知，本来就
+        # 只被本组的写入叫醒，commit 也不发值频道。写了就警告并当作没写
+        if prop.groupby and prop.point_sub:
+            logger.warning(
+                _(
+                    "⚠️ [🛠️Define] {cname}.{fname}属性设置了groupby（复合索引），"
+                    "point_sub用不上已忽略：按组订阅本来就只被本组的写入叫醒。"
+                ).format(cname=cname, fname=fname)
+            )
+            prop.point_sub = False
         # 开启point_sub时，同样强制index为True（值频道是索引的"某个值"）
         if prop.point_sub and not prop.index:
             logger.warning(
@@ -767,14 +782,6 @@ def define_component(
                     _("{cname}.{fname}属性定义出错，{dtype}类型不能建索引").format(
                         cname=cname, fname=fname, dtype=np.dtype(prop.dtype)
                     )
-                )
-            # 同 hidden 与 point_sub 互斥：客户端不能按 hidden 列查询，组频道不会有人订
-            if prop.point_sub and any(properties[c].hidden for c in prop.groupby):
-                raise ValueError(
-                    _(
-                        "{cname}.{fname}属性定义出错，分组列有hidden属性时不能设置"
-                        "point_sub：客户端不能按hidden属性订阅。"
-                    ).format(cname=cname, fname=fname)
                 )
 
     def warp(cls):

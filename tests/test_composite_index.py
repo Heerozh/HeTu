@@ -54,8 +54,8 @@ def def_slot():
         owner: np.int64 = property_field(0, index=True)
         zone: np.int32 = property_field(0)
         server: "U8" = property_field("")  # type: ignore  # noqa
-        # 每个 zone 里按 level 排序；point_sub 时按组发频道
-        level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+        # 每个 zone 里按 level 排序
+        level: np.int32 = property_field(0, groupby="zone")
         # 每个 owner 的背包格子组内唯一
         slot: np.int16 = property_field(0, unique=True, groupby="owner")
         # 字符串分组列、两个分组列
@@ -171,24 +171,30 @@ def test_define_groupby_errors(new_component_env, fields, match):
             level: np.int32 = property_field(0, groupby=fields["level"])
 
 
-def test_define_groupby_hidden_point_sub(new_component_env):
-    """分组列是 hidden 时不能开 point_sub：客户端不能按 hidden 列查询，组频道没人订"""
+def test_define_groupby_point_sub_ignored(new_component_env, caplog):
+    """
+    复合索引用不上 point_sub（每组一个 zset，按组订阅本来就只被本组叫醒）：写了警告一次并当作
+    没写，不进 point_subs_、schema 里也是 False。本字段或分组列是 hidden 时也一样，不报错
+    """
+    import logging
+
     from hetu.data import BaseComponent, define_component, property_field
 
-    with pytest.raises(ValueError, match="hidden"):
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
 
         @define_component(namespace="pytest", force=True)
-        class Bad(BaseComponent):
+        class Rank(BaseComponent):
             zone: np.int32 = property_field(0, hidden=True)
             level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+            power: np.int32 = property_field(
+                0, hidden=True, groupby="zone", point_sub=True
+            )
+            owner: np.int64 = property_field(0, point_sub=True)
 
-    # 不开 point_sub 可以：服务端照常按它查
-    @define_component(namespace="pytest", force=True)
-    class Ok(BaseComponent):
-        zone: np.int32 = property_field(0, hidden=True)
-        level: np.int32 = property_field(0, groupby="zone")
-
-    assert Ok.index_groups_["level"] == ("zone",)
+    assert caplog.text.count("point_sub用不上") == 2
+    assert Rank.point_subs_ == {"owner"}
+    assert Rank.index_groups_["level"] == ("zone",)
+    assert json.loads(Rank.json_)["properties"]["level"]["point_sub"] is False
 
 
 # ---------------------------------------------------------------- 编码
@@ -839,7 +845,7 @@ async def test_direct_set_rejects_index_columns(new_component_env, mod_auto_back
 async def test_commit_routes_to_group_keys(slot_ref, mod_auto_backend):
     """
     复合索引每组一个 zset：ZADD / ZREM / UNIQ 都发到行所在组的 key，换组时 ZREM 发到旧组的 key；
-    不登记任何频道，声明了 point_sub（level）也不发 PUBLISH。组里最后一行走了 zset 就没了
+    不登记任何频道，提交时不发 PUBLISH。组里最后一行走了 zset 就没了
     """
     backend: Backend = mod_auto_backend()
     comp = slot_ref.comp_cls

@@ -15,7 +15,7 @@ weight: 30
 SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:68`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L68)</small>
+<small>Source: [`hetu/data/backend/repo.py:70`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L70)</small>
 
 
 
@@ -47,7 +47,7 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:113`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L113)</small>
+<small>Source: [`hetu/data/backend/repo.py:115`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L115)</small>
 
 内部方法，在远程数据库中检查Unique索引冲突。
 
@@ -66,7 +66,7 @@ remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:156`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L156)</small>
+<small>Source: [`hetu/data/backend/repo.py:168`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L168)</small>
 
 检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
@@ -108,7 +108,7 @@ is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 get_by_id(row_id: numpy.int64 | int) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:220`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L220)</small>
+<small>Source: [`hetu/data/backend/repo.py:232`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L232)</small>
 
 从数据库获取单行数据，并放入`Session`缓存。
 本指令如果命中缓存，不会去数据库查询。
@@ -133,7 +133,7 @@ get(
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:278`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L278)</small>
+<small>Source: [`hetu/data/backend/repo.py:311`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L311)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
@@ -195,7 +195,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:401`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L401)</small>
+<small>Source: [`hetu/data/backend/repo.py:434`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L434)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -279,7 +279,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:744`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L744)</small>
+<small>Source: [`hetu/data/backend/repo.py:785`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L785)</small>
 
 向Session中添加一行待插入数据。
 
@@ -311,7 +311,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:795`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L795)</small>
+<small>Source: [`hetu/data/backend/repo.py:836`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L836)</small>
 
 向Session中添加一行待更新数据。
 
@@ -340,7 +340,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:831`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L831)</small>
+<small>Source: [`hetu/data/backend/repo.py:872`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L872)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -377,7 +377,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:862`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L862)</small>
+<small>Source: [`hetu/data/backend/repo.py:903`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L903)</small>
 
 向Session中添加一行待删除数据。
 
@@ -704,7 +704,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:739`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L739)</small>
+<small>Source: [`hetu/data/backend/base.py:747`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L747)</small>
 
 从数据库直接获取单行数据。
 
@@ -751,7 +751,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:869`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L869)</small>
+<small>Source: [`hetu/data/backend/base.py:877`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L877)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -817,7 +817,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1048`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1048)</small>
+<small>Source: [`hetu/data/backend/base.py:1056`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1056)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

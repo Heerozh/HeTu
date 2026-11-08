@@ -35,10 +35,8 @@ def def_rank():
     @define_component(namespace="pytest", permission=Permission.USER, force=True)
     class Rank(BaseComponent):
         zone: np.int32 = property_field(0)
-        # 按 zone 分组、组内按 level 排序。声明了 point_sub（复合索引用不上它，按组订阅照样只被
-        # 本组的写入叫醒）
-        level: np.int32 = property_field(0, groupby="zone", point_sub=True)
-        # 没声明 point_sub：和 level 一样
+        # 按 zone 分组、组内按 level / score 排序
+        level: np.int32 = property_field(0, groupby="zone")
         score: np.int32 = property_field(0, groupby="zone")
         secret: np.int32 = property_field(0, hidden=True)
         # 分组列是 hidden：客户端不能按组订阅
@@ -99,16 +97,16 @@ async def _insert(backend: Backend, comp, *rows: dict) -> list[int]:
     return ids
 
 
-@pytest.mark.parametrize("index_name", ["level", "score"])
 async def test_group_subscription_uses_group_key_channel(
-    broker, rank_ref, admin_ctx, index_name, caplog
+    broker, rank_ref, admin_ctx, caplog
 ):
     """
     复合索引每组一个 zset，按组订阅订这一组 key 的 keyspace 频道：别的组的写入叫不醒它，本组的
-    插入照样推送。声明没声明 point_sub 都一样（score 没声明），不退化、不警告
+    插入照样推送。不需要声明 point_sub，不退化、不警告
     """
     backend = broker._backend
     comp = rank_ref.comp_cls
+    index_name = "level"
     await _insert(backend, comp, {"zone": 1, index_name: 5}, {"zone": 2, index_name: 6})
     with caplog.at_level(logging.WARNING, logger="HeTu.root"):
         sub_id, rows = await broker.subscribe_range(
@@ -323,7 +321,7 @@ async def test_group_subscription_owner_permission(
     class Bag(BaseComponent):
         owner: np.int64 = property_field(0, index=True)
         zone: np.int32 = property_field(0)
-        level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+        level: np.int32 = property_field(0, groupby="zone")
 
     backend = broker._backend
     ref = create_ref(Bag, backend)
