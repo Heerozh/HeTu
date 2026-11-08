@@ -21,8 +21,8 @@ uv run scripts/gen_api_docs.py # PR前同步文档，不然CI不通过
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey 容器；SQLite 后端无需 Docker）。
 `HETU_TEST_BACKENDS` 接受逗号分隔的子集，取值范围：`redis`、`valkey`、`redis_cluster`、`sqlite`。
-未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`），CI 在 `push` 到非 `main`
-分支时也会限制为 `redis` 为了快速验证。
+未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`）。CI 只在 PR 上跑（全部
+后端 + 上传覆盖率），直接 `push` 到任何分支都不跑，推送前请在本地跑过测试。
 
 测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
 worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /
