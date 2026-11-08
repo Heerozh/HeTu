@@ -1041,6 +1041,35 @@ async def test_rebuild_index_empty_table_drops_group_keys(slot_ref, mod_auto_bac
 
 
 @use_redis_backend_only
+async def test_rebuild_index_scans_keys_once(slot_ref, mod_auto_backend, monkeypatch):
+    """
+    Redis 重建每张表只发一次 KEYS（空表也一样）：KEYS 每次都要扫整个库，hetu upgrade 默认重建
+    所有表，按索引各扫一次会把停服时间拉长好几倍
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    maint = backend.get_table_maintenance()
+    io = maint.client.io  # type: ignore[attr-defined]
+    original_keys = io.keys
+    patterns: list[str] = []
+
+    def counting_keys(pattern, *args, **kwargs):
+        patterns.append(pattern)
+        return original_keys(pattern, *args, **kwargs)
+
+    monkeypatch.setattr(io, "keys", counting_keys)
+    assert maint.do_rebuild_index_(slot_ref) == 0
+    assert len(patterns) == 1, patterns
+    patterns.clear()
+    await _insert(
+        backend, comp, _slot(comp, zone=1, level=1), _slot(comp, zone=2, level=2)
+    )
+    assert maint.do_rebuild_index_(slot_ref) == 2
+    assert len(patterns) == 1, patterns
+    assert len(raw_index_zset_keys(backend, slot_ref, "level")) == 2
+
+
+@use_redis_backend_only
 async def test_rebuild_index_swap_failure_keeps_old_keys(
     slot_ref, mod_auto_backend, monkeypatch
 ):

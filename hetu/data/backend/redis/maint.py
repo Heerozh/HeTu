@@ -237,16 +237,35 @@ class RedisTableMaintenance(TableMaintenance):
         for batch in batched(keys, 1000):
             self.client.io.unlink(*batch)
 
-    def _index_zset_keys(self, table_ref: TableReference, idx_name: str) -> list[str]:
-        """这个索引名下现有的所有 zset key：单列索引的那一个，以及复合索引的各组 key"""
-        io = self.client.io
-        idx_key = self.client.index_key(table_ref, idx_name)
-        # 前缀带 ":"：不会匹配到名字以本索引名开头的别的索引（level 与 level2）
-        found = io.keys(idx_key + ":*", target_nodes=RedisCluster.PRIMARIES)
-        keys = [key.decode() for key in cast(list[bytes], found)]
-        if io.exists(idx_key):
-            keys.append(idx_key)
-        return keys
+    def _table_keys(
+        self, table_ref: TableReference
+    ) -> tuple[list[str], list[str], dict[str, list[str]]]:
+        """
+        这张表（这个簇）名下的 key，一次 KEYS 拿到再按种类分开：(行 key, 上次重建中断留下的临时
+        key, {索引名: 这个索引名下的 zset key})。KEYS 每次都要扫整个库，hetu upgrade 默认重建
+        所有表，按种类、按索引各扫一次会把停服时间拉长好几倍
+        """
+        cluster_prefix = self.client.cluster_prefix(table_ref)
+        found = self.client.io.keys(
+            cluster_prefix + ":*", target_nodes=RedisCluster.PRIMARIES
+        )
+        row_head = cluster_prefix + ":id:"
+        idx_head = cluster_prefix + ":index:"
+        tmp_head = cluster_prefix + ":rebuilding:"
+        rows: list[str] = []
+        leftover: list[str] = []
+        indexes: dict[str, list[str]] = {}
+        for raw in cast(list[bytes], found):
+            key = raw.decode()
+            if key.startswith(row_head):
+                rows.append(key)
+            elif key.startswith(idx_head):
+                # 索引名（字段名）和组 key 的 token 里都没有 ":"：{idx_key} 或 {idx_key}:{token}
+                name = key[len(idx_head) :].split(":", 1)[0]
+                indexes.setdefault(name, []).append(key)
+            elif key.startswith(tmp_head):
+                leftover.append(key)
+        return rows, leftover, indexes
 
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
@@ -265,19 +284,17 @@ class RedisTableMaintenance(TableMaintenance):
 
         io = self.client.io
         cluster_prefix = self.client.cluster_prefix(table_ref)
-        keys = io.keys(cluster_prefix + ":id:*", target_nodes=RedisCluster.PRIMARIES)
-        keys = cast(list[bytes], keys)
+        keys, leftover, existing = self._table_keys(table_ref)
         comp_cls = table_ref.comp_cls
         # 临时 key 带同一个 {CLU} hash tag（cluster 模式下同 slot 才能 RENAME），又不在
-        # `{idx_key}:` 下，不会被找组 key 的清理扫到。先删掉上次中断留下的
+        # `{idx_key}:` 下，不会被当成组 key。先删掉上次中断留下的
         idx_head = cluster_prefix + ":index:"
         tmp_head = cluster_prefix + ":rebuilding:"
-        leftover = io.keys(tmp_head + "*", target_nodes=RedisCluster.PRIMARIES)
-        self._delete_keys([key.decode() for key in cast(list[bytes], leftover)])
+        self._delete_keys(leftover)
 
         if not keys:
             for idx_name in comp_cls.indexes_:
-                self._delete_keys(self._index_zset_keys(table_ref, idx_name))
+                self._delete_keys(existing.get(idx_name, []))
             return 0
 
         # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
@@ -295,14 +312,14 @@ class RedisTableMaintenance(TableMaintenance):
                 for chunk in batched(keys, self.REBUILD_BATCH):
                     pipe = io.pipeline()
                     for key in chunk:
-                        pipe.hmget(key.decode(), columns)
+                        pipe.hmget(key, columns)
                     rows: list[list[bytes | None]] = pipe.execute()
                     # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id
                     by_key: dict[str, dict[bytes, int]] = {}
                     for key, raws in zip(chunk, rows):
                         if any(raw is None for raw in raws):
                             raise RuntimeError(
-                                f"组件{table_ref.comp_name}的行{key.decode()}缺少索引"
+                                f"组件{table_ref.comp_name}的行{key}缺少索引"
                                 f"`{idx_name}`要用的字段{columns}，重建索引失败。"
                             )
                         # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
@@ -312,7 +329,7 @@ class RedisTableMaintenance(TableMaintenance):
                             idx_name,
                             struct,
                             dict(zip(columns, cast(list[bytes], raws))),
-                            key.split(b":")[-1],
+                            key.rsplit(":", 1)[-1].encode(),
                         )
                         if is_unique:
                             # 按值段（复合索引带组前缀）查重，同组同值才算冲突
@@ -345,12 +362,8 @@ class RedisTableMaintenance(TableMaintenance):
             for batch in batched(targets.items(), self.REBUILD_BATCH):
                 names = [name for zset_key, tmp in batch for name in (tmp, zset_key)]
                 io.eval(self._RENAME_LUA, len(names), *names)
-            # 这个索引名下不在新结果里的：空了的旧组、另一种格式的 key
-            stale = [
-                key
-                for key in self._index_zset_keys(table_ref, idx_name)
-                if key not in targets
-            ]
+            # 这个索引名下（开头列出的）不在新结果里的：空了的旧组、另一种格式的 key
+            stale = [key for key in existing.get(idx_name, []) if key not in targets]
             self._delete_keys(stale)
         return len(keys)
 
