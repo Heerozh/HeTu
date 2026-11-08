@@ -130,13 +130,23 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 
 ### 数据订阅
 
-- `WatchRow<T>(index, value, componentName = null)`：先按条件找到第一行，再持续观察该行本身。
+- `WatchRow<T>(index, value, componentName = null, group = null)`：先按条件找到第一行，再持续观察该行本身。
   若该行后续不再满足原条件，订阅不会切换到新的匹配行；首次解析成功后，Session 重连也会按该行
   的 `id` 恢复，而不会重新执行最初的 first 查询。按主键时可直接使用 `WatchRow("id", rowId)`。
-- `WatchRange<T>(index, left, right, limit, desc = false, force = true, componentName = null)`
-- `WatchTable<T>(componentName = null)` — 整表订阅，服务端只占一个订阅，适合"行多、行小、很少变"的表；
-  服务端组件要声明 `table_sub=True`，否则返回 null
+- `WatchRange<T>(index, left, right, limit, desc = false, force = true, componentName = null, group = null)`
   ：持续观察索引范围。
+- `WatchTable<T>(componentName = null)` — 整表订阅，服务端只占一个订阅，适合"行多、行小、很少变"的表；
+  服务端组件要声明 `table_sub=True`，否则返回 null。
+- 复合索引（服务端 `property_field(groupby=...)`）按组订阅：用最后一个参数 `group`
+  （`IReadOnlyDictionary<string, object>`）给出全部分组列的值。例如 `level` 按 `zone` 分组时，订阅
+  zone=3 里 level 在 [10, 20] 的行：
+  `WatchRange<Item>("level", 10, 20, 100, group: new Dictionary<string, object> { ["zone"] = 3 })`。
+    - 值只能是整数、bool、刚好是整数的浮点、string、byte[]。不合法、或在 `id` 上带 group 时当场抛
+      `ArgumentException`，请求不会发出去——服务端会以 4002 断开连接，会话随之进入终态。
+    - 分组列名写错、值和列类型不符（如整数列给了字符串）这类客户端看不出的错误，由服务端以 4002 断开。
+    - 字典会被拷贝，之后再改不影响这次订阅；Session 重连恢复带着订阅时的 group（`WatchRow`
+      解析出行之后照旧按行 `id` 恢复）。
+    - 需要支持复合索引的服务器，见下方"变更说明"。
 - `RowSubscription` / `IndexSubscription` 在 Session 断线期间会把 `IsStale` 置为 `true`，
   恢复完成后触发 `OnResynced`。
 - 非泛型重载返回 `DictComponent`，适合动态字段访问。
@@ -164,3 +174,11 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 - Unity：`2022.3+`
 - Unity 6000+ 使用 `Awaitable`
 - Unity 2022.3 使用 `UniTask`（按向导安装）
+
+### 变更说明
+
+- **0.3.0**：`WatchRow` / `WatchRange` 新增可选参数 `group`，按组订阅复合索引（`groupby`）。
+  `HeTuClient`、`HeTuSessionClient`、`HeadlessHeTuClient` 和 `HeTuClientBase` 的 `*Sync` 方法都有。
+    - **最低服务器版本**：带 group 的订阅需要支持复合索引的服务器，即 v2025.11.1 之后的版本。
+      v2025.11.1 及更早的服务器不认识 group，会以 4002 断开连接。
+    - 不带 group 时发出的报文和以前完全一样，照旧可以连旧服务器。

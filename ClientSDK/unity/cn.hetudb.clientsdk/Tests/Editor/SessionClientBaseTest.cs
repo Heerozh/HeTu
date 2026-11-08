@@ -836,6 +836,157 @@ namespace Tests.HeTu
             Assert.AreEqual(1, resynced);
         }
 
+        // 复合索引的按组订阅：transport 拿到的是会话入口拷贝的那份 group，调用方事后改字典不影响
+        // 发出的请求，重连恢复也带着订阅时的 group
+        [Test]
+        public void WatchRange_WithGroup_ForwardsCopyAndRestoresWithIt()
+        {
+            var key = ("level", (object)10L, (object)20L, 100, false, true);
+            var first = new FakeTransport("c1");
+            first.RangeResults[key] =
+                new List<TestComponent> { new() { ID = 1, Value = 1 } };
+            var second = new FakeTransport("c2");
+            second.RangeResults[key] =
+                new List<TestComponent> { new() { ID = 1, Value = 2 } };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            IndexSubscription<TestComponent> subscription = null;
+            session.WatchRange<TestComponent>("level", 10L, 20L, 100, null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"),
+                group: group);
+            group["zone"] = 4;
+
+            Assert.AreEqual(1, first.WatchedRangeGroups.Count);
+            Assert.AreNotSame(group, first.WatchedRangeGroups[0]);
+            Assert.AreEqual(3, first.WatchedRangeGroups[0]["zone"]);
+            Assert.AreEqual("TestComponent.level[10:20:1][:100]{zone=3}",
+                subscription.SubId);
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.AreEqual(1, second.WatchedRangeGroups.Count);
+            Assert.AreEqual(1, second.WatchedRangeGroups[0].Count);
+            Assert.AreEqual(3, second.WatchedRangeGroups[0]["zone"]);
+            Assert.AreEqual(2, subscription.Rows[1].Value);
+        }
+
+        [Test]
+        public void WatchRange_WithGroupBeforeReady_DispatchesTheCopy()
+        {
+            var transport = new FakeTransport("c1");
+            transport.RangeResults[("level", 10L, 20L, 100, false, true)] =
+                new List<TestComponent> { new() { ID = 1, Value = 1 } };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                new FakeScheduler());
+            session.Start();
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            IndexSubscription<TestComponent> subscription = null;
+            session.WatchRange<TestComponent>("level", 10L, 20L, 100, null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"),
+                group: group);
+            group["zone"] = 4;
+            transport.RaiseConnected();
+
+            Assert.NotNull(subscription);
+            Assert.AreEqual(3, transport.WatchedRangeGroups.Single()["zone"]);
+        }
+
+        [Test]
+        public void WatchRange_SameGroupWhilePending_SharesOneWatch()
+        {
+            // 排队时按客户端查询键去重：语义相同的分组值（3 与 3.0）是同一个订阅，别的组另发
+            var transport = new FakeTransport("c1");
+            transport.RangeResults[("level", 10L, 20L, 100, false, true)] =
+                new List<TestComponent> { new() { ID = 1, Value = 1 } };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                new FakeScheduler());
+            session.Start();
+
+            var handles = new List<IndexSubscription<TestComponent>>();
+            foreach (var zone in new object[] { 3, 3.0, 4 })
+            {
+                session.WatchRange<TestComponent>("level", 10L, 20L, 100, null,
+                    handles.Add,
+                    _ => Assert.Fail("watch should not fail"),
+                    group: new Dictionary<string, object> { ["zone"] = zone });
+            }
+
+            transport.RaiseConnected();
+
+            Assert.AreEqual(2, transport.WatchedRanges.Count);
+            Assert.AreEqual(3, handles.Count);
+            Assert.AreSame(handles[0].Core, handles[1].Core);
+            Assert.AreNotSame(handles[0].Core, handles[2].Core);
+        }
+
+        [Test]
+        public void WatchRow_WithGroup_ForwardsGroup_RestoresByIdWithout()
+        {
+            var first = new FakeTransport("c1");
+            first.RowResults[("name", "abc")] = new TestComponent { ID = 7, Value = 10 };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 30 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            RowSubscription<TestComponent> subscription = null;
+            session.WatchRow<TestComponent>("name", "abc", null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"),
+                group);
+            group["zone"] = 4;
+
+            Assert.AreEqual(3, first.WatchedRowGroups.Single()["zone"]);
+            Assert.AreEqual(10, subscription.Data.Value);
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            CollectionAssert.AreEqual(new[] { ("id", (object)7L) }, second.WatchedRows);
+            Assert.IsNull(second.WatchedRowGroups.Single());
+            Assert.AreEqual(30, subscription.Data.Value);
+        }
+
+        [Test]
+        public void WatchWithInvalidGroup_ThrowsWithoutQueueing()
+        {
+            var transport = new FakeTransport("c1");
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                new FakeScheduler());
+            session.Start();
+
+            Assert.Throws<ArgumentException>(() => session.WatchRow<TestComponent>(
+                "id", 7L, null, _ => { }, _ => { },
+                new Dictionary<string, object> { ["zone"] = 1 }));
+            Assert.Throws<ArgumentException>(() => session.WatchRange<TestComponent>(
+                "level", 10L, 20L, 100, null, _ => { }, _ => { },
+                group: new Dictionary<string, object> { ["zone"] = 1.5 }));
+            transport.RaiseConnected();
+
+            Assert.AreEqual(0, transport.WatchedRows.Count);
+            Assert.AreEqual(0, transport.WatchedRanges.Count);
+        }
+
         [Test]
         public void WatchTable_RestoresViaTableAndReplacesSnapshotAfterReconnect()
         {
@@ -2257,6 +2408,12 @@ namespace Tests.HeTu
             public List<(string Index, object Value)> WatchedRows { get; } = new();
             public List<(string Index, object Left, object Right, int Limit, bool Desc,
                 bool Force)> WatchedRanges { get; } = new();
+
+            // 每次 WatchRow / WatchRange 收到的 group（与上面两张表一一对应），没给时为 null
+            public List<IReadOnlyDictionary<string, object>> WatchedRowGroups { get; } =
+                new();
+            public List<IReadOnlyDictionary<string, object>> WatchedRangeGroups { get; } =
+                new();
             public Dictionary<(string Index, object Value), TestComponent> RowResults
             {
                 get;
@@ -2333,11 +2490,13 @@ namespace Tests.HeTu
                 Action<ManagedRowCore<T>, bool, Exception> onResponse,
                 string componentName = null,
                 ManagedRowCore<T> reusable = null,
-                StackTrace creationTrace = null)
+                StackTrace creationTrace = null,
+                IReadOnlyDictionary<string, object> group = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-row");
                 WatchedRows.Add((index, value));
+                WatchedRowGroups.Add(group);
                 if (CancelWatchDispatch)
                 {
                     onResponse(null, true, null);
@@ -2392,12 +2551,14 @@ namespace Tests.HeTu
                 Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 bool desc = false, bool force = true, string componentName = null,
                 ManagedIndexCore<T> reusable = null,
-                StackTrace creationTrace = null)
+                StackTrace creationTrace = null,
+                IReadOnlyDictionary<string, object> group = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-range");
                 var key = (index, left, right, limit, desc, force);
                 WatchedRanges.Add(key);
+                WatchedRangeGroups.Add(group);
                 if (CancelWatchDispatch)
                 {
                     onResponse(null, true, null);
@@ -2405,8 +2566,12 @@ namespace Tests.HeTu
                 }
                 var rows = RangeResults[key].Cast<T>().ToList();
                 componentName ??= typeof(T).Name;
+                // 同服务端：带 group 的 sub_id 在单列格式后面跟 {键=值,...}（键按名字排序）
                 var subId = HeTuClientBase.MakeSubId(
                     componentName, index, left, right, limit, desc);
+                if (group != null)
+                    subId += "{" + string.Join(",", group.OrderBy(p => p.Key,
+                        StringComparer.Ordinal).Select(p => $"{p.Key}={p.Value}")) + "}";
                 if (reusable != null)
                 {
                     reusable.Rebind(subId, rows, _remoteClient);
@@ -2417,7 +2582,7 @@ namespace Tests.HeTu
                 var subscription = new ManagedIndexCore<T>(
                     subId, componentName, rows, _remoteClient, creationTrace);
                 subscription.ConfigureRestoreQuery(index, left, right, limit, desc,
-                    force);
+                    force, group);
                 onResponse(subscription, false, null);
             }
 

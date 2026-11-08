@@ -1,8 +1,12 @@
 using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using HeTu;
+using MessagePack;
 using NUnit.Framework;
 
 namespace HeTu.Client.Tests
@@ -106,6 +110,106 @@ namespace HeTu.Client.Tests
 
             Assert.That(probe.Disposed.Wait(TimeSpan.FromSeconds(5)), Is.True);
             Assert.That(probe.ThreadName, Is.EqualTo("HeTuClientPump"));
+        }
+
+        // 复合索引的按组订阅：group 不合法时在调用方线程上当场抛，不投到泵线程（泵上抛出只会记日志，
+        // Task 永远挂着）
+        [Test]
+        public void WatchWithInvalidGroup_ThrowsOnCallerThread()
+        {
+            using var c = new HeadlessHeTuClient();
+            Assert.Throws<ArgumentException>(() => c.WatchRange<DictComponent>(
+                "level", 10L, 20L, 100, componentName: "Item",
+                group: new Dictionary<string, object> { ["zone"] = 1.5 }));
+            Assert.Throws<ArgumentException>(() => c.WatchRow<DictComponent>(
+                "name", "abc", "Item",
+                new Dictionary<string, object> { ["zone"] = null }));
+            Assert.Throws<ArgumentException>(() => c.WatchRow<DictComponent>(
+                "id", 7L, "Item", new Dictionary<string, object> { ["zone"] = 3 }));
+        }
+
+        // group 在调用方线程上就拷贝好：动作投到泵线程之后，调用方马上改字典也不影响发出的请求和
+        // 重连恢复用的参数
+        [Test]
+        public async Task WatchRange_WithGroup_CopiedBeforePostingToPump()
+        {
+            const string serverSubId = "Item.level[10:20:1][:100]{zone=3}";
+            using var c = PayloadCapturingClient(out var payloads);
+            using var gate = new ManualResetEventSlim();
+            c.RunSerialized(() => gate.Wait(TimeSpan.FromSeconds(5))); // 先堵住泵
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            var watch = c.WatchRange<DictComponent>("level", 10L, 20L, 100,
+                componentName: "Item", group: group);
+            group["zone"] = 4;
+            gate.Set();
+            Receive(c, new object[] { "sub", serverSubId, Array.Empty<object>() });
+
+            using var sub = await watch.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.That(sub.SubId, Is.EqualTo(serverSubId));
+            var restoreGroup = ((ManagedIndexCore<DictComponent>)sub.Core).RestoreGroup;
+            Assert.That(restoreGroup["zone"], Is.EqualTo(3));
+            Assert.That(payloads, Has.Some.EqualTo(
+                "[\"sub\", \"Item\", \"range\", \"level\", 10, 20, 100, False, True, " +
+                "{\"zone\": 3}]"));
+        }
+
+        [Test]
+        public async Task WatchRow_WithGroup_CopiedBeforePostingToPump()
+        {
+            using var c = PayloadCapturingClient(out var payloads);
+            using var gate = new ManualResetEventSlim();
+            c.RunSerialized(() => gate.Wait(TimeSpan.FromSeconds(5)));
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            var watch = c.WatchRow<DictComponent>("name", "abc", "Item", group);
+            group["zone"] = 4;
+            gate.Set();
+            var row = new Dictionary<string, object> { ["id"] = 7L };
+            Receive(c, new object[] { "sub", "Item.id[7:None:1][:1]", row });
+
+            using var sub = await watch.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.That(sub.Data.ID, Is.EqualTo(7));
+            Assert.That(payloads, Has.Some.EqualTo(
+                "[\"sub\", \"Item\", \"get\", \"name\", \"abc\", {\"zone\": 3}]"));
+        }
+
+        // 已连接（只有 JsonbLayer，发送是空操作）、Inspector 记下每个请求的 payload 的客户端
+        private static HeadlessHeTuClient PayloadCapturingClient(
+            out ConcurrentQueue<string> payloads)
+        {
+            var c = new HeadlessHeTuClient();
+            c.SetupPipeline(new List<MessageProcessLayer> { new JsonbLayer() });
+            typeof(HeTuClientBase)
+                .GetField("State", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .SetValue(c, ConnectionState.Connected);
+            var capture = new PayloadCapture();
+            c.ConfigureInspector(true);
+            c.AddInspectorDispatcher(capture);
+            payloads = capture.Payloads;
+            return c;
+        }
+
+        // 在泵线程上把一帧当作服务端发来的消息处理
+        private static void Receive(HeadlessHeTuClient c, object[] frame)
+        {
+            var bytes = MessagePackSerializer.Serialize(frame);
+            var onReceived = typeof(HeTuClientBase).GetMethod("OnReceived",
+                BindingFlags.NonPublic | BindingFlags.Instance)!;
+            c.RunSerialized(() => onReceived.Invoke(c, new object[] { bytes }));
+        }
+
+        private sealed class PayloadCapture : IInspectorTraceDispatcher
+        {
+            public readonly ConcurrentQueue<string> Payloads = new();
+
+            // 同一个请求会分发好几次（发出、更新尺寸、完成），payload 相同，记一次就够
+            public void Dispatch(InspectorTraceEvent traceEvent)
+            {
+                var payload = traceEvent.Payload;
+                if (traceEvent.Status == "pending" && !Payloads.Contains(payload))
+                    Payloads.Enqueue(payload);
+            }
         }
 
         private sealed class ThreadProbe : IDisposable

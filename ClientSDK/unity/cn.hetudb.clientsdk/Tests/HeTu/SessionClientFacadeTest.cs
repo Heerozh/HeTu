@@ -126,6 +126,62 @@ namespace Tests.HeTu
             Assert.AreEqual(10, subscription.Data.Value);
         }
 
+        // 复合索引的按组订阅：门面把 group 交给会话核心，transport 收到的是入口拷贝的那份
+        [UnityTest]
+        public IEnumerator WatchRow_WithGroup_ForwardsCopyToTransport() =>
+            RunTask(WatchRow_WithGroup_ForwardsCopyToTransportAsync());
+
+        private async Task WatchRow_WithGroup_ForwardsCopyToTransportAsync()
+        {
+            var transport = new FakeTransport("c1");
+            transport.RowResults[("name", "abc")] =
+                new TestComponent { ID = 7, Value = 10 };
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseConnected();
+            await connectTask;
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            var watchTask = ToTask(session.WatchRow<TestComponent>("name", "abc",
+                group: group));
+            group["zone"] = 4;
+            using var subscription = await watchTask;
+
+            Assert.AreEqual(10, subscription.Data.Value);
+            Assert.AreNotSame(group, transport.WatchedGroups.Single());
+            Assert.AreEqual(3, transport.WatchedGroups.Single()["zone"]);
+        }
+
+        [UnityTest]
+        public IEnumerator WatchRange_WithGroup_ForwardsCopyToTransport() =>
+            RunTask(WatchRange_WithGroup_ForwardsCopyToTransportAsync());
+
+        private async Task WatchRange_WithGroup_ForwardsCopyToTransportAsync()
+        {
+            var transport = new FakeTransport("c1");
+            transport.RangeRows.Add(new TestComponent { ID = 7, Value = 10 });
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseConnected();
+            await connectTask;
+
+            var group = new Dictionary<string, object> { ["zone"] = 3 };
+            var watchTask = ToTask(session.WatchRange<TestComponent>("level", 10L, 20L,
+                100, group: group));
+            group["zone"] = 4;
+            using var subscription = await watchTask;
+
+            Assert.AreEqual(10, subscription.Rows[7].Value);
+            Assert.AreEqual(3, transport.WatchedGroups.Single()["zone"]);
+            Assert.Throws<ArgumentException>(() => session.WatchRange<TestComponent>(
+                "level", 10L, 20L, 100,
+                group: new Dictionary<string, object> { ["zone"] = 1.5 }));
+        }
+
         [UnityTest]
         public IEnumerator Close_CancelsPendingConnectAwaiter() =>
             RunTask(Close_CancelsPendingConnectAwaiterAsync());
@@ -432,6 +488,13 @@ namespace Tests.HeTu
                 get;
             } = new();
 
+            // WatchRange 的初始行（不看查询条件）
+            public List<TestComponent> RangeRows { get; } = new();
+
+            // 每次 WatchRow / WatchRange 收到的 group，没给时为 null
+            public List<IReadOnlyDictionary<string, object>> WatchedGroups { get; } =
+                new();
+
             public bool IsConnected { get; private set; }
 
             public event Action Connected;
@@ -457,9 +520,11 @@ namespace Tests.HeTu
                 Action<ManagedRowCore<T>, bool, Exception> onResponse,
                 string componentName = null,
                 ManagedRowCore<T> reusable = null,
-                System.Diagnostics.StackTrace creationTrace = null)
+                System.Diagnostics.StackTrace creationTrace = null,
+                IReadOnlyDictionary<string, object> group = null)
                 where T : IBaseComponent
             {
+                WatchedGroups.Add(group);
                 componentName ??= typeof(T).Name;
                 var row = (T)(IBaseComponent)RowResults[(index, value)];
                 var subId = HeTuClientBase.MakeSubId(
@@ -487,9 +552,19 @@ namespace Tests.HeTu
                 Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 bool desc = false, bool force = true, string componentName = null,
                 ManagedIndexCore<T> reusable = null,
-                System.Diagnostics.StackTrace creationTrace = null)
-                where T : IBaseComponent =>
-                throw new NotSupportedException();
+                System.Diagnostics.StackTrace creationTrace = null,
+                IReadOnlyDictionary<string, object> group = null)
+                where T : IBaseComponent
+            {
+                WatchedGroups.Add(group);
+                componentName ??= typeof(T).Name;
+                var subId = HeTuClientBase.MakeSubId(
+                    componentName, index, left, right, limit, desc);
+                var core = new ManagedIndexCore<T>(subId, componentName,
+                    RangeRows.Cast<T>().ToList(), _remoteClient, creationTrace);
+                core.ConfigureRestoreQuery(index, left, right, limit, desc, force, group);
+                onResponse(core, false, null);
+            }
 
             public void WatchTable<T>(
                 Action<ManagedIndexCore<T>, bool, Exception> onResponse,
