@@ -41,7 +41,14 @@ import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Collection, Coroutine, Iterable, Iterator
+from collections.abc import (
+    Callable,
+    Collection,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -248,6 +255,193 @@ def sortable_token(sortable: bytes) -> str:
     return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
 
 
+# 复合索引里 str / bytes 分组列编码后面跟的终止符。不能用单个 0x00：值的转义是 0x00 → 0x00 0xff，
+# 下一列的编码以 0xff 开头时（整数最大值、浮点 +inf / NaN、0xff 开头的 bytes）比较会越过
+# 终止符，把 "a\x00b" 组的行算进 "a" 组的区间。0x00 0x01 和转义的 0x00 0xff 在第二个字节就分开了
+GROUP_TERMINATOR = b"\x00\x01"
+
+
+def _group_value_error(comp_cls: type[BaseComponent], col: str, value: Any, why: str):
+    return ValueError(
+        _("{comp_name}.{col} 的分组值 {value} 不合法：{why}").format(
+            comp_name=comp_cls.name_, col=col, value=repr(value), why=why
+        )
+    )
+
+
+def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) -> Any:
+    """
+    内部方法：一个分组值按分组列的 dtype 规范化成 python 值，不合法抛 ValueError。
+
+    不能直接 `dtype.type(value)`：整数会静默回绕或截断（`np.int8(np.int64(300))` 是 44、
+    `np.int8(1.5)` 是 1），python int 越界抛的又是 OverflowError；字符串也不截断，和存进库里的
+    值对不上。所以整数要先按精确值判断范围，字符串按存储规则（`np.array(v, dtype)[()]`）截断到
+    列宽、去掉结尾的 `\\x00`
+    """
+    dtype = comp_cls.dtype_map_[col]
+    kind = dtype.kind
+    if kind in "iu":
+        if isinstance(value, (bool, np.bool_, int, np.integer)):
+            number = int(value)
+        elif isinstance(value, (float, np.floating)):
+            if not float(value).is_integer():
+                raise _group_value_error(comp_cls, col, value, _("不是整数"))
+            number = int(value)
+        else:
+            raise _group_value_error(comp_cls, col, value, _("整数列只收数字"))
+        info = np.iinfo(dtype)
+        if not info.min <= number <= info.max:
+            raise _group_value_error(
+                comp_cls, col, value, _("超出 {dtype} 的范围").format(dtype=dtype)
+            )
+        return number
+    if kind == "U":
+        if not isinstance(value, str):
+            raise _group_value_error(comp_cls, col, value, _("str 列只收 str"))
+        return np.array(value, dtype=dtype)[()].item()
+    if kind == "S":
+        if isinstance(value, str):
+            try:
+                value = value.encode("ascii")
+            except UnicodeEncodeError:
+                raise _group_value_error(
+                    comp_cls, col, value, _("bytes 列的 str 值只能是 ASCII")
+                ) from None
+        elif not isinstance(value, bytes):
+            raise _group_value_error(comp_cls, col, value, _("bytes 列只收 bytes"))
+        return np.array(value, dtype=dtype)[()].item()
+    # define_component 已限定分组列的类型，走不到
+    raise _group_value_error(comp_cls, col, value, _("不支持的分组列类型"))
+
+
+def resolve_group_(
+    comp_cls: type[BaseComponent], index_name: str, group: Any
+) -> tuple[Any, ...]:
+    """
+    内部方法：查询 / 订阅给的分组值（{分组列: 值}）→ 按分组列声明顺序、规范化后的元组。单列索引
+    返回 ()。复合索引没给、少给、多给分组值，单列索引给了分组值，值不合法，都抛 ValueError。
+    None 与 {} 等价。索引不存在时也抛 ValueError。
+    """
+    columns = comp_cls.index_groups_.get(index_name)
+    if columns is None:
+        raise ValueError(
+            _("{comp_name} 组件没有叫 {index_name} 的索引").format(
+                comp_name=comp_cls.name_, index_name=index_name
+            )
+        )
+    if group is not None and not isinstance(group, Mapping):
+        raise ValueError(
+            _("分组值必须是 {{分组列: 值}} 的 dict，收到：{group}").format(
+                group=repr(group)
+            )
+        )
+    if not group:
+        if columns:
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 是按 {columns} 分组的索引，"
+                    "查询要同时给出这些分组列的值"
+                ).format(
+                    comp_name=comp_cls.name_,
+                    index_name=index_name,
+                    columns=", ".join(columns),
+                )
+            )
+        return ()
+    if not columns:
+        raise ValueError(
+            _("{comp_name}.{index_name} 不是复合索引，不能给分组值").format(
+                comp_name=comp_cls.name_, index_name=index_name
+            )
+        )
+    # 先查键的类型再比集合：msgpack 解出来的键可能是 int / bytes，混着排序会抛 TypeError
+    if not all(type(key) is str for key in group) or set(group) != set(columns):
+        raise ValueError(
+            _(
+                "{comp_name}.{index_name} 的分组列是 {columns}，分组值要正好给出这些列，"
+                "收到：{keys}"
+            ).format(
+                comp_name=comp_cls.name_,
+                index_name=index_name,
+                columns=", ".join(columns),
+                keys=repr(list(group)),
+            )
+        )
+    return tuple(resolve_group_value_(comp_cls, col, group[col]) for col in columns)
+
+
+def _group_part(dtype: np.dtype, value: Any) -> bytes:
+    encoded = to_sortable_bytes(dtype.type(value))
+    return encoded + GROUP_TERMINATOR if dtype.kind in "US" else encoded
+
+
+def group_prefix_(
+    comp_cls: type[BaseComponent], index_name: str, values: tuple[Any, ...]
+) -> bytes:
+    """内部方法：`resolve_group_` 之后的分组值 → 复合索引 member 的组前缀 P，单列索引是 b"" """
+    dtype_map = comp_cls.dtype_map_
+    return b"".join(
+        _group_part(dtype_map[col], value)
+        for col, value in zip(comp_cls.index_groups_[index_name], values)
+    )
+
+
+def row_group_prefix_(
+    comp_cls: type[BaseComponent], index_name: str, row: Any
+) -> bytes:
+    """
+    内部方法：一行在复合索引上的组前缀 P，单列索引是 b""。row 是 np.record，或者 commit 用的
+    {列: str / bytes}（按列 dtype 转回）
+    """
+    dtype_map = comp_cls.dtype_map_
+    return b"".join(
+        _group_part(dtype_map[col], row[col])
+        for col in comp_cls.index_groups_[index_name]
+    )
+
+
+def index_value_bytes_(
+    comp_cls: type[BaseComponent], index_name: str, row: Any
+) -> bytes:
+    """
+    内部方法：一行在索引上的值段，即 member 去掉 `\\x00 + id`：组前缀 P 加本字段的编码，单列索引
+    就是本字段的编码。row 同 `row_group_prefix_`
+    """
+    value = to_sortable_bytes(comp_cls.dtype_map_[index_name].type(row[index_name]))
+    if not comp_cls.index_groups_[index_name]:
+        return value
+    return row_group_prefix_(comp_cls, index_name, row) + value
+
+
+def index_value_bytes_list_(
+    comp_cls: type[BaseComponent], index_name: str, rows: np.ndarray
+) -> list[bytes]:
+    """`index_value_bytes_` 的批量版，结果与逐行调用相同：每列向量化编码再逐行拼接"""
+    values = to_sortable_bytes_list(rows[index_name])
+    groups = comp_cls.index_groups_[index_name]
+    if not groups:
+        return values
+    parts: list[list[bytes]] = []
+    for col in groups:
+        encoded = to_sortable_bytes_list(rows[col])
+        if comp_cls.dtype_map_[col].kind in "US":
+            encoded = [part + GROUP_TERMINATOR for part in encoded]
+        parts.append(encoded)
+    parts.append(values)
+    return [b"".join(row_parts) for row_parts in zip(*parts)]
+
+
+def group_query_key_(group: Mapping[str, Any] | None) -> tuple[tuple[str, str], ...]:
+    """
+    内部方法：订阅的 sub_id、共享键里代表分组值的部分，按原值（repr）、键按名字排序。和 left /
+    right 一样不规范化：共享键与 sub_id 用同一个口径才能保证"同键一定同 sub_id"；1 与 True、
+    3 与 3.0 分成两个订阅只是少共享些
+    """
+    if not group:
+        return ()
+    return tuple((key, repr(group[key])) for key in sorted(group))
+
+
 def peel_bound_(
     value: float | str | bytes | bool,
 ) -> tuple[float | str | bytes | bool, bool | None]:
@@ -375,11 +569,28 @@ class BackendClient:
         不发：点查询订阅本来就订着结果里每一行的行频道，由它发现（见 IndexSubscription）。
         点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
-        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
+        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。复合索引（groupby）没有值频道，
+        调用抛 `ValueError`，请用 `index_group_channel`。
 
         Channel of one index value, only for indexes declared with `point_sub` (raises
         `ValueError` otherwise). Point-query subscriptions use it instead of
-        `index_channel` so writes to other values don't wake them up.
+        `index_channel` so writes to other values don't wake them up. Composite
+        (groupby) indexes have group channels instead, see `index_group_channel`.
+        """
+        raise NotImplementedError
+
+    def index_group_channel(
+        self, table_ref: TableReference, index_name: str, group: Mapping[str, Any]
+    ) -> str:
+        """
+        返回复合索引（groupby）某一组的频道名。只有声明了 `point_sub` 的复合索引才有组频道，单列
+        索引、未声明 point_sub 的复合索引调用会抛 `ValueError`。有行"进入"这一组时（insert，
+        或 update 改了分组列 / 本字段），commit 才向此频道发一条消息，消息不带内容；一个事务每个
+        (索引, 组) 只发一条。行"离开"不发，由订阅者订着的行频道发现。group 是 {分组列: 值}，按
+        `resolve_group_` 规范化。
+
+        Channel of one group of a composite (groupby) index, only for indexes declared
+        with `point_sub`. Commits publish to it when rows enter the group.
         """
         raise NotImplementedError
 
@@ -600,6 +811,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray: ...
     @overload
     async def range(
@@ -611,6 +824,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, str]]: ...
     @overload
     async def range(
@@ -622,6 +837,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...
     @overload
     async def range(
@@ -633,6 +850,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]: ...
     @overload
     async def range(
@@ -644,6 +863,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: RowFormat = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
     async def range(
         self,
@@ -654,10 +875,13 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ):
         """
         从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
         如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
+        复合索引（groupby）要用 `group` 给出全部分组列的值，结果只含这一组的行。
 
         Parameters
         ----------
@@ -674,6 +898,8 @@ class BackendClient:
             是否降序排列
         row_format
             返回数据解码格式，见 "Returns"
+        group: Mapping[str, Any] | None
+            复合索引的分组值 {分组列: 值}，必须正好给出全部分组列；单列索引不能给。
 
         Returns
         -------
@@ -693,7 +919,8 @@ class BackendClient:
         Notes
         -----
         如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
+        "某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`），查询时给出
+        `group`。其他组合条件，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
             items = client.range(ref, "owner", player_id, limit=100)
             few_items = items[items.amount < 10]
@@ -710,6 +937,8 @@ class BackendClient:
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> None:
         """
         内部方法：校验一次 `range` 查询的参数，不合法抛 TypeError / ValueError，不访问数据库。订阅在
@@ -731,10 +960,13 @@ class BackendClient:
         right: int | float | str | bytes | bool | None = None,
         limit: int = 10,
         desc: bool = False,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[tuple[Any, int]]:
         """
-        内部方法：只读索引，返回区间内前 `limit` 个 `(索引值, 行 id)`，区间、limit、desc 的规则同
-        `range`。不读行，一次往返；索引值按组件 dtype 还原（numpy 标量）。
+        内部方法：只读索引，返回区间内前 `limit` 个 `(索引值, 行 id)`，区间、limit、desc、group 的
+        规则同 `range`。不读行，一次往返；索引值按组件 dtype 还原（numpy 标量），复合索引只还原
+        本字段的值。
 
         只要索引上的值、不要整行时用它，比如未来调用的调度只想知道最早一条什么时候到期：先读索引
         再读行是两次往返，中间那行可能已被改走，读到的行值就不是这次区间里的值了。
@@ -749,6 +981,8 @@ class BackendClient:
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[list[int], RangeObservation]:
         """
         内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
@@ -775,6 +1009,8 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[bytes, bytes]:
         """
         内部方法：一次 range 查询匹配的排序键闭区间 (lo, hi)，同 `range_read_` 观察里的
@@ -913,9 +1149,15 @@ class TableMaintenance:
         raise NotImplementedError
 
     def range(
-        self, ref: TableReference, index_name: str, left: Any, right: Any = None
+        self,
+        ref: TableReference,
+        index_name: str,
+        left: Any,
+        right: Any = None,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         raise NotImplementedError
 
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -1145,7 +1387,13 @@ class TableMaintenance:
         if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
             return  # 迁移脚本已按当前定义重建了表
         stored = BaseComponent.load_json(meta.json)
-        if (stored.indexes_, stored.uniques_) != (comp_cls.indexes_, comp_cls.uniques_):
+        # 分组列也要比：给已有索引加 / 去 groupby 时 indexes_、uniques_ 都不变，不重建的话
+        # 库里留着旧格式的 member
+        if (stored.indexes_, stored.uniques_, stored.index_groups_) != (
+            comp_cls.indexes_,
+            comp_cls.uniques_,
+            comp_cls.index_groups_,
+        ):
             self.do_rebuild_index_(table_ref)
             logger.warning(
                 _(

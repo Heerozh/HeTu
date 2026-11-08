@@ -9,8 +9,9 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, final, override
+from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
 
@@ -92,10 +93,12 @@ class SQLiteTableMaintenance(TableMaintenance):
         left: Any,
         right: Any = None,
         limit: int = 10,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         idx_key, b_left, b_right, empty = self.client.zrange_args_(
-            ref, index_name, left, right, False
+            ref, index_name, left, right, False, group
         )
         if empty:
             return []
@@ -250,40 +253,48 @@ class SQLiteTableMaintenance(TableMaintenance):
         for idx_name in comp_cls.indexes_:
             members: list[bytes] = []
             if row_count:
+                # 复合索引要读分组列和本字段
+                columns = (*comp_cls.index_groups_[idx_name], idx_name)
                 is_unique = idx_name in comp_cls.uniques_
-                is_bytes = idx_name in comp_cls.bytes_fields_
-                seen: set[bytes | None] = set()
-                for row_id, value in self._run(
-                    SQLiteStore.row_field_values, table, idx_name
+                seen: set[bytes] = set()
+                for row_id, raws in self._run(
+                    SQLiteStore.row_field_values, table, columns
                 ):
+                    for col, raw in zip(columns, raws):
+                        if raw is None:
+                            raise RuntimeError(
+                                _(
+                                    "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
+                                    "无法重建索引"
+                                ).format(
+                                    comp_name=table_ref.comp_name,
+                                    row_id=row_id,
+                                    idx_name=col,
+                                )
+                            )
+                    member = self.client.rebuild_member_(
+                        comp_cls,
+                        idx_name,
+                        struct,
+                        dict(zip(columns, cast(tuple[bytes, ...], raws))),
+                        str(row_id).encode(),
+                    )
                     if is_unique:
+                        # 按值段（复合索引带组前缀）查重，同组同值才算冲突
+                        value = member.rsplit(b"\x00", 1)[0]
                         if value in seen:
                             raise RuntimeError(
                                 _(
                                     "组件{comp_name}的unique索引`{idx_name}`在重建时"
-                                    "发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                    "Unique标记导致。"
+                                    "发现违反unique约束，可能是迁移时缩短了值类型、新增了"
+                                    "Unique标记、或去掉了groupby（组内唯一变成了全局唯一）"
+                                    "导致。"
                                 ).format(
                                     comp_name=table_ref.comp_name, idx_name=idx_name
                                 )
                             )
                         seen.add(value)
-                    if value is None:
-                        raise RuntimeError(
-                            _(
-                                "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
-                                "无法重建索引"
-                            ).format(
-                                comp_name=table_ref.comp_name,
-                                row_id=row_id,
-                                idx_name=idx_name,
-                            )
-                        )
-                    members.append(
-                        self.client.rebuild_member_(
-                            struct, idx_name, value, is_bytes, str(row_id).encode()
-                        )
-                    )
+                    members.append(member)
             new_indexes[self.client.index_key(table_ref, idx_name)] = members
 
         def _replace(store: SQLiteStore):

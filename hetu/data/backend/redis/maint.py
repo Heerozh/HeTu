@@ -7,6 +7,7 @@
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast, final, override
 
@@ -63,10 +64,12 @@ class RedisTableMaintenance(TableMaintenance):
         left: Any,
         right: Any = None,
         limit: int = 10,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         idx_key, b_left, b_right, empty = self.client.zrange_args_(
-            ref, index_name, left, right, False
+            ref, index_name, left, right, False, group
         )
         if empty:
             return []
@@ -229,9 +232,11 @@ class RedisTableMaintenance(TableMaintenance):
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
-        按行数据重建组件表的索引，返回行数。每个索引先建到临时 key，建好、unique 检查通过后
-        再 RENAME 覆盖旧索引：中途失败（中断、超时、unique 冲突）旧索引原样保留，不会留下
-        空的或半截的索引。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        按行数据重建组件表的索引，返回行数。分两阶段：先把每个索引都建到临时 key、通过 unique
+        检查，全部建好之后再统一 RENAME 覆盖旧索引。中途失败（中断、超时、unique 冲突）所有旧
+        索引原样保留：逐个建、逐个换的话，后面的索引失败时前面的已经换成新定义的格式（比如复合
+        索引），而 meta 还是旧定义，回退代码就读不懂了。表里一行都没有时，索引里剩下的都是
+        残留，直接删掉。
         """
         from .client import RedisBackendClient
 
@@ -243,41 +248,62 @@ class RedisTableMaintenance(TableMaintenance):
         keys = cast(list[bytes], keys)
         comp_cls = table_ref.comp_cls
 
-        for idx_name in comp_cls.indexes_:
-            idx_key = self.client.index_key(table_ref, idx_name)
-            if not keys:
-                io.delete(idx_key)
-                continue
-            # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id。临时 key 带同一个
-            # {CLU} hash tag，cluster 模式下和索引同 slot，才能 RENAME
-            tmp_key = f"{idx_key}:rebuilding"
-            io.delete(tmp_key)  # 上次中断留下的
-            is_unique = idx_name in comp_cls.uniques_
-            is_bytes = idx_name in comp_cls.bytes_fields_
-            seen: set[bytes] = set()
-            # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
-            struct = comp_cls.new_row(id_=0)
-            for chunk in batched(keys, self.REBUILD_BATCH):
-                pipe = io.pipeline()
-                for key in chunk:
-                    pipe.hget(key.decode(), idx_name)
-                values: list[bytes] = pipe.execute()
-                members: dict[bytes, int] = {}
-                for key, value in zip(chunk, values):
-                    if is_unique:
-                        if value in seen:
-                            io.delete(tmp_key)
+        if not keys:
+            for idx_name in comp_cls.indexes_:
+                io.delete(self.client.index_key(table_ref, idx_name))
+            return 0
+
+        # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
+        struct = comp_cls.new_row(id_=0)
+        tmp_keys: list[str] = []
+        try:
+            for idx_name in comp_cls.indexes_:
+                idx_key = self.client.index_key(table_ref, idx_name)
+                # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id。临时 key 带同一个
+                # {CLU} hash tag，cluster 模式下和索引同 slot，才能 RENAME
+                tmp_key = f"{idx_key}:rebuilding"
+                io.delete(tmp_key)  # 上次中断留下的
+                tmp_keys.append(tmp_key)
+                # 复合索引要读分组列和本字段
+                columns = (*comp_cls.index_groups_[idx_name], idx_name)
+                is_unique = idx_name in comp_cls.uniques_
+                seen: set[bytes] = set()
+                for chunk in batched(keys, self.REBUILD_BATCH):
+                    pipe = io.pipeline()
+                    for key in chunk:
+                        pipe.hmget(key.decode(), columns)
+                    rows: list[list[bytes | None]] = pipe.execute()
+                    members: dict[bytes, int] = {}
+                    for key, raws in zip(chunk, rows):
+                        if any(raw is None for raw in raws):
                             raise RuntimeError(
-                                f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时"
-                                f"发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                f"Unique标记导致。"
+                                f"组件{table_ref.comp_name}的行{key.decode()}缺少索引"
+                                f"`{idx_name}`要用的字段{columns}，重建索引失败。"
                             )
-                        seen.add(value)
-                    # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
-                    member = RedisBackendClient.rebuild_member_(
-                        struct, idx_name, value, is_bytes, key.split(b":")[-1]
-                    )
-                    members[member] = 0
-                io.zadd(tmp_key, members)
-            io.rename(tmp_key, idx_key)
+                        # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
+                        member = RedisBackendClient.rebuild_member_(
+                            comp_cls,
+                            idx_name,
+                            struct,
+                            dict(zip(columns, cast(list[bytes], raws))),
+                            key.split(b":")[-1],
+                        )
+                        if is_unique:
+                            # 按值段（复合索引带组前缀）查重，同组同值才算冲突
+                            value = member.rsplit(b"\x00", 1)[0]
+                            if value in seen:
+                                raise RuntimeError(
+                                    f"组件{table_ref.comp_name}的unique索引`{idx_name}`在"
+                                    f"重建时发现违反unique约束，可能是迁移时缩短了值类型、新增"
+                                    f"了Unique标记、或去掉了groupby（组内唯一变成了全局唯一）"
+                                    f"导致。"
+                                )
+                            seen.add(value)
+                        members[member] = 0
+                    io.zadd(tmp_key, members)
+        except BaseException:
+            io.delete(*tmp_keys)
+            raise
+        for idx_name, tmp_key in zip(comp_cls.indexes_, tmp_keys):
+            io.rename(tmp_key, self.client.index_key(table_ref, idx_name))
         return len(keys)

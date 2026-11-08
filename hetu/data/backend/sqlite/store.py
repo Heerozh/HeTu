@@ -21,7 +21,7 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from itertools import batched
 from pathlib import Path
@@ -549,23 +549,28 @@ class SQLiteStore:
         return [int(row[0]) for row in rows]
 
     def row_field_values(
-        self, table: str, field: str
-    ) -> list[tuple[int, bytes | None]]:
-        """每一行的 id 与某个字段的原始字节（没有这个字段为 None），重建索引用"""
+        self, table: str, fields: Sequence[str]
+    ) -> list[tuple[int, tuple[bytes | None, ...]]]:
+        """
+        每一行的 id 与几个字段的原始字节（表里没有的字段为 None），重建索引用：复合索引要同时
+        读分组列和本字段
+        """
         if not self._table_exists(table):
             return []
-        try:
-            rows = self.conn.execute(
-                f"SELECT {quote(ROW_KEY)}, {quote(field)} FROM {quote(table)}"
-            ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if _is_missing_column(exc):
-                return [(row_id, None) for row_id in self.row_ids(table)]
-            raise
-        return [
-            (int(row_id), None if value is None else from_column(value))
-            for row_id, value in rows
-        ]
+        existing = set(self._columns(table))
+        present = [field for field in fields if field in existing]
+        cols = ", ".join(quote(field) for field in (ROW_KEY, *present))
+        rows = self.conn.execute(f"SELECT {cols} FROM {quote(table)}").fetchall()
+        result = []
+        for row_id, *values in rows:
+            by_field = dict(zip(present, values))
+            raws: list[bytes | None] = []
+            for field in fields:
+                # 列在、值是 NULL 也按缺字段
+                value = by_field.get(field)
+                raws.append(None if value is None else from_column(value))
+            result.append((int(row_id), tuple(raws)))
+        return result
 
     def row_tables_with_prefix(self, prefix: str) -> list[str]:
         """名字以 prefix 开头（大小写精确匹配）的行表"""

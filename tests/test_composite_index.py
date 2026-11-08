@@ -1,0 +1,853 @@
+"""
+复合索引（`property_field(groupby=...)`）：定义校验、member 编码的保序与可切分、分组值的解析，
+以及在各后端上的组内查询、组内 unique、读己之写、防幻读、维护（重建索引、迁移、headless 比对）。
+设计稿见 docs/superpowers/specs/2026-11-08-composite-index-design.md。
+"""
+
+import itertools
+import json
+import random
+
+import numpy as np
+import pytest
+from fixtures.backends import raw_hset, raw_index_members
+from fixtures.testdata import create_ref
+
+from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import (
+    Backend,
+    RaceCondition,
+    RowFormat,
+    Table,
+    TableReference,
+    UniqueViolation,
+)
+
+SnowflakeID().init(1, 0)
+
+I64_MIN, I64_MAX = -(2**63), 2**63 - 1
+
+
+def def_slot():
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    global Slot
+
+    @define_component(namespace="pytest", permission=Permission.USER, force=True)
+    class Slot(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        zone: np.int32 = property_field(0)
+        server: "U8" = property_field("")  # type: ignore  # noqa
+        # 每个 zone 里按 level 排序；point_sub 时按组发频道
+        level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+        # 每个 owner 的背包格子组内唯一
+        slot: np.int16 = property_field(0, unique=True, groupby="owner")
+        # 字符串分组列、两个分组列
+        name: "U8" = property_field("", unique=True, groupby=("server", "zone"))  # type: ignore  # noqa
+        score: np.float64 = property_field(0.0, groupby="server")
+        qty: np.int32 = property_field(0)
+
+    return Slot
+
+
+def def_buff():
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    global Buff
+
+    @define_component(
+        namespace="pytest", permission=Permission.USER, volatile=True, force=True
+    )
+    class Buff(BaseComponent):
+        zone: np.int32 = property_field(0)
+        level: np.int32 = property_field(0, groupby="zone")
+        hp: np.int32 = property_field(0)
+
+    return Buff
+
+
+@pytest.fixture
+async def slot_ref(new_component_env, mod_auto_backend) -> TableReference:
+    return create_ref(def_slot(), mod_auto_backend())
+
+
+_serial = itertools.count(1)
+
+
+def _slot(comp, **fields):
+    """造一行 Slot：slot（组内 unique）、name（组内 unique）默认给不重复的值"""
+    row = comp.new_row()
+    n = next(_serial)
+    row.slot, row.name = n, f"n{n}"
+    for key, value in fields.items():
+        row[key] = value
+    return row
+
+
+async def _insert(backend: Backend, comp, *rows) -> list[int]:
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for row in rows:
+            await repo.insert(row)
+    await backend.wait_for_synced()
+    return [int(row.id) for row in rows]
+
+
+# ---------------------------------------------------------------- 定义
+
+
+def test_define_groupby(new_component_env):
+    """groupby 隐含 index；类属性、schema json 的形状；"zone" 与 ("zone",) 是同一个定义"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    comp = def_slot()
+    assert comp.index_groups_["level"] == ("zone",)
+    assert comp.index_groups_["name"] == ("server", "zone")
+    assert comp.index_groups_["owner"] == ()
+    assert comp.index_groups_["id"] == ()
+    assert "level" in comp.indexes_ and "name" in comp.uniques_
+    # 列 → 用到它的索引
+    assert set(comp.column_indexes_["zone"]) == {"level", "name"}
+    assert set(comp.column_indexes_["owner"]) == {"owner", "slot"}
+    assert "qty" not in comp.column_indexes_
+    props = json.loads(comp.json_)["properties"]
+    assert props["level"]["groupby"] == ["zone"]
+    assert props["name"]["groupby"] == ["server", "zone"]
+    # 没用 groupby 的列不写这个键：没用复合索引的组件 schema 版本不变
+    assert "groupby" not in props["owner"]
+    # load_json 回来是元组
+    again = BaseComponent.load_json(comp.json_)
+    assert again.index_groups_ == comp.index_groups_
+
+    def define(groupby):
+        @define_component(namespace="pytest", force=True)
+        class G(BaseComponent):
+            zone: np.int32 = property_field(0)
+            level: np.int32 = property_field(0, groupby=groupby)
+
+        return G
+
+    assert define("zone").json_ == define(("zone",)).json_ == define(["zone"]).json_
+
+
+@pytest.mark.parametrize(
+    "fields, match",
+    [
+        ({"level": ("level", "zone")}, "不能按自己分组"),
+        ({"level": ("id",)}, "不能是id"),
+        ({"level": ("nope",)}, "没有字段`nope`"),
+        ({"level": ("zone", "zone")}, "重复"),
+        ({"level": ("ratio",)}, "只能是整数、str、bytes"),
+        ({"level": ("span",)}, "只能是整数、str、bytes"),
+    ],
+)
+def test_define_groupby_errors(new_component_env, fields, match):
+    """分组列必须是本组件的其他字段，类型只能是整数、str、bytes（浮点、timedelta64 不行）"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    with pytest.raises(ValueError, match=match):
+
+        @define_component(namespace="pytest", force=True)
+        class Bad(BaseComponent):
+            zone: np.int32 = property_field(0)
+            ratio: np.float32 = property_field(0)
+            span: "m8[s]" = property_field(0)  # type: ignore  # noqa
+            level: np.int32 = property_field(0, groupby=fields["level"])
+
+
+def test_define_groupby_hidden_point_sub(new_component_env):
+    """分组列是 hidden 时不能开 point_sub：客户端不能按 hidden 列查询，组频道没人订"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    with pytest.raises(ValueError, match="hidden"):
+
+        @define_component(namespace="pytest", force=True)
+        class Bad(BaseComponent):
+            zone: np.int32 = property_field(0, hidden=True)
+            level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+
+    # 不开 point_sub 可以：服务端照常按它查
+    @define_component(namespace="pytest", force=True)
+    class Ok(BaseComponent):
+        zone: np.int32 = property_field(0, hidden=True)
+        level: np.int32 = property_field(0, groupby="zone")
+
+    assert Ok.index_groups_["level"] == ("zone",)
+
+
+# ---------------------------------------------------------------- 编码
+
+
+def def_codecs():
+    """几种分组列 / 本字段的类型组合"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class CodecA(BaseComponent):
+        g: np.int64 = property_field(0)
+        f: "U3" = property_field("", groupby="g")  # type: ignore  # noqa
+
+    @define_component(namespace="pytest", force=True)
+    class CodecB(BaseComponent):
+        g: "U3" = property_field("")  # type: ignore  # noqa
+        f: np.float64 = property_field(0.0, groupby="g")
+
+    @define_component(namespace="pytest", force=True)
+    class CodecC(BaseComponent):
+        g: "S3" = property_field(b"")  # type: ignore  # noqa
+        h: "U3" = property_field("")  # type: ignore  # noqa
+        f: np.int16 = property_field(0, groupby=("g", "h"))
+
+    @define_component(namespace="pytest", force=True)
+    class CodecD(BaseComponent):
+        g: np.uint64 = property_field(0)
+        h: "S3" = property_field(b"")  # type: ignore  # noqa
+        f: "S3" = property_field(b"", groupby=("h", "g"))  # type: ignore  # noqa
+
+    return CodecA, CodecB, CodecC, CodecD
+
+
+_POOLS = {
+    "i": [I64_MIN, -1, 0, 1, 2**31, I64_MAX],
+    "i2": [-32768, -1, 0, 1, 32767],
+    "u": [0, 1, 255, 2**63, 2**64 - 1],
+    "U": ["", "a", "a\x00b", "ab", "\x00a", "\x01", "ÿ", "\U0001f600", "b"],
+    "S": [b"", b"a", b"a\x00b", b"\xff", b"\xff\x00a", b"\x00\x01", b"ab", b"\x01"],
+    "f": [-np.inf, -1.5, -0.0, 0.0, 1e-300, 2.5, np.inf],
+}
+
+
+def _pool(dtype: np.dtype) -> list:
+    if dtype.kind == "i":
+        return _POOLS["i2"] if dtype.itemsize == 2 else _POOLS["i"]
+    return _POOLS[dtype.kind]
+
+
+def _split_member(comp, index_name: str, member: bytes) -> tuple:
+    """按设计稿 §4.1 的规则把 member 切回 (分组值…, 本字段值, id 串)，验证可唯一切分"""
+    from hetu.data.backend.base import from_sortable_bytes
+
+    value_seg, _sep, row_id = member.rpartition(b"\x00")
+    pos = 0
+    values = []
+    for col in comp.index_groups_[index_name]:
+        dtype = comp.dtype_map_[col]
+        if dtype.kind in "iu":
+            raw, pos = value_seg[pos : pos + 8], pos + 8
+        else:
+            buf = bytearray()
+            while True:
+                byte = value_seg[pos]
+                if byte == 0:
+                    nxt = value_seg[pos + 1]
+                    pos += 2
+                    if nxt == 0x01:
+                        break
+                    assert nxt == 0xFF, member
+                    buf += b"\x00\xff"
+                else:
+                    buf.append(byte)
+                    pos += 1
+            raw = bytes(buf)
+        values.append(from_sortable_bytes(dtype, raw).item())
+    values.append(
+        from_sortable_bytes(comp.dtype_map_[index_name], value_seg[pos:]).item()
+    )
+    return (*values, row_id.decode())
+
+
+def test_composite_member_order_and_split(new_component_env):
+    """
+    member 的字节序 = (分组值…, 本字段值, id 十进制串) 的逐列字典序，且 member 能唯一切分。
+    值覆盖中间 \\x00、\\x01、\\xff 开头、空串、非 BMP 字符、有符号与无符号极值、±inf、-0.0
+    """
+    from hetu.data.backend.base import index_value_bytes_, index_value_bytes_list_
+
+    rng = random.Random(20261108)
+    for comp in def_codecs():
+        index_name = "f"
+        columns = (*comp.index_groups_[index_name], index_name)
+        rows = np.zeros(80, dtype=comp.dtypes)
+        rows["id"] = rng.sample(range(1, 10**6), len(rows))
+        for col in columns:
+            pool = _pool(comp.dtype_map_[col])
+            rows[col] = [rng.choice(pool) for _ in range(len(rows))]
+        values = index_value_bytes_list_(comp, index_name, rows)
+        # 批量版与逐行版一致
+        assert values == [index_value_bytes_(comp, index_name, row) for row in rows]
+        members = [v + b"\x00" + b"%d" % i for v, i in zip(values, rows["id"].tolist())]
+        # 期望的顺序：numpy 存进去之后的值（结尾 \x00 已去掉）按 python 元组比，id 按十进制串
+        keys = [
+            (*(rows[col][i].item() for col in columns), str(rows["id"][i]))
+            for i in range(len(rows))
+        ]
+        by_member = sorted(range(len(rows)), key=lambda i: members[i])
+        by_key = sorted(range(len(rows)), key=lambda i: keys[i])
+        assert by_member == by_key, comp.name_
+        # 可唯一切分：切回来的值就是存进去的值（-0.0 与 0.0 编码相同，按值比相等）
+        for member, key in zip(members, keys):
+            assert _split_member(comp, index_name, member) == key
+
+
+async def test_single_nul_terminator_counterexample(
+    new_component_env, mod_auto_backend
+):
+    """
+    设计稿 §4.2 的反例：分组列 name、本字段 x 是整数。查 name="a"、x 不限时，上界的 x 编码全是
+    0xff；如果分组列后面用单个 0x00 当终止符，name="a\\x00b" 的行会落进区间。现在两种行分得开
+    """
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class Tagged(BaseComponent):
+        name: "U8" = property_field("")  # type: ignore  # noqa
+        x: np.int64 = property_field(0, groupby="name")
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(Tagged, backend)
+    rows = []
+    for name in ("a", "a\x00b", "a\x00", "ab"):
+        row = Tagged.new_row()
+        row.name, row.x = name, 5
+        rows.append(row)
+    a_id, a0b_id, a0_id, ab_id = await _insert(backend, Tagged, *rows)
+    servant = backend.servant
+    got = await servant.range(
+        ref, "x", -np.inf, np.inf, -1, row_format=RowFormat.ID_LIST, group={"name": "a"}
+    )
+    # "a\x00" 结尾的 \x00 被 numpy 当补齐去掉，存的就是 "a"
+    assert sorted(got) == sorted([a_id, a0_id])
+    got = await servant.range(
+        ref,
+        "x",
+        -np.inf,
+        np.inf,
+        -1,
+        row_format=RowFormat.ID_LIST,
+        group={"name": "a\x00b"},
+    )
+    assert got == [a0b_id]
+    got = await servant.range(
+        ref, "x", 5, None, -1, row_format=RowFormat.ID_LIST, group={"name": "ab"}
+    )
+    assert got == [ab_id]
+
+
+# ---------------------------------------------------------------- 分组值的解析
+
+
+def test_resolve_group(new_component_env):
+    """分组值按列类型规范化，不能精确表示的一律 ValueError，不会静默回绕或截错组"""
+    from hetu.data.backend.base import resolve_group_
+
+    comp = def_slot()
+    assert resolve_group_(comp, "level", {"zone": 3}) == (3,)
+    assert resolve_group_(comp, "level", {"zone": np.int64(3)}) == (3,)
+    assert resolve_group_(comp, "level", {"zone": 3.0}) == (3,)
+    assert resolve_group_(comp, "level", {"zone": True}) == (1,)
+    # 字符串按存储规则：截断到列宽、去掉结尾的 \x00
+    assert resolve_group_(comp, "name", {"server": "s1\x00", "zone": 1}) == ("s1", 1)
+    assert resolve_group_(comp, "name", {"server": "abcdefghij", "zone": 1}) == (
+        "abcdefgh",
+        1,
+    )
+    # 单列索引
+    assert resolve_group_(comp, "owner", None) == ()
+    assert resolve_group_(comp, "owner", {}) == ()
+
+    bad = [
+        ("level", None, "要同时给出"),
+        ("level", {}, "要同时给出"),
+        ("level", {"zone": 2**31}, "超出"),  # int32 越界，不回绕
+        ("level", {"zone": np.int64(2**40)}, "超出"),
+        ("level", {"zone": 3.5}, "不是整数"),
+        ("level", {"zone": np.nan}, "不是整数"),
+        ("level", {"zone": "3"}, "只收数字"),
+        ("level", {"zone": None}, "只收数字"),
+        ("level", {"zone": 1, "owner": 2}, "正好给出"),
+        ("level", {1: 3}, "正好给出"),  # 键不是 str
+        ("level", [("zone", 3)], "dict"),
+        ("name", {"server": b"s1", "zone": 1}, "只收 str"),
+        ("name", {"server": "s1"}, "正好给出"),
+        ("owner", {"zone": 1}, "不是复合索引"),
+        ("nope", None, "没有叫"),
+    ]
+    for index_name, group, match in bad:
+        with pytest.raises(ValueError, match=match):
+            resolve_group_(comp, index_name, group)
+
+
+# ---------------------------------------------------------------- 查询
+
+
+async def test_range_within_group(slot_ref, mod_auto_backend):
+    """组内区间：只返回这一组的行，按本字段排序；limit、desc、开区间、位置参数写法、servant、
+    只读索引、维护接口都带 group"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    levels = {1: [30, 10, 20], 2: [15, 25], 3: []}
+    rows = [_slot(comp, zone=z, level=lv) for z, lvs in levels.items() for lv in lvs]
+    await _insert(backend, comp, *rows)
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        got = await repo.range(level=(-np.inf, np.inf), zone=1, limit=-1)
+        assert list(got.level) == [10, 20, 30]
+        assert set(got.zone) == {1}
+        got = await repo.range(level=(0, 100), zone=1, limit=2, desc=True)
+        assert list(got.level) == [30, 20]
+        got = await repo.range(level=("(10", 30), zone=1, limit=-1)
+        assert list(got.level) == [20, 30]
+        got = await repo.range("level", 0, 100, limit=-1, _group={"zone": 2})
+        assert list(got.level) == [15, 25]
+        assert len(await repo.range(level=(0, 100), zone=3, limit=-1)) == 0
+        # 点查
+        assert list((await repo.range(level=(25, 25), zone=2)).level) == [25]
+        assert (await repo.get(level=20, zone=1)).level == 20
+        assert await repo.get(level=20, zone=2) is None
+
+    servant = backend.servant
+    got = await servant.range(slot_ref, "level", 0, 100, -1, group={"zone": 1})
+    assert list(got.level) == [10, 20, 30]
+    pairs = await servant.range_index_(slot_ref, "level", 0, 100, -1, group={"zone": 2})
+    assert [int(v) for v, _id in pairs] == [15, 25]
+    maint = backend.get_table_maintenance()
+    assert len(maint.range(slot_ref, "level", 0, 100, limit=-1, group={"zone": 1})) == 3
+
+
+async def test_query_errors(slot_ref, mod_auto_backend):
+    """复合索引漏给、多给分组值，单列索引给了分组值，kwargs 匹配到多个 / 0 个索引都报 ValueError；
+    后端接口不经过 repo 也拦得住（不会用空前缀查到别的组）"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    await _insert(backend, comp, _slot(comp, zone=1, level=1))
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="分组"):
+            await repo.range(level=(0, 10))
+        with pytest.raises(ValueError, match="正好给出"):
+            await repo.range(level=(0, 10), zone=1, owner=2)
+        with pytest.raises(ValueError, match="不是复合索引"):
+            await repo.range(owner=(0, 10), zone=1)
+        with pytest.raises(ValueError, match="分组"):
+            await repo.get(level=1)
+        with pytest.raises(ValueError, match="对不上任何索引"):
+            await repo.get(level=1, owner=2)
+        with pytest.raises(ValueError, match="只有一个"):
+            await repo.range(zone=1, owner=2)
+        # 长度为 2 的字符串分组值不会被当成区间
+        got = await repo.range(name=("n0", "n9999"), server="s1", zone=1, limit=-1)
+        assert len(got) == 0
+    with pytest.raises(ValueError, match="分组"):
+        await backend.servant.range(slot_ref, "level", 0, 10)
+    with pytest.raises(ValueError, match="分组"):
+        backend.servant.check_range_(slot_ref, "level", 0, 10, 10, False)
+
+
+async def test_kwargs_matching_two_indexes(new_component_env, mod_auto_backend):
+    """a 按 b 分组、b 又按 a 分组时，get(a=, b=) 两个都能匹配，要用位置参数写法指定"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class Cross(BaseComponent):
+        a: np.int32 = property_field(0, groupby="b")
+        b: np.int32 = property_field(0, groupby="a")
+
+    backend: Backend = mod_auto_backend()
+    create_ref(Cross, backend)
+    row = Cross.new_row()
+    row.a, row.b = 1, 2
+    await _insert(backend, Cross, row)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(Cross)
+        with pytest.raises(ValueError, match="同时匹配"):
+            await repo.get(a=1, b=2)
+        assert (await repo.get("a", 1, _group={"b": 2})).id == row.id
+        assert (await repo.get("b", 2, _group={"a": 1})).id == row.id
+
+
+# ---------------------------------------------------------------- 写入
+
+
+async def test_update_group_moves_index(slot_ref, mod_auto_backend):
+    """改分组列：行从旧组搬到新组，索引里只留新位置；只改不在索引里的列不动索引"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _slot(comp, zone=1, level=7))
+    before = raw_index_members(backend, slot_ref, "level")
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=row_id)
+        row.qty = 5
+        await repo.update(row)
+    assert raw_index_members(backend, slot_ref, "level") == before
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=row_id)
+        row.zone = 2
+        await repo.update(row)
+    await backend.wait_for_synced()
+    assert len(raw_index_members(backend, slot_ref, "level")) == 1
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert len(await repo.range(level=(0, 100), zone=1, limit=-1)) == 0
+        assert list((await repo.range(level=(0, 100), zone=2, limit=-1)).id) == [row_id]
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert await repo.get(id=row_id) is not None
+        repo.delete(row_id)
+    assert raw_index_members(backend, slot_ref, "level") == []
+
+
+async def test_own_writes_within_group(slot_ref, mod_auto_backend):
+    """事务内：insert 进组、从别的组换进来、换出去、删掉，range 按本事务眼里的数据返回"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    stay, leave, joiner = await _insert(
+        backend,
+        comp,
+        _slot(comp, zone=1, level=10),
+        _slot(comp, zone=1, level=20),
+        _slot(comp, zone=2, level=15),
+    )
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        new = _slot(comp, zone=1, level=5)
+        await repo.insert(new)
+        row = await repo.get(id=leave)
+        row.zone = 2
+        await repo.update(row)
+        row = await repo.get(id=joiner)
+        row.zone = 1
+        await repo.update(row)
+        got = await repo.range(level=(0, 100), zone=1, limit=-1)
+        assert list(got.id) == [new.id, stay, joiner]
+        got = await repo.range(level=(0, 100), zone=1, limit=2, desc=True)
+        assert list(got.id) == [joiner, stay]
+        got = await repo.range(level=(0, 100), zone=2, limit=-1)
+        assert list(got.id) == [leave]
+        repo.delete(stay)
+        got = await repo.range(level=(0, 100), zone=1, limit=-1)
+        assert list(got.id) == [new.id, joiner]
+
+
+async def test_phantom_check_is_group_scoped(slot_ref, mod_auto_backend):
+    """防幻读的区间限定在组内：别的组插入不让本组的读竞态，本组插入照样竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _slot(comp, zone=1, level=10))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        rows = await repo.range(level=(0, 100), zone=1, limit=-1)
+        async with backend.session("pytest", 1) as other:
+            await other.using(comp).insert(_slot(comp, zone=2, level=50))
+        row = rows[0]
+        row.qty += 1
+        await repo.update(row)
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            rows = await repo.range(level=(0, 100), zone=1, limit=-1)
+            async with backend.session("pytest", 1) as other:
+                await other.using(comp).insert(_slot(comp, zone=1, level=50))
+            row = rows[0]
+            row.qty += 1
+            await repo.update(row)
+    assert row_id in rows.id
+
+
+async def test_unique_within_group(slot_ref, mod_auto_backend):
+    """组内唯一：不同组可以同值，同组同值 UniqueViolation；upsert、get 按 (组, 值)；读空后
+    被并发插入判竞态；negative cache 带着组，别的组不受影响"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    await _insert(
+        backend,
+        comp,
+        _slot(comp, server="s1", zone=1, name="x"),
+        _slot(comp, server="s1", zone=2, name="x"),
+        _slot(comp, server="s2", zone=1, name="x"),
+    )
+    with pytest.raises(UniqueViolation):
+        await _insert(backend, comp, _slot(comp, server="s1", zone=1, name="x"))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert (await repo.get(name="x", server="s1", zone=2)).zone == 2
+        # 读空登记 negative observation，只对这一组
+        assert await repo.get(name="y", server="s1", zone=1) is None
+        async with repo.upsert(name="y", server="s1", zone=1) as row:
+            row.qty = 9
+        assert (await repo.get(name="x", server="s2", zone=1)).server == "s2"
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        got = await repo.get(name="y", server="s1", zone=1)
+        assert (got.qty, got.server, got.zone) == (9, "s1", 1)
+        # upsert 命中已有行就更新
+        async with repo.upsert(name="y", server="s1", zone=1) as row:
+            row.qty = 10
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        assert (await session.using(comp).get(name="y", server="s1", zone=1)).qty == 10
+
+    # 读空之后被并发插入：基于过期快照的决定，判竞态（重试后会读到对方的行）
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            assert await repo.get(name="z", server="s1", zone=1) is None
+            async with backend.session("pytest", 1) as other:
+                await other.using(comp).insert(
+                    _slot(comp, server="s1", zone=1, name="z")
+                )
+            await repo.insert(_slot(comp, server="s1", zone=1, name="z"))
+
+    # 换组撞上新组里的同值
+    async with backend.session("pytest", 1) as session:
+        row = await session.using(comp).get(name="x", server="s2", zone=1)
+    with pytest.raises(UniqueViolation):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=row.id)
+            row.server = "s1"
+            await repo.update(row)
+
+
+async def test_unique_point_hit_checks_all_columns(slot_ref, mod_auto_backend):
+    """
+    unique 点查命中缓存的捷径要求数据库态在所有分组列上都相等：本事务把 R 从 (A,"x") 改到
+    (B,"x")，库里 B 组已有 S(B,"x")，查 (B,"x") 不能只返回 [R]
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    r_id, s_id = await _insert(
+        backend,
+        comp,
+        _slot(comp, server="s1", zone=1, name="x"),
+        _slot(comp, server="s1", zone=2, name="x"),
+    )
+    with pytest.raises(UniqueViolation):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=r_id)
+            row.zone = 2
+            await repo.update(row)
+            got = await repo.range(name=("x", "x"), server="s1", zone=2, limit=-1)
+            assert sorted(got.id) == sorted([r_id, s_id])
+
+
+async def test_move_unique_value_within_group(slot_ref, mod_auto_backend):
+    """
+    同一事务里在组内的行之间挪 unique 值（设计稿 §5.6，单列的见 test_unique_move.py）：挪走
+    之后补位、借中间值互换都能提交；挪到别的行占着、这次又没挪走的值照样 UniqueViolation
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    a_id, b_id = await _insert(
+        backend, comp, _slot(comp, owner=7, slot=1), _slot(comp, owner=7, slot=2)
+    )
+    # 挪走之后补位
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=a_id)
+        row.slot = 3
+        await repo.update(row)
+        await repo.insert(_slot(comp, owner=7, slot=1))
+    # 借中间值互换
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        a, b = await repo.get(id=a_id), await repo.get(id=b_id)
+        a.slot = 99
+        await repo.update(a)
+        b.slot = 3
+        await repo.update(b)
+        a.slot = 2
+        await repo.update(a)
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert (await repo.get(id=a_id)).slot == 2
+        assert (await repo.get(id=b_id)).slot == 3
+    # 挪到别的行占着的值：B 没在本事务里，本地拦不住，提交时判冲突
+    with pytest.raises(UniqueViolation):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=a_id)
+            row.slot = 3
+            await repo.update(row)
+
+
+async def test_direct_set_rejects_index_columns(new_component_env, mod_auto_backend):
+    """direct_set 不许写任何索引列，复合索引的分组列也算：直接写会把索引写坏"""
+    backend: Backend = mod_auto_backend()
+    comp = def_buff()
+    ref = create_ref(comp, backend)
+    row = comp.new_row()
+    (row_id,) = await _insert(backend, comp, row)
+    master = backend.master
+    for field in ("zone", "level"):
+        with pytest.raises(ValueError, match="direct_set"):
+            await master.direct_set(ref, row_id, **{field: "3"})
+    assert await master.direct_set(ref, row_id, hp="3")
+
+
+async def test_group_channel_and_commit(slot_ref, mod_auto_backend):
+    """
+    point_sub 的复合索引按组发频道：insert 进组、改本字段、换组发新组的频道，只改别的列、
+    delete 不发。值频道 / 组频道的接口互相拒绝对方的索引
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    master = backend.master
+    chan1 = master.index_group_channel(slot_ref, "level", {"zone": 1})
+    chan2 = master.index_group_channel(slot_ref, "level", {"zone": 2})
+    assert chan1 != chan2
+    with pytest.raises(ValueError, match="index_group_channel"):
+        master.index_value_channel(slot_ref, "level", 3)
+    with pytest.raises(ValueError, match="point_sub"):
+        master.index_group_channel(slot_ref, "name", {"server": "s", "zone": 1})
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class Solo(BaseComponent):
+        owner: np.int64 = property_field(0, point_sub=True)
+
+    with pytest.raises(ValueError, match="不是复合索引"):
+        master.index_group_channel(
+            TableReference(Solo, "pytest", 1), "owner", {"zone": 1}
+        )
+
+    captured: list[list[str]] = []
+    original = master.build_commit_payload_
+
+    def capture(idmap):
+        keys, payload = original(idmap)
+        captured.append([c if isinstance(c, str) else c.decode() for c in payload[4]])
+        return keys, payload
+
+    master.build_commit_payload_ = capture  # type: ignore
+    try:
+        (row_id,) = await _insert(backend, comp, _slot(comp, zone=1, level=1))
+        assert captured[-1] == [chan1]
+        for change, expect in (
+            ({"level": 2}, [chan1]),
+            ({"zone": 2}, [chan2]),
+            ({"qty": 3}, []),
+        ):
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                for key, value in change.items():
+                    row[key] = value
+                await repo.update(row)
+            assert captured[-1] == expect, change
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            await repo.get(id=row_id)
+            repo.delete(row_id)
+        assert captured[-1] == []
+    finally:
+        del master.build_commit_payload_
+
+
+# ---------------------------------------------------------------- 维护
+
+
+async def test_rebuild_index_composite(slot_ref, mod_auto_backend):
+    """
+    重建出的复合索引 member 与 commit 写入的一致；重建遇到组内 unique 冲突报错，所有索引都
+    保留旧的（Redis 分两阶段：全部建好、检查通过才统一换）
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    a_id, b_id = await _insert(
+        backend,
+        comp,
+        _slot(comp, owner=1, zone=1, level=5, slot=1, server="s"),
+        _slot(comp, owner=1, zone=2, level=6, slot=2, server="s"),
+    )
+    maint = backend.get_table_maintenance()
+    before = {
+        name: raw_index_members(backend, slot_ref, name) for name in comp.indexes_
+    }
+    assert maint.do_rebuild_index_(slot_ref) == 2
+    for name in comp.indexes_:
+        assert raw_index_members(backend, slot_ref, name) == before[name], name
+
+    # level 改了值（重建的话 level 索引会变），slot 造出组内重复：重建失败，level 也不换
+    raw_hset(backend, slot_ref, a_id, level="50")
+    raw_hset(backend, slot_ref, b_id, slot="1")
+    with pytest.raises(RuntimeError, match="unique"):
+        maint.do_rebuild_index_(slot_ref)
+    for name in comp.indexes_:
+        assert raw_index_members(backend, slot_ref, name) == before[name], name
+
+
+async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
+    """
+    只给已有索引加 groupby（dtype 不变，迁移走 skip 路径）：indexes_ / uniques_ 都不变，也要
+    重建索引，否则库里留着单列格式的 member、按组查不到
+    """
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    @define_component(namespace="pytest", permission=Permission.OWNER, table_sub=True)
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
+        model: np.float32 = property_field(0, unique=False, index=True)
+        qty: np.int16 = property_field(1, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True, groupby="owner")
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed, filled_item_ref.instance_name, filled_item_ref.cluster_id, backend
+    )
+    maint = backend.get_table_maintenance()
+    status, old_meta = maint.check_table(new_table)
+    assert status == "schema_mismatch"
+    assert maint.migration_schema(tmp_path / "test.py", new_table, old_meta)
+    assert maint.check_table(new_table)[0] == "ok"
+
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(renamed)
+        assert (await repo.get(time=111, owner=10)).name == "Itm11"
+        got = await repo.range(time=(0, 1000), owner=10, limit=-1)
+        assert len(got) == 25
+        assert len(await repo.range(time=(0, 1000), owner=11, limit=-1)) == 0
+        with pytest.raises(ValueError, match="分组"):
+            await repo.range(time=(0, 1000))
+
+
+def test_headless_schema_diff_groupby(new_component_env):
+    """headless 的 schema 比对要比 groupby：对不上时 headless 的 commit 会把索引写坏"""
+    from hetu import headless
+    from hetu.data import BaseComponent
+
+    comp = def_slot()
+    data = json.loads(comp.json_)
+    data["properties"]["owner"]["groupby"] = ["zone"]
+    local = BaseComponent.load_json(json.dumps(data))
+    errors, _warns = headless._schema_diff(local, comp.json_)
+    assert errors == ["~ col owner.groupby: False -> ['zone']"]
+    errors, _warns = headless._schema_diff(comp, comp.json_)
+    assert errors == []

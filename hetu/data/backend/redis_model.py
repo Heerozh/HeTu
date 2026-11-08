@@ -13,7 +13,7 @@ SQLite 用 sqlite3 与它的 Python 版（`sqlite/commit.py`）。
 
 import itertools
 import random
-from collections.abc import Awaitable, Iterable, Sequence
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload, override
 
 # from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
@@ -30,12 +30,16 @@ from .base import (
     detach_rows_,
     exact_number_,
     from_sortable_bytes,
+    group_prefix_,
+    index_value_bytes_,
+    index_value_bytes_list_,
     inverted_bounds_error_,
     normalize_int_bounds_,
     peel_bound_,
+    resolve_group_,
+    row_group_prefix_,
     sortable_token,
     to_sortable_bytes,
-    to_sortable_bytes_list,
 )
 from .idmap import RangeObservation
 
@@ -72,28 +76,36 @@ class RedisModelClient(BackendClient):
         return list(SystemClusters().get_components())
 
     def _schema_checking(self, components: Iterable[type[BaseComponent]] | None = None):
-        """检查Component的schema定义，确保索引字段能编码成可排序的字节"""
+        """
+        检查Component的schema定义，确保索引字段能编码成可排序的字节。按 dtype.kind 白名单查：
+        索引字段只能是整数、浮点、str、bytes，复合索引的分组列只能是整数、str、bytes。黑名单
+        漏掉的类型（datetime64 / timedelta64）要到 commit 写索引时才崩
+        """
         if components is None:
             components = self._get_referred_components()
         for comp_cls in components:
-            for field in comp_cls.indexes_:
-                dtype = comp_cls.dtype_map_[field]
-                # 索引不支持复数
-                if np.issubdtype(dtype, np.complexfloating):
-                    raise ValueError(
-                        _(
-                            "Component `{comp_name}` 的索引字段`{field}`"
-                            "使用了复数，Redis后端不支持此类型作为索引字段"
-                        ).format(comp_name=comp_cls.name_, field=field)
-                    )
-                # 其他类型不支持索引
-                elif np.issubdtype(dtype, np.object_):
-                    raise ValueError(
-                        _(
-                            "Component `{comp_name}` 的索引字段`{field}`"
-                            "使用了不可用的类型 `{dtype}`，此类型不支持索引"
-                        ).format(comp_name=comp_cls.name_, field=field, dtype=dtype)
-                    )
+            for index_name, groups in comp_cls.index_groups_.items():
+                for field, kinds in (
+                    *((col, "iuUS") for col in groups),
+                    (index_name, "iufUS"),
+                ):
+                    dtype = comp_cls.dtype_map_[field]
+                    # 索引不支持复数
+                    if np.issubdtype(dtype, np.complexfloating):
+                        raise ValueError(
+                            _(
+                                "Component `{comp_name}` 的索引字段`{field}`"
+                                "使用了复数，Redis后端不支持此类型作为索引字段"
+                            ).format(comp_name=comp_cls.name_, field=field)
+                        )
+                    # 其他类型不支持索引
+                    elif dtype.kind not in kinds:
+                        raise ValueError(
+                            _(
+                                "Component `{comp_name}` 的索引字段`{field}`"
+                                "使用了不可用的类型 `{dtype}`，此类型不支持索引"
+                            ).format(comp_name=comp_cls.name_, field=field, dtype=dtype)
+                        )
 
     # ============ key 与频道 ============
 
@@ -153,9 +165,38 @@ class RedisModelClient(BackendClient):
         routes it by slot.
         """
         self.require_point_sub_(table_ref, index_name)
-        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        comp_cls = table_ref.comp_cls
+        if comp_cls.index_groups_.get(index_name):
+            # commit 只给复合索引发组频道：算出来的值频道永远没人发，订阅方会静默收不到通知
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 是复合索引，没有值频道，请用 "
+                    "index_group_channel"
+                ).format(comp_name=comp_cls.name_, index_name=index_name)
+            )
+        dtype = comp_cls.dtype_map_[index_name]
         return self.value_channel_(
             self.index_key(table_ref, index_name), to_sortable_bytes(dtype.type(value))
+        )
+
+    @override
+    def index_group_channel(
+        self, table_ref: TableReference, index_name: str, group: Mapping[str, Any]
+    ) -> str:
+        """见基类。频道名是索引 key 加组前缀 P 的 token，与 commit 发组频道时一致"""
+        self.require_point_sub_(table_ref, index_name)
+        comp_cls = table_ref.comp_cls
+        if not comp_cls.index_groups_.get(index_name):
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 不是复合索引，没有组频道，请用 "
+                    "index_value_channel"
+                ).format(comp_name=comp_cls.name_, index_name=index_name)
+            )
+        values = resolve_group_(comp_cls, index_name, group)
+        return self.value_channel_(
+            self.index_key(table_ref, index_name),
+            group_prefix_(comp_cls, index_name, values),
         )
 
     @override
@@ -257,9 +298,11 @@ class RedisModelClient(BackendClient):
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None,
         desc: bool,
+        prefix: bytes = b"",
     ) -> tuple[bytes, bytes]:
         """
         规范化范围查询的边界，返回 ZRANGE BYLEX 的两端，按扫描顺序排（desc 时上界在前）。
+        prefix 是复合索引的组前缀 P（见 `group_prefix_`），加在两端值的前面，单列索引为空。
 
         left / right 是 (下界, 上界)，desc 时也一样；下界大于上界多半是传反了，报 ValueError。
         整数索引按区间的数学含义收成闭区间（见 `normalize_int_bounds_`），越界、小数照常查。
@@ -306,9 +349,22 @@ class RedisModelClient(BackendClient):
 
         # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
         # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)
-        b_lower = b"[" + lower_value + (b"\x00" if li else b"\x00\xff")
-        b_upper = b"[" + upper_value + (b"\x00\xff" if ui else b"\x00")
+        b_lower = b"[" + prefix + lower_value + (b"\x00" if li else b"\x00\xff")
+        b_upper = b"[" + prefix + upper_value + (b"\x00\xff" if ui else b"\x00")
         return (b_upper, b_lower) if desc else (b_lower, b_upper)
+
+    @staticmethod
+    def group_prefix_of_(
+        table_ref: TableReference, index_name: str, group: Mapping[str, Any] | None
+    ) -> bytes:
+        """
+        内部方法：查询给的分组值 → 组前缀 P，单列索引为 b""。复合索引没给、少给、多给分组值，
+        单列索引给了分组值，都抛 ValueError：所有按索引查询的路径都经过这里，入口漏了校验也不会
+        用空前缀去查、读到别的组的 member
+        """
+        comp_cls = table_ref.comp_cls
+        values = resolve_group_(comp_cls, index_name, group)
+        return group_prefix_(comp_cls, index_name, values) if values else b""
 
     @staticmethod
     def make_zrange_cmd_(b_left, b_right, desc, limit):
@@ -330,17 +386,20 @@ class RedisModelClient(BackendClient):
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None,
         desc: bool,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[str, bytes, bytes, bool]:
         """
         按索引区间查询要用的：索引 key、ZRANGE BYLEX 的两端（按扫描顺序），以及区间是否为空
-        （两端交叉或相等；传反的已在 `range_normalize_` 里报错）。空区间不用去查。
+        （两端交叉或相等；传反的已在 `range_normalize_` 里报错）。空区间不用去查。复合索引的
+        两端都带着 group 的组前缀，只查这一组。
         """
         idx_key = cls.index_key(table_ref, index_name)
         comp_cls = table_ref.comp_cls
         if index_name not in comp_cls.indexes_:
             raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
+        prefix = cls.group_prefix_of_(table_ref, index_name, group)
         b_left, b_right = cls.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, desc
+            comp_cls.dtype_map_[index_name], left, right, desc, prefix
         )
         empty = (b_left <= b_right) if desc else (b_right <= b_left)
         return idx_key, b_left, b_right, empty
@@ -397,10 +456,11 @@ class RedisModelClient(BackendClient):
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[list[bytes], bytes, bytes]:
         """按索引区间 ZRANGE，返回原样 member（value\\x00id）与规范化后的两个边界"""
         idx_key, b_left, b_right, empty = self.zrange_args_(
-            table_ref, index_name, left, right, desc
+            table_ref, index_name, left, right, desc, group
         )
         # 两端交叉或相等就是空区间（传反的已在 range_normalize_ 里报错），不用去查
         if empty:
@@ -417,10 +477,12 @@ class RedisModelClient(BackendClient):
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> None:
-        """校验 range 查询的参数（limit、索引存在、边界合法），见基类"""
+        """校验 range 查询的参数（limit、索引存在、边界与分组值合法），见基类"""
         super().check_range_(table_ref, index_name, left, right, limit, desc)
-        self.zrange_args_(table_ref, index_name, left, right, desc)
+        self.zrange_args_(table_ref, index_name, left, right, desc, group)
 
     @override
     async def get_many(
@@ -463,6 +525,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray: ...
     @overload
     async def range(
@@ -474,6 +538,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, str]]: ...
     @overload
     async def range(
@@ -485,6 +551,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...
     @overload
     async def range(
@@ -496,6 +564,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]: ...
     @overload
     async def range(
@@ -507,6 +577,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format: RowFormat = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
     @override
     async def range(
@@ -518,6 +590,8 @@ class RedisModelClient(BackendClient):
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int] | list[dict[str, Any]] | np.recarray:
         """
         从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
@@ -538,6 +612,8 @@ class RedisModelClient(BackendClient):
             是否降序排列
         row_format
             返回数据解码格式，见 "Returns"
+        group: Mapping[str, Any] | None
+            复合索引（groupby）的分组值 {分组列: 值}，必须正好给出全部分组列；单列索引不能给。
 
         Returns
         -------
@@ -560,7 +636,8 @@ class RedisModelClient(BackendClient):
         先查索引拿 id，再批量读行，两次之间行可能被删改（读不到的行跳过）。
 
         如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
+        "某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`），查询时给出
+        `group`。其他组合条件，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
             items = client.range(ref, "owner", player_id, limit=100)
             few_items = items[items.amount < 10]
@@ -568,7 +645,7 @@ class RedisModelClient(BackendClient):
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
         members, _b_left, _b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
+            table_ref, index_name, left, right, limit, desc, group
         )
         row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
 
@@ -593,17 +670,20 @@ class RedisModelClient(BackendClient):
         right: int | float | str | bytes | bool | None = None,
         limit: int = 10,
         desc: bool = False,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[tuple[Any, int]]:
-        """见基类"""
+        """见基类。复合索引的值段是组前缀 P 加本字段的编码，去掉 P 再还原"""
         members, _b_left, _b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
+            table_ref, index_name, left, right, limit, desc, group
         )
         dtype = table_ref.comp_cls.dtype_map_[index_name]
+        skip = len(self.group_prefix_of_(table_ref, index_name, group))
         result = []
         for member in members:
             # member 是 value\x00id，row_id 不含 0x00，最后一个 0x00 就是终止符
             value, _sep, row_id = member.rpartition(b"\x00")
-            result.append((from_sortable_bytes(dtype, value), int(row_id)))
+            result.append((from_sortable_bytes(dtype, value[skip:]), int(row_id)))
         return result
 
     @override
@@ -615,10 +695,12 @@ class RedisModelClient(BackendClient):
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[list[int], RangeObservation]:
         """见基类"""
         members, b_left, b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
+            table_ref, index_name, left, right, limit, desc, group
         )
         return self.range_observation_(
             index_name, members, b_left, b_right, limit, desc
@@ -628,8 +710,11 @@ class RedisModelClient(BackendClient):
     def index_sort_keys_(
         self, table_ref: TableReference, index_name: str, rows: np.ndarray
     ) -> list[bytes]:
-        """见基类。排序键就是索引 member：值的编码 + 0x00 + 十进制 id，与 commit 写索引时一致"""
-        values = to_sortable_bytes_list(rows[index_name])
+        """
+        见基类。排序键就是索引 member：值段（复合索引是组前缀加本字段的编码）+ 0x00 + 十进制 id，
+        与 commit 写索引时一致
+        """
+        values = index_value_bytes_list_(table_ref.comp_cls, index_name, rows)
         return [
             value + b"\x00" + b"%d" % row_id
             for value, row_id in zip(values, rows["id"].tolist())
@@ -642,10 +727,16 @@ class RedisModelClient(BackendClient):
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[bytes, bytes]:
         """见基类。ZRANGE 的两端都是 "[" 开头的闭区间，去掉 "[" 就是排序键的闭区间"""
         lo, hi = self.range_normalize_(
-            table_ref.comp_cls.dtype_map_[index_name], left, right, False
+            table_ref.comp_cls.dtype_map_[index_name],
+            left,
+            right,
+            False,
+            self.group_prefix_of_(table_ref, index_name, group),
         )
         return lo[1:], hi[1:]
 
@@ -692,7 +783,6 @@ class RedisModelClient(BackendClient):
             # 读都带着之前删掉的整段前缀）
             checked: set[tuple[str, bytes]] = set()
             for obs in observations:
-                dtype = comp_cls.dtype_map_[obs.index_name]
                 for row_id, member in zip(obs.ids, obs.members):
                     if (obs.index_name, member) in checked:
                         continue
@@ -700,7 +790,9 @@ class RedisModelClient(BackendClient):
                     row = idmap.db_row(ref, row_id)
                     if row is None:
                         continue
-                    value = to_sortable_bytes(dtype.type(row[obs.index_name]))
+                    # 按整个值段比：复合索引只比本字段的话，读取期间被挪到别的组（本字段没变）
+                    # 的行会被放过
+                    value = index_value_bytes_(comp_cls, obs.index_name, row)
                     if value != member.rsplit(b"\x00", 1)[0]:
                         raise InconsistentRangeRead(
                             comp_cls.name_, obs.index_name, row_id
@@ -778,34 +870,32 @@ class RedisModelClient(BackendClient):
             """添加version match的检查，恒为竞态类"""
             race_checks.append(["VER", _key, _old_version])
 
-        def _unique_meet(
-            _unique_fields,
-            _dtype_map,
-            _idx_prefix,
-            _row: dict[str, str | bytes],
-            _absent: set[str],
-            _comp_name: str,
-            _row_id: str,
-            _op: str,
-        ):
-            """添加unique索引检查；_absent 内的列冲突判竞态(RACE)，其余判确定性冲突(UNIQUE)"""
-            for _field, _value in _row.items():
-                if _field in _unique_fields:
-                    _idx_key = _idx_prefix + _field
-                    _sortable_value = to_sortable_bytes(_dtype_map[_field].type(_value))
-                    _start_val = b"[" + _sortable_value + b"\x00"
-                    _end_val = b"[" + _sortable_value + b"\x00\xff"
-                    _race = _field in _absent
-                    (race_checks if _race else strict_checks).append(
-                        [
-                            "UNIQ",
-                            _idx_key,
-                            _start_val,
-                            _end_val,
-                            "RACE" if _race else "UNIQUE",
-                            f"{_comp_name}.{_field} id={_row_id} {_op}",
-                        ]
-                    )
+        def _unique_meet(_idx_key: str, _value: bytes, _race: bool, _label: str):
+            """
+            添加unique索引检查：_value 是索引值段（复合索引带组前缀），这个值上已有别的行即冲突。
+            _race 表示本事务曾观察该值不存在，冲突判竞态(RACE)，否则判确定性冲突(UNIQUE)
+            """
+            (race_checks if _race else strict_checks).append(
+                [
+                    "UNIQ",
+                    _idx_key,
+                    b"[" + _value + b"\x00",
+                    b"[" + _value + b"\x00\xff",
+                    "RACE" if _race else "UNIQUE",
+                    _label,
+                ]
+            )
+
+        def _enter_channel(_comp_cls, _index_name: str, _idx_key: str, _row, _value):
+            """
+            point_sub 索引登记"进入"的频道（insert 的值、update 后的新值）：单列索引是值频道，
+            复合索引是组频道（组前缀）。离开（delete、改走）由订阅者订着的行频道发现，不用发。
+            同一频道一个事务只发一条
+            """
+            if _index_name in _comp_cls.point_subs_:
+                if _comp_cls.index_groups_[_index_name]:
+                    _value = row_group_prefix_(_comp_cls, _index_name, _row)
+                value_chans[self.value_channel_(_idx_key, _value)] = None
 
         def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
             """添加hset的push命令"""
@@ -817,33 +907,6 @@ class RedisModelClient(BackendClient):
             # 组合hset, 别忘记写_version
             _kvs = itertools.chain.from_iterable(_update.items())
             pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
-
-        def _exc_index(
-            _indexes, _point_subs, _dtype_map, _idx_prefix, _old, _new, _add
-        ):
-            """exchange index(zadd/zrem)的push命令"""
-            _b_row_id = _old["id"].encode("ascii")
-            _values = _new if _add else _old
-            for _field in _new:
-                if _field in _indexes:
-                    _idx_key = _idx_prefix + _field
-                    # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                    _sortable_value = to_sortable_bytes(
-                        _dtype_map[_field].type(_values[_field])
-                    )
-                    # 值频道只给声明了 point_sub 的索引、只记"进入"（insert 的值、update 的
-                    # 新值）：离开（delete、改走）由订阅者订着的行频道发现，不用发。
-                    # 同一 (索引, 值) 一个事务只发一条
-                    if _add and _field in _point_subs:
-                        value_chans[self.value_channel_(_idx_key, _sortable_value)] = (
-                            None
-                        )
-                    _member = _sortable_value + b"\x00" + _b_row_id
-                    if _add:
-                        # score统一用0，因为我们不需要score排序功能
-                        pushes.append(["ZADD", _idx_key, "0", _member])
-                    else:
-                        pushes.append(["ZREM", _idx_key, _member])
 
         def _del_key(_key):
             """添加del的push命令"""
@@ -885,10 +948,17 @@ class RedisModelClient(BackendClient):
             comp_cls = ref.comp_cls
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
-            point_subs = comp_cls.point_subs_
-            dtype_map = comp_cls.dtype_map_
+            column_indexes = comp_cls.column_indexes_
             comp_name = comp_cls.name_
             absent_rows = absent_by_ref.get(ref, {})
+            # 冲突信息里的索引名，复合索引带上分组列
+            labels = {
+                name: f"{comp_name}.{name}"
+                + (f"({','.join(groups)})" if groups else "")
+                for name, groups in comp_cls.index_groups_.items()
+            }
+            # 索引全部转换为bytes索引（score统一用0，不需要score排序），测试下来lex和score
+            # 排序性能是一样的。member 是值段 + 0x00 + 十进制 id，值段见 index_value_bytes_
             # insert
             for insert in inserts:
                 row_id = str(insert["id"])
@@ -897,54 +967,78 @@ class RedisModelClient(BackendClient):
                 _key_must_not_exist(
                     key, "id" in absent, f"{comp_name}.id id={row_id} insert"
                 )
-                _unique_meet(
-                    unique_fields,
-                    dtype_map,
-                    idx_prefix,
-                    insert,
-                    absent,
-                    comp_name,
-                    row_id,
-                    "insert",
-                )
+                values = {
+                    name: index_value_bytes_(comp_cls, name, insert) for name in indexes
+                }
+                for name, value in values.items():
+                    if name in unique_fields:
+                        _unique_meet(
+                            idx_prefix + name,
+                            value,
+                            name in absent,
+                            f"{labels[name]} id={row_id} insert",
+                        )
                 # 版本号随机起步（见 FIRST_VERSION_SPAN）
                 _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, insert, insert, True
-                )
-            # update
+                b_row_id = row_id.encode("ascii")
+                for name, value in values.items():
+                    idx_key = idx_prefix + name
+                    _enter_channel(comp_cls, name, idx_key, insert, value)
+                    pushes.append(["ZADD", idx_key, "0", value + b"\x00" + b_row_id])
+            # update：new_row 只含改了的字段。受影响的索引是改动列用到的索引（复合索引改了
+            # 分组列也算），值段变了才写：ZREM 旧 member、ZADD 新 member、unique 查新值。按值段
+            # 判断而不是按字段判断，NaN 变号这种编码不变的改动不会撞上自己
             for old_row, new_row in zip(old_rows, new_rows):
                 row_id = str(old_row["id"])
                 key = id_prefix + row_id
                 old_version = old_row["_version"]
                 _version_must_match(key, old_version)
-                _unique_meet(
-                    unique_fields,
-                    dtype_map,
-                    idx_prefix,
-                    new_row,
-                    absent_rows.get(int(row_id), set()),
-                    comp_name,
-                    row_id,
-                    "update",
-                )
+                touched = {
+                    name for col in new_row for name in column_indexes.get(col, ())
+                }
+                merged = {**old_row, **new_row}
+                changes = []
+                for name in indexes:
+                    if name in touched:
+                        old_value = index_value_bytes_(comp_cls, name, old_row)
+                        new_value = index_value_bytes_(comp_cls, name, merged)
+                        if old_value != new_value:
+                            changes.append((name, old_value, new_value))
+                absent = absent_rows.get(int(row_id), set())
+                for name, _old_value, new_value in changes:
+                    if name in unique_fields:
+                        _unique_meet(
+                            idx_prefix + name,
+                            new_value,
+                            name in absent,
+                            f"{labels[name]} id={row_id} update",
+                        )
                 _hset_key(key, old_version, new_row)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, False
-                )
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, True
-                )
-            # delete
+                b_row_id = row_id.encode("ascii")
+                for name, old_value, _new_value in changes:
+                    pushes.append(
+                        ["ZREM", idx_prefix + name, old_value + b"\x00" + b_row_id]
+                    )
+                for name, _old_value, new_value in changes:
+                    idx_key = idx_prefix + name
+                    _enter_channel(comp_cls, name, idx_key, merged, new_value)
+                    pushes.append(
+                        ["ZADD", idx_key, "0", new_value + b"\x00" + b_row_id]
+                    )
+            # delete：按数据库里的原值清索引
             for delete in deletes:
                 # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
-                deleted[str(delete["id"])] = True
-                key = id_prefix + str(delete["id"])
+                row_id = str(delete["id"])
+                deleted[row_id] = True
+                key = id_prefix + row_id
                 old_version = delete["_version"]
                 _version_must_match(key, old_version)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, delete, delete, False
-                )
+                b_row_id = row_id.encode("ascii")
+                for name in indexes:
+                    value = index_value_bytes_(comp_cls, name, delete)
+                    pushes.append(
+                        ["ZREM", idx_prefix + name, value + b"\x00" + b_row_id]
+                    )
                 _del_key(key)
             # 变动的 row_id 只有表频道要用：没声明 table_sub 的组件（绝大多数）不收集
             if comp_cls.table_sub_:
@@ -1032,7 +1126,8 @@ class RedisModelClient(BackendClient):
         if not kwargs:
             raise ValueError(_("direct_set 至少要写一个字段"))
         for prop in kwargs:
-            if prop in table_ref.comp_cls.indexes_:
+            # 复合索引的分组列也是索引的一部分：直接写它会把复合索引写坏
+            if prop in table_ref.comp_cls.column_indexes_:
                 raise ValueError(
                     _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
                 )
@@ -1043,14 +1138,21 @@ class RedisModelClient(BackendClient):
                     )
                 )
 
-    @classmethod
+    @staticmethod
     def rebuild_member_(
-        cls, struct: np.record, field: str, raw: bytes, is_bytes: bool, row_id: bytes
+        comp_cls: type[BaseComponent],
+        index_name: str,
+        struct: np.record,
+        raws: Mapping[str, bytes],
+        row_id: bytes,
     ) -> bytes:
         """
         重建索引时，由行里存的原始字节算出索引 member：先按 dtype 转换再编码，与 commit 写索引时
-        一致。bytes 字段用原始字节（同 `rows_decode_`），decode 成 str 后非 ASCII 的塞不进 S 列。
-        `struct` 是调用方备好的一行，只拿来按 dtype 转值。
+        一致。raws 是该索引各列（复合索引含分组列）存的原始字节。bytes 字段用原始字节（同
+        `rows_decode_`），decode 成 str 后非 ASCII 的塞不进 S 列。`struct` 是调用方备好的一行，
+        只拿来按 dtype 转值。
         """
-        struct[field] = raw if is_bytes else raw.decode()
-        return cls.to_sortable_bytes(struct[field]) + b"\x00" + row_id
+        bytes_fields = comp_cls.bytes_fields_
+        for col, raw in raws.items():
+            struct[col] = raw if col in bytes_fields else raw.decode()
+        return index_value_bytes_(comp_cls, index_name, struct) + b"\x00" + row_id

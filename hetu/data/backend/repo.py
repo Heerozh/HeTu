@@ -5,15 +5,23 @@
 @email: heeroz@gmail.com
 """
 
+from collections.abc import Mapping
 from functools import partial
 from operator import itemgetter
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
 from ...i18n import _
-from .base import BackendClient, RowFormat, UniqueViolation
-from .idmap import LocalIndex, RangeObservation, RowState, changed_fields
+from .base import BackendClient, RowFormat, UniqueViolation, resolve_group_
+from .idmap import (
+    LocalIndex,
+    RangeObservation,
+    RowState,
+    changed_fields,
+    unique_key_of_query_,
+    unique_key_of_row_,
+)
 from .table import TableReference
 
 if TYPE_CHECKING:
@@ -49,6 +57,14 @@ def _to_py(value: IndexScalar) -> PyScalar:
     return value.item() if isinstance(value, np.generic) else value
 
 
+def _is_bounds(value: object) -> bool:
+    """
+    kwargs 写法里"字段=(下界, 上界)"的判定：两项的 tuple / list。str、bytes、np 标量都不算，
+    长度为 2 的 "s1"、b"ab" 是复合索引的分组值，不能被拆成区间
+    """
+    return isinstance(value, (tuple, list)) and len(value) == 2
+
+
 class SessionRepository:
     """从数据库查询数据并放入Session缓存，`System`的`ctx.repo[...]`返回的便是此类。"""
 
@@ -64,18 +80,32 @@ class SessionRepository:
         """获取所属的内部`Session`对象。"""
         return self._session
 
+    def _affected_uniques(self, fields: set[str]) -> set[str]:
+        """这些列改了会影响到的 unique 索引：复合 unique 索引改了分组列也算"""
+        comp_cls = self.ref.comp_cls
+        uniques = comp_cls.uniques_
+        column_indexes = comp_cls.column_indexes_
+        return {
+            name
+            for col in fields
+            for name in column_indexes.get(col, ())
+            if name in uniques
+        }
+
     def _local_has_unique_conflicts(self, row: np.record, fields: set) -> str | None:
         """
-        在Session本地缓存中检查Unique索引冲突。
+        在Session本地缓存中检查Unique索引冲突。fields 是 unique 索引名，复合 unique 索引按
+        本字段和所有分组列一起比（组内唯一）。
         """
         idmap = self._session.idmap
         ref = self.ref
+        index_groups = ref.comp_cls.index_groups_
         for unique_index in fields:
             if unique_index == "id":
                 # 主键不用查：调用方已用 _get_changed_fields 确认缓存里没有这个 id 的有效行
                 continue
-            value = row[unique_index]
-            rows = idmap.filter(ref, **{unique_index: value})
+            columns = (*index_groups[unique_index], unique_index)
+            rows = idmap.filter(ref, **{col: row[col] for col in columns})
             if len(rows) > 0:
                 return unique_index
         return None
@@ -89,8 +119,10 @@ class SessionRepository:
         session = self._session
         client = session.master_or_servant
         ref = self.ref
+        index_groups = ref.comp_cls.index_groups_
         for unique_index in fields:
             value: np.generic = row[unique_index]
+            group = {col: row[col].item() for col in index_groups[unique_index]}
             existing_row = await client.range(
                 ref,
                 unique_index,
@@ -99,6 +131,7 @@ class SessionRepository:
                 1,
                 False,
                 RowFormat.ID_LIST,
+                group=group or None,
             )
             if len(existing_row) > 0:
                 # 如果existing_row的id存在于mark_deleted中，则不算冲突
@@ -161,7 +194,7 @@ class SessionRepository:
                 "session中已存在该row id({row_id})，插入操作必须没有旧数据。"
             ).format(row_id=row.id)
 
-        changed_fields = changed_fields & self.ref.comp_cls.uniques_
+        changed_fields = self._affected_uniques(changed_fields)
 
         # 本地（同事务）冲突：确定性，非竞态
         if field := self._local_has_unique_conflicts(row, changed_fields):
@@ -169,8 +202,11 @@ class SessionRepository:
 
         # 远程冲突：优先判定「本事务曾观察其不存在」的列 → 竞态
         idmap = self._session.idmap
+        comp_cls = self.ref.comp_cls
         absent_fields = {
-            f for f in changed_fields if idmap.observed_absent(self.ref, f, row[f])
+            f
+            for f in changed_fields
+            if idmap.observed_absent(self.ref, f, unique_key_of_row_(comp_cls, f, row))
         }
         if field := await self.remote_has_unique_conflicts_(row, absent_fields):
             return field, True
@@ -202,10 +238,48 @@ class SessionRepository:
             self._session.idmap.add_clean(self.ref, row)
         return row
 
+    def _point_kwargs(
+        self, kwargs: dict[str, IndexScalar]
+    ) -> tuple[str, IndexScalar, dict[str, Any] | None]:
+        """
+        get / upsert 的 kwargs 写法 → (索引名, 查询值, 分组值)。只给一个 kwarg 就是单列写法（复合
+        索引漏了分组值由之后的 resolve_group_ 报错）；给了多个时，键集合要正好是某个索引的
+        {本字段} ∪ 分组列
+        """
+        if len(kwargs) == 1:
+            ((index_name, query_value),) = kwargs.items()
+            return index_name, query_value, None
+        comp_cls = self.ref.comp_cls
+        index_groups = comp_cls.index_groups_
+        keys = set(kwargs)
+        matched = [
+            name
+            for name in kwargs
+            if name in index_groups and keys == {name, *index_groups[name]}
+        ]
+        if not matched:
+            raise ValueError(
+                _(
+                    "{comp_name} 的查询条件 {keys} 对不上任何索引：要么只给一个有索引的字段，"
+                    "要么正好给出复合索引的本字段和全部分组列"
+                ).format(comp_name=comp_cls.name_, keys=sorted(keys))
+            )
+        if len(matched) > 1:
+            raise ValueError(
+                _(
+                    "{comp_name} 的查询条件 {keys} 同时匹配了 {matched} 几个索引，"
+                    "请用 index_name、_group 参数指定"
+                ).format(comp_name=comp_cls.name_, keys=sorted(keys), matched=matched)
+            )
+        index_name = matched[0]
+        group = {col: kwargs[col] for col in index_groups[index_name]}
+        return index_name, kwargs[index_name], group
+
     async def get(
         self,
         index_name: str | None = None,
         query_value: IndexScalar | None = None,
+        _group: Mapping[str, Any] | None = None,  # 参数前加_防止和用户字段冲突
         **kwargs: IndexScalar,
     ) -> np.record | None:
         """
@@ -225,8 +299,11 @@ class SessionRepository:
             辅助参数，如果不便使用kwargs参数时使用。
         query_value: IndexScalar | None
             辅助参数，如果不便使用kwargs参数时使用。
+        _group: Mapping[str, Any] | None
+            辅助参数，复合索引（groupby）的分组值 {分组列: 值}，配合 `index_name` 使用。
         kwargs: IndexScalar
-            查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须有索引。
+            查询字段和值，例如 `id=1234567890`。只能查询一个有索引的字段；复合索引要同时给出
+            全部分组列，例如 `get(name="abc", zone=3)`（组内查询）。
 
         Examples
         --------
@@ -241,9 +318,7 @@ class SessionRepository:
             返回 np.record (c-struct) 格式。
         """
         if index_name is None or query_value is None:
-            # 判断kwargs有且只有一个键值对
-            assert len(kwargs) == 1, "Only one field can be queried."
-            index_name, query_value = next(iter(kwargs.items()))
+            index_name, query_value, _group = self._point_kwargs(kwargs)
 
         comp_cls = self.ref.comp_cls
 
@@ -253,6 +328,8 @@ class SessionRepository:
                     comp_name=comp_cls.name_, index_name=index_name
                 )
             )
+        # 复合索引要正好给出全部分组列，单列索引不能给（不合法抛 ValueError）
+        group_values = resolve_group_(comp_cls, index_name, _group)
 
         idmap = self._session.idmap
         # 如果不是主键，直接用range方法
@@ -265,23 +342,36 @@ class SessionRepository:
             )
             if point is None:
                 value = query_value
-                rows = idmap.filter(self.ref, **{index_name: query_value})
+                rows = idmap.filter(
+                    self.ref,
+                    **{index_name: query_value},
+                    **dict(zip(comp_cls.index_groups_[index_name], group_values)),
+                )
             else:
                 value = point
-                rows = idmap.match(self.ref, index_name, point)
+                rows = idmap.match(self.ref, index_name, point, group_values)
             if rows is not None and len(rows) > 0:
                 return rows[0]
 
             # negative cache：本事务已观察过该值不存在，事务内可重复读，不再打远程
-            # （upsert 内部会再 get 一次锚定值，SystemLock 等流程因此省一次往返）
+            # （upsert 内部会再 get 一次锚定值，SystemLock 等流程因此省一次往返）。复合索引
+            # 的键带着分组值，别的组读空不算
             is_unique = index_name in comp_cls.uniques_
-            if is_unique and idmap.observed_absent(self.ref, index_name, value):
+            absent_key = unique_key_of_query_(value, group_values)
+            if is_unique and idmap.observed_absent(self.ref, index_name, absent_key):
                 return None
 
             # cache未命中，去数据库查询。本事务删掉的、改走了这个值的行由 _range_read 拿掉（多读
             # 几行补上），读空时也就读全了这个值，校验的是整个值上没有别的行
             rows, obs = await self._range_read(
-                index_name, _to_py(query_value), None, 1, False, own_rows=False
+                index_name,
+                _to_py(query_value),
+                None,
+                1,
+                False,
+                own_rows=False,
+                group=_group,
+                group_values=group_values,
             )
             # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值新行
             # 排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
@@ -292,7 +382,7 @@ class SessionRepository:
             # 等值查询unique列读空：登记negative observation，供commit判定竞态。数据库读空时
             # _range_read 已登记过；读到的都是本事务改走了的行时要在这里登记
             if is_unique:
-                idmap.mark_absent(self.ref, index_name, value)
+                idmap.mark_absent(self.ref, index_name, absent_key)
             return None
         else:
             row_id = int(query_value)
@@ -316,7 +406,8 @@ class SessionRepository:
         limit: int = 10,
         desc: bool = False,
         phantom_check: bool = True,
-        **kwargs: tuple[IndexScalar, IndexScalar],
+        _group: Mapping[str, Any] | None = None,
+        **kwargs: tuple[IndexScalar, IndexScalar] | IndexScalar,
     ) -> np.recarray:
         """
         从数据库查询索引，返回区间内数据，限制 `limit` 条。
@@ -344,8 +435,12 @@ class SessionRepository:
             辅助参数，如果不便使用kwargs参数时使用。
         _right: IndexScalar | None
             辅助参数，如果不便使用kwargs参数时使用。
+        _group: Mapping[str, Any] | None
+            辅助参数，复合索引（groupby）的分组值 {分组列: 值}，配合 `index_name` 使用。
         kwargs: IndexScalar
             查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
+            复合索引（groupby）要同时用等值给出全部分组列，例如 `range(level=(1, 10), zone=3)`，
+            结果只含这一组的行；区间之外的 kwarg 都是分组值。
             默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
             区间里没有值（比如两端都是开区间、值又相同）时返回空；下界大于上界报
             `ValueError`。
@@ -374,6 +469,7 @@ class SessionRepository:
         Notes
         -----
         如何复合条件查询？
+        "某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`）。其他组合条件，
         请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
             items = await session.using(Item).range(level=(10, 20), limit=100)
@@ -382,9 +478,20 @@ class SessionRepository:
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
         if index_name is None and _left is None:
-            # 判断kwargs有且只有一个键值对
-            assert len(kwargs) == 1, "Only one field can be queried."
-            index_name, (_left, _right) = next(iter(kwargs.items()))
+            # 恰好一个 字段=(下界, 上界)，其余 kwarg 是复合索引的分组值
+            ranged = [name for name, value in kwargs.items() if _is_bounds(value)]
+            if len(ranged) != 1:
+                raise ValueError(
+                    _(
+                        "range 的 kwargs 写法要有且只有一个 字段=(下界, 上界)，其余是复合索引"
+                        "的分组值，收到：{keys}"
+                    ).format(keys=sorted(kwargs))
+                )
+            index_name = ranged[0]
+            _left, _right = cast(tuple[IndexScalar, IndexScalar], kwargs[index_name])
+            _group = {
+                name: value for name, value in kwargs.items() if name != index_name
+            } or None
         else:
             assert index_name, _("不使用kwargs形式时，index_name不能为空")
             assert _left is not None, _("不使用kwargs形式时，left不能为空")
@@ -405,6 +512,8 @@ class SessionRepository:
                     comp_name=comp_cls.name_, index_name=index_name
                 )
             )
+        # 复合索引要正好给出全部分组列，单列索引不能给（不合法抛 ValueError）
+        group_values = resolve_group_(comp_cls, index_name, _group)
         # limit 先校验、换成 int，不然走哪条路（数据库、合并、点查命中）报的错不一样
         if type(limit) is bool or not isinstance(limit, (int, np.integer)):
             raise TypeError(
@@ -416,15 +525,25 @@ class SessionRepository:
         if limit == 0:
             # 一行都不要，不用去数据库；参数照样校验
             self._session.master_or_servant.check_range_(
-                self.ref, index_name, left, right, limit, desc
+                self.ref, index_name, left, right, limit, desc, group=_group
             )
             return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
         idmap = self._session.idmap
         if index_name in comp_cls.uniques_ and idmap.has_rows(self.ref):
-            hit = self._unique_point_hit(index_name, left, right, limit, desc)
+            hit = self._unique_point_hit(
+                index_name, left, right, limit, desc, _group, group_values
+            )
             if hit is not None:
                 return hit
-        rows, obs = await self._range_read(index_name, left, right, limit, desc)
+        rows, obs = await self._range_read(
+            index_name,
+            left,
+            right,
+            limit,
+            desc,
+            group=_group,
+            group_values=group_values,
+        )
         if phantom_check:
             idmap.add_range_observation(self.ref, obs)
         return rows
@@ -436,13 +555,16 @@ class SessionRepository:
         right: PyScalar | None,
         limit: int,
         desc: bool,
+        group: Mapping[str, Any] | None = None,
+        group_values: tuple = (),
     ) -> np.recarray | None:
         """
         unique 列点查：本事务从库里读过、这一列没改过的行就是结果，直接返回，不去数据库
         （同 get）；没有时返回 None。提交时这一行的 VER 加 unique 检查保证它仍是这个值上唯一
         的一行，不用登记区间观察。
         本事务写成这个值的行（insert 的、update 改成这个值的）不算：提交前它可能又离开这个值，
-        库里也可能本来就有同值的行，要去数据库读。
+        库里也可能本来就有同值的行，要去数据库读。复合 unique 索引的"这个值"是 (组, 值)：
+        数据库态在所有分组列上也要相等，换了组的行同样不算。
         """
         ref = self.ref
         dtype = ref.comp_cls.dtype_map_[index_name]
@@ -450,16 +572,19 @@ class SessionRepository:
         if point is None:
             return None
         idmap = self._session.idmap
-        hit = idmap.match(ref, index_name, point)
+        hit = idmap.match(ref, index_name, point, group_values)
         if hit is None:
             return None
+        groups = ref.comp_cls.index_groups_[index_name]
         for row_id in hit["id"].tolist():
             db_row = idmap.db_row(ref, row_id)
             if db_row is None or db_row[index_name] != point:
                 return None
+            if any(db_row[col] != value for col, value in zip(groups, group_values)):
+                return None
         # 参数错误（比如字符串列拿数字查）照样报，和去数据库时一样
         self._session.master_or_servant.check_range_(
-            ref, index_name, left, right, limit, desc
+            ref, index_name, left, right, limit, desc, group=group
         )
         if 0 < limit < len(hit):
             # 缓存里有两行是这个值，只会是先后读进来、中间被别的事务改过，提交时 VER 会判竞态
@@ -474,6 +599,8 @@ class SessionRepository:
         limit: int,
         desc: bool,
         own_rows: bool = True,
+        group: Mapping[str, Any] | None = None,
+        group_values: tuple = (),
     ) -> tuple[np.recarray, RangeObservation]:
         """
         range、get 读数据库的主体：读索引，按本事务的改动修正，截到 limit，取行、放入缓存，返回
@@ -491,6 +618,10 @@ class SessionRepository:
 
         取行和查索引用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对会把这种
         滞后误判成竞态。
+
+        复合索引：group 是原样的分组值（给后端查询），group_values 是 `resolve_group_` 规范化
+        后的（登记观察、negative observation 用）。排序键带着组前缀，本事务别的组的行落不进
+        这次查询的区间。
         """
         ref = self.ref
         comp_cls = ref.comp_cls
@@ -504,12 +635,12 @@ class SessionRepository:
         if local is not None and limit > 0 and local.moved:
             # 本事务删掉、改走的行在数据库索引里还占着原来的位置，在区间里的有几行就多读几行，
             # 剩下的才够 limit 行。多读的只是索引，取行只取看到的
-            read_limit += self._moved_in_range(local, index_name, left, right)
+            read_limit += self._moved_in_range(local, index_name, left, right, group)
             if read_limit > _MAX_LIMIT:
                 # limit 用很大的数表示不限（如 sys.maxsize），加上多读的就超出数据库能收的范围
                 read_limit = -1
         row_ids, obs = await client.range_read_(
-            ref, index_name, left, right, read_limit, desc
+            ref, index_name, left, right, read_limit, desc, group=group
         )
         # 等值点查的值（判定规则同订阅侧 point_query_value_），不是点查为 None
         point = BackendClient.point_query_value_(
@@ -517,9 +648,11 @@ class SessionRepository:
         )
         # unique 列读空时与 get 一样登记 negative observation，让"先 range 确认不存在再写"
         # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间里的值数不过来，由提交时
-        # 的区间校验管。
+        # 的区间校验管。复合索引的键带着分组值
         if not row_ids and point is not None and index_name in comp_cls.uniques_:
-            idmap.mark_absent(ref, index_name, point)
+            idmap.mark_absent(
+                ref, index_name, unique_key_of_query_(point, group_values)
+            )
 
         ids = row_ids
         if local is not None:
@@ -552,7 +685,13 @@ class SessionRepository:
                 idmap.add_clean(ref, fetched[0])
             elif len(fetched) > 1:
                 idmap.add_clean(ref, fetched)
-        obs.point = point
+        # 复合索引的点查值带着分组值（同 negative observation 的键），提交时据此判定 unique 点查
+        # 是否已由别的检查保证
+        obs.point = (
+            unique_key_of_query_(point, group_values)
+            if group_values and point is not None
+            else point
+        )
         obs.missing = missing
         if fetched is not None and len(miss_ids) == len(ids):
             # 全是读回的行：读回的这批就是结果。缓存存的是拷贝，返回值与缓存互不影响
@@ -587,6 +726,7 @@ class SessionRepository:
         index_name: str,
         left: PyScalar,
         right: PyScalar | None,
+        group: Mapping[str, Any] | None = None,
     ) -> int:
         """
         本事务删掉、改走的库里行里，原值落在这次查询区间里的有几行（数据库会读到它们）。行不多
@@ -595,7 +735,9 @@ class SessionRepository:
         if len(local.moved) <= _COUNT_ALL_MOVED_UPTO:
             return len(local.moved)
         client = self._session.master_or_servant
-        lo, hi = client.index_query_keys_(self.ref, index_name, left, right)
+        lo, hi = client.index_query_keys_(
+            self.ref, index_name, left, right, group=group
+        )
         sort_keys = partial(client.index_sort_keys_, self.ref, index_name)
         return local.moved_between(lo, hi, sort_keys)
 
@@ -641,7 +783,7 @@ class SessionRepository:
 
         # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
         if field := self._local_has_unique_conflicts(
-            row, changed_fields & self.ref.comp_cls.uniques_
+            row, self._affected_uniques(changed_fields)
         ):
             raise UniqueViolation(
                 f"Insert failed: row.{field} violates a unique index "
@@ -677,7 +819,7 @@ class SessionRepository:
 
         # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
         if field := self._local_has_unique_conflicts(
-            row, changed_fields & self.ref.comp_cls.uniques_
+            row, self._affected_uniques(changed_fields)
         ):
             raise UniqueViolation(
                 f"Update failed: row.{field} violates a unique index "
@@ -702,18 +844,20 @@ class SessionRepository:
         ----------
         kwargs: IndexScalar
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
+            组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
+            `upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
         """
-        # 判断kwargs有且只有一个键值对
-        assert len(kwargs) == 1, "Only one field can be queried."
-        index_name, query_value = next(iter(kwargs.items()))
+        index_name, query_value, group = self._point_kwargs(kwargs)
 
         # 检查index_name存在且为unique索引
         comp_cls = self.ref.comp_cls
         assert index_name in comp_cls.uniques_, _(
             "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
         ).format(comp_name=comp_cls.name_, index_name=index_name)
+        # 分组值当场校验（漏给、多给、值不合法都抛 ValueError），新行要写规范化后的值
+        group_values = resolve_group_(comp_cls, index_name, group)
 
-        return UpsertContext(self, index_name, query_value)
+        return UpsertContext(self, index_name, query_value, group, group_values)
 
     def delete(self, row_id: int) -> None:
         """
@@ -735,7 +879,12 @@ class UpsertContext:
     """用于在事务中执行UpdateOrInsert操作的上下文管理器。"""
 
     def __init__(
-        self, repo: SessionRepository, index_name: str, query_value: IndexScalar
+        self,
+        repo: SessionRepository,
+        index_name: str,
+        query_value: IndexScalar,
+        group: Mapping[str, Any] | None = None,
+        group_values: tuple = (),
     ) -> None:
         self.clean_data = None
         self.row_data = None
@@ -743,9 +892,14 @@ class UpsertContext:
         self.repo = repo
         self.index_name = index_name
         self.query_value = query_value
+        # 复合 unique 索引的分组值：原样的给 get 查询，规范化后的写进新行
+        self.group = group
+        self.group_values = group_values
 
     async def __aenter__(self) -> np.record:
-        existing_row = await self.repo.get(self.index_name, self.query_value)
+        existing_row = await self.repo.get(
+            self.index_name, self.query_value, _group=self.group
+        )
         if existing_row is not None:
             self.row_data = existing_row
             self.clean_data = existing_row.copy()
@@ -766,8 +920,13 @@ class UpsertContext:
                 )
             )
         else:
-            self.row_data = self.repo.ref.comp_cls.new_row()
+            comp_cls = self.repo.ref.comp_cls
+            self.row_data = comp_cls.new_row()
             self.row_data[self.index_name] = self.query_value
+            for col, value in zip(
+                comp_cls.index_groups_[self.index_name], self.group_values
+            ):
+                self.row_data[col] = value
             self.insert = True
         return self.row_data
 

@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from .base import index_value_bytes_, index_value_bytes_list_
+
 if TYPE_CHECKING:
+    from ..component import BaseComponent
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -51,7 +54,8 @@ class RangeObservation:
     # （排序键见 BackendClient.index_sort_keys_）。截断读的 bounds 会收窄，它不变：事务里
     # 的 range 按它挑出落在区间里的本事务的行；同一查询读了几次，后端按它归组去重
     query: tuple[bytes, bytes]
-    # 等值点查的值，否则 None
+    # 等值点查的值，否则 None。复合索引是 (分组值…, 值) 元组（见 unique_key_of_query_）：只在
+    # 本字段是点查时才有，组内区间查询仍是 None
     point: object | None = None
     # 取行时已读不到（ZRANGE 与取行之间被删）的 id
     missing: list[int] = field(default_factory=list)
@@ -189,6 +193,35 @@ def _id_positions(ids: np.ndarray, wanted: Collection[int]) -> list[int] | np.nd
         return np.isin(ids, list(wanted))
     wanted_set = wanted if isinstance(wanted, set) else set(wanted)
     return [i for i, row_id in enumerate(ids.tolist()) if row_id in wanted_set]
+
+
+def _norm(value: object) -> object:
+    """np 标量归一成 python 原生值（同 `IdentityMap._norm_value`）"""
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def unique_key_of_row_(
+    comp_cls: type[BaseComponent], index_name: str, row: np.record | np.void
+) -> object:
+    """
+    一行在 unique 索引上的值，negative observation（`mark_absent`）与本事务写入值的比较都用它：
+    单列索引是规范化后的值，复合索引是 (分组值…, 值) 元组。查询侧用 `unique_key_of_query_`，
+    两边得到同一种形式
+    """
+    value = _norm(row[index_name])
+    groups = comp_cls.index_groups_[index_name]
+    if not groups:
+        return value
+    return (*(_norm(row[col]) for col in groups), value)
+
+
+def unique_key_of_query_(value: object, group_values: tuple) -> object:
+    """
+    查询侧的 `unique_key_of_row_`：value 是本字段的点查值，group_values 是 `resolve_group_`
+    规范化后的分组值（单列索引为 ()）
+    """
+    value = _norm(value)
+    return (*group_values, value) if group_values else value
 
 
 def changed_fields(new: np.record, old: np.record) -> list[str]:
@@ -555,16 +588,18 @@ class IdentityMap:
                 if state == RowState.INSERT or state == RowState.UPDATE
             ]
             # 只查 absent 里出现过的 unique 列，通常 0~2 个
-            candidates = table_ref.comp_cls.uniques_ & {field for field, _ in absent}
+            comp_cls = table_ref.comp_cls
+            candidates = comp_cls.uniques_ & {field for field, _ in absent}
             if not dirty_ids or not candidates:
                 continue
             cache = self._row_cache[table_ref]
             rows_absent: dict[int, set[str]] = {}
             for row in cache[np.isin(cache["id"], dirty_ids)]:
+                # 复合索引的键是 (分组值…, 值)：只按本字段比的话，别的组读空也会算进来
                 fields = {
                     field
                     for field in candidates
-                    if (field, self._norm_value(row[field])) in absent
+                    if (field, unique_key_of_row_(comp_cls, field, row)) in absent
                 }
                 if fields:
                     rows_absent[int(row["id"])] = fields
@@ -673,16 +708,27 @@ class IdentityMap:
         return rows, index_of, miss_ids
 
     def match(
-        self, table_ref: TableReference, index_name: str, value: object
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        value: object,
+        group: tuple = (),
     ) -> np.recarray | None:
         """
         缓存里 `index_name == value` 的行（排除已删除的，拷贝），没有时返回 None。同 `filter`
-        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。
+        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。复合索引的 group 是
+        `resolve_group_` 规范化后的分组值，各分组列也要相等（分组列只有整数和字符串，numpy 的
+        `==` 与索引编码的相等一致，结尾的 `\\x00` 也忽略）。
         """
         cache = self._row_cache.get(table_ref)
         if cache is None or len(cache) == 0:
             return None
         mask = cache[index_name] == value
+        if group:
+            for col, group_value in zip(
+                table_ref.comp_cls.index_groups_[index_name], group
+            ):
+                mask &= cache[col] == group_value
         if not mask.any():
             return None
         if deleted := self._deleted.get(table_ref):
@@ -745,9 +791,19 @@ class IdentityMap:
             # 改了这一列的两边都放；没改的两边都不放：它在数据库结果里的位置不变，取行时
             # 拿到的就是缓存里的当前值
             rows = self._current_rows(table_ref, updated)
-            for row_id, value in zip(rows["id"].tolist(), rows[index_name]):
+            comp_cls = table_ref.comp_cls
+            if not comp_cls.index_groups_[index_name]:
+                for row_id, value in zip(rows["id"].tolist(), rows[index_name]):
+                    clean = clean_rows[row_id]
+                    if clean[index_name] != value:
+                        local.place(row_id)
+                        local.move(row_id, clean)
+                return
+            # 复合索引：分组列、本字段改了哪个都算，按值段（与 commit 写索引时同一个编码）比
+            values = index_value_bytes_list_(comp_cls, index_name, rows)
+            for row_id, value in zip(rows["id"].tolist(), values):
                 clean = clean_rows[row_id]
-                if clean[index_name] != value:
+                if index_value_bytes_(comp_cls, index_name, clean) != value:
                     local.place(row_id)
                     local.move(row_id, clean)
 
@@ -777,24 +833,30 @@ class IdentityMap:
         self, table_ref: TableReference, index_name: str
     ) -> tuple[set[object], set[object]]:
         """
-        本事务在该列上写入的值（insert 的值，update 改成的新值），以及删除的行的原值。
+        本事务在该列上写入的值（insert 的值，update 改成的新值），以及删除的行的原值。复合索引
+        的值是 (分组值…, 值) 元组（见 `unique_key_of_row_`）。
         """
         written: set[object] = set()
         deleted: set[object] = set()
         states = self._row_states.get(table_ref)
         if not states:
             return written, deleted
+        comp_cls = table_ref.comp_cls
         clean_rows = self._row_clean[table_ref]
         for row in self._row_cache[table_ref]:
             row_id = int(row["id"])
             state = states.get(row_id)
             clean = clean_rows.get(row_id)
-            clean_value = None if clean is None else self._norm_value(clean[index_name])
+            clean_value = (
+                None
+                if clean is None
+                else unique_key_of_row_(comp_cls, index_name, clean)
+            )
             if state == RowState.DELETE:
                 if clean is not None:
                     deleted.add(clean_value)
             elif state == RowState.INSERT or state == RowState.UPDATE:
-                value = self._norm_value(row[index_name])
+                value = unique_key_of_row_(comp_cls, index_name, row)
                 if value != clean_value:
                     written.add(value)
         return written, deleted
