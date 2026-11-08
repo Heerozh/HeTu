@@ -478,6 +478,46 @@ async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
             assert row.time == 4
 
 
+async def test_upsert_anchor_overflows_column(
+    item_ref, mod_auto_backend: Callable[..., Backend]
+):
+    """
+    str 列定宽，存进去会按列宽截断，查询值却不截断：超过列宽的锚定值新建的行拿原值永远查不到，
+    下次 upsert 又读空、去插入，撞上它报 UniqueViolation。所以要新建行时锚定值放不下就报
+    ValueError，什么都不写。列宽按字符数算，正好放满的照常
+    """
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    full, cjk = "abcdefgh", "一二三四五六七八"
+    assert comp.str_max_len("name") == len(full) == len(cjk)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="name"):
+            async with repo.upsert(name=full + "_alice") as row:
+                row.time = 1
+        async with repo.upsert(name=full) as row:
+            row.time = 2
+        async with repo.upsert(name=cjk) as row:
+            row.time = 3
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        # 截断后和已有的行同值：以前报的是莫名其妙的 UniqueViolation
+        for name in (full + "_bob", cjk + "九"):
+            with pytest.raises(ValueError, match="name"):
+                async with repo.upsert(name=name) as row:
+                    row.time = 4
+        async with repo.upsert(name=full) as row:
+            assert row.time == 2
+        async with repo.upsert(name=cjk) as row:
+            assert row.time == 3
+    rows = await backend.master.range(item_ref, "time", 1, 4)
+    assert sorted(rows.name.tolist()) == sorted([full, cjk])
+
+
 async def test_upsert_by_id_does_not_mint_snowflake(
     item_ref, mod_auto_backend: Callable[..., Backend]
 ):

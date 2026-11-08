@@ -253,6 +253,25 @@ async def test_bytes_trailing_nul_is_padding(blob_ref, mod_auto_backend):
     assert raw_index_members(backend, blob_ref, "tag") == [member]
 
 
+async def test_bytes_upsert_anchor_overflows_column(blob_ref, mod_auto_backend):
+    """
+    S 列和 str 列一样：要新建行时锚定值超过列宽就报 ValueError。结尾的 \\x00 是补齐，不算超过
+    """
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    full = b"x" * comp.str_max_len("tag")
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="tag"):
+            async with repo.upsert(tag=full + b"y") as row:
+                row.small = 1
+        async with repo.upsert(tag=full + b"\x00\x00") as row:
+            row.small = 2
+    await backend.wait_for_synced()
+    rows = await backend.servant.range(blob_ref, "tag", full)
+    assert [(r.tag, int(r.small)) for r in rows] == [(full, 2)]
+
+
 async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
     """重建索引（hetu upgrade 默认每次都做）按行数据重算的 member 要与 commit 写的逐字节
     一致：bytes 用真实字节，不是合法 UTF-8、非 ASCII 的值都不能让重建失败"""

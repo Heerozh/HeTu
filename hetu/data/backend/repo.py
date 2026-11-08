@@ -67,6 +67,22 @@ def _is_bounds(value: object) -> bool:
     return isinstance(value, (tuple, list)) and len(value) == 2
 
 
+def _overflows_column(comp_cls: type[BaseComponent], field: str, value: Any) -> bool:
+    """
+    str / bytes 值存进字符串列（U / S）会不会被截断。列宽按字符数（S 列是字节数），结尾的
+    `\\x00` 是补齐、本来就存不住，不算在内。别的类型的值、别的列都返回 False
+    """
+    if comp_cls.dtype_map_[field].kind not in "US":
+        return False
+    if isinstance(value, str):
+        value = value.rstrip("\x00")
+    elif isinstance(value, bytes):
+        value = value.rstrip(b"\x00")
+    else:
+        return False
+    return len(value) > comp_cls.str_max_len(field)
+
+
 class SessionRepository:
     """从数据库查询数据并放入Session缓存，`System`的`ctx.repo[...]`返回的便是此类。"""
 
@@ -887,6 +903,8 @@ class SessionRepository:
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
             组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
             `upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
+            字符串锚定值超过列宽时没有行能匹配，要新建行时抛 ValueError（存进去会被截断，之后
+            拿这个值查不到它）。
         """
         index_name, query_value, group = self._point_kwargs(kwargs, unique_only=True)
 
@@ -962,6 +980,20 @@ class UpsertContext:
             )
         else:
             comp_cls = self.repo.ref.comp_cls
+            # 字符串列存进去会按列宽截断，查询值却不截断：锚定值放不下的话，新行存的是截断后的
+            # 值，拿原值永远查不到它，下次 upsert 又读空、去插入，撞上这一行报 UniqueViolation
+            if _overflows_column(comp_cls, self.index_name, self.query_value):
+                raise ValueError(
+                    _(
+                        "upsert 的锚定值超过了 {comp_name}.{index_name} 的列宽 {max_len}："
+                        "{value}。新行存进去会被截断，之后拿这个值查不到它"
+                    ).format(
+                        comp_name=comp_cls.name_,
+                        index_name=self.index_name,
+                        max_len=comp_cls.str_max_len(self.index_name),
+                        value=repr(self.query_value),
+                    )
+                )
             self.row_data = comp_cls.new_row()
             self.row_data[self.index_name] = self.query_value
             for col, value in zip(
