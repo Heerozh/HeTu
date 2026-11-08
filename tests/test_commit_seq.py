@@ -4,6 +4,7 @@
 设计稿见 docs/superpowers/specs/2026-11-09-commit-seq-design.md。
 """
 
+import asyncio
 import itertools
 import json
 import logging
@@ -20,7 +21,7 @@ from fixtures.backends import (
 from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, TableReference, UniqueViolation
+from hetu.data.backend import Backend, RaceCondition, TableReference, UniqueViolation
 from hetu.data.backend.base import index_member_, to_sortable_bytes
 from hetu.data.backend.redis_model import RedisModelClient, msg_packer
 
@@ -887,3 +888,235 @@ def test_counter_key_depends_on_group_columns(new_component_env):
     key_guild = RedisModelClient.seq_counter_key_("p", by_guild, prefix)
     assert key_owner == f"p:seq:seq:owner:{prefix.hex()}"
     assert key_guild == f"p:seq:seq:guild:{prefix.hex()}"
+
+
+# ---------------------------------------------------------------- 并发与消费方
+
+
+def _def_consumer_tables():
+    """消费方用的两张表：游标（每个 owner 一行）、处理记录（log_uid unique，重复处理会撞车）"""
+    from hetu.data import BaseComponent, define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class LogCursor(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        last: np.int64 = property_field(0)
+
+    @define_component(namespace="pytest", force=True)
+    class Done(BaseComponent):
+        log_uid: np.int64 = property_field(0, unique=True)
+        seq: np.int64 = property_field(0)
+
+    @define_component(namespace="pytest", force=True)
+    class Hot(BaseComponent):
+        hits: np.int64 = property_field(0)
+
+    return LogCursor, Done, Hot
+
+
+async def _until_committed(make_txn) -> None:
+    """RaceCondition 就重试（不退避：测试里要的就是冲突）"""
+    while True:
+        try:
+            await make_txn()
+            return
+        except RaceCondition:
+            await asyncio.sleep(0)
+
+
+async def _consume_once(backend: Backend, log, cursor_comp, done, owner, limit=3):
+    """
+    设计稿 §9 的服务端消费写法：从游标往后读，缺号时 get 确认（读空就跳过，提交时 CNT 确认它在
+    master 上也不存在），处理记录写进 Done（同一个事务，重复处理会撞 unique）。返回游标的新位置
+    """
+    async with (
+        backend.session("pytest", 1) as session,
+        session.using(cursor_comp).upsert(owner=owner) as cursor,
+    ):
+        repo = session.using(log)
+        done_repo = session.using(done)
+
+        async def handle(row):
+            record = done.new_row()
+            record.log_uid, record.seq = row.uid, row.seq
+            await done_repo.insert(record)
+
+        rows = await repo.range(
+            seq=(cursor.last + 1, np.inf), owner=owner, limit=limit, phantom_check=False
+        )
+        expected = cursor.last + 1
+        for row in rows:
+            while expected < row.seq:  # 中间缺了号
+                if (missing := await repo.get(seq=expected, owner=owner)) is not None:
+                    await handle(missing)  # range 漏读了它
+                expected += 1  # 读空的号，提交时会确认它确实不存在
+            await handle(row)
+            expected = int(row.seq) + 1
+        cursor.last = expected - 1
+    return int(cursor.last)
+
+
+async def _done_seqs(backend: Backend, done) -> list[int]:
+    async with backend.session("pytest", 1) as session:
+        rows = await session.using(done).range(log_uid=(-np.inf, np.inf), limit=-1)
+    return sorted(int(seq) for seq in rows.seq)
+
+
+async def test_concurrent_producers_gapless(new_component_env, mod_auto_backend):
+    """
+    多个生产者并发往同一组写，每个事务都改同一行热点行（制造 VER 冲突和重试），中间还夹着因为
+    unique 撞车而失败的事务：最终这一组的号正好是 1..N，不重不漏；每个串行的生产者自己拿到的号递增
+    """
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    _cursor, _done, hot = _def_consumer_tables()
+    create_ref(hot, backend)
+    (hot_id,) = await _insert(backend, hot, hot.new_row())
+    producers, per = 5, 6
+
+    async def produce(pid: int):
+        for i in range(per):
+
+            async def txn(uid: int = pid * 1000 + i):
+                async with backend.session("pytest", 1) as session:
+                    row = await session.using(hot).get(id=hot_id)
+                    row.hits += 1
+                    await session.using(hot).update(row)
+                    await asyncio.sleep(0)  # 让别的生产者插进来读同一行
+                    await session.using(log).insert(_log(log, 7, kind=pid, uid=uid))
+
+            await _until_committed(txn)
+            if i == per // 2:
+                # uid 撞车：确定性失败，不消耗号
+                with pytest.raises(UniqueViolation):
+                    await _insert(backend, log, _log(log, 7, uid=pid * 1000 + i))
+
+    await asyncio.gather(*(produce(pid) for pid in range(producers)))
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        rows = await session.using(log).range(seq=(-np.inf, np.inf), owner=7, limit=-1)
+        hits = (await session.using(hot).get(id=hot_id)).hits
+    assert [int(seq) for seq in rows.seq] == list(range(1, producers * per + 1))
+    assert hits == producers * per
+    for pid in range(producers):
+        mine = [int(uid) for uid, kind in zip(rows.uid, rows.kind) if kind == pid]
+        assert mine == sorted(mine), pid
+
+
+async def test_servant_reads_are_contiguous_prefixes(log_ref, mod_auto_backend):
+    """
+    并发写入的同时反复从副本读整组：发号和写入在同一次原子执行里完成，副本整块应用每次提交，所以
+    每次读到的都是从 1 开始的连续前缀
+    """
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    total = 40
+    done = asyncio.Event()
+
+    async def write():
+        for _ in range(total // 2):
+            await _insert(backend, comp, _log(comp, 7), _log(comp, 7))
+        done.set()
+
+    async def read():
+        reads = 0
+        while not done.is_set() or reads == 0:
+            rows = await backend.servant.range(
+                log_ref, "seq", -np.inf, np.inf, limit=-1, group={"owner": 7}
+            )
+            seqs = [int(seq) for seq in rows.seq]
+            assert seqs == list(range(1, len(seqs) + 1))
+            reads += 1
+            await asyncio.sleep(0)
+        return reads
+
+    _none, reads = await asyncio.gather(write(), read())
+    assert reads > 0
+    await backend.wait_for_synced()
+    assert len(await _seqs(backend, comp, owner=7)) == total
+
+
+async def test_consumers_share_cursor_exactly_once(new_component_env, mod_auto_backend):
+    """
+    生产者并发写，两个消费方共用一个游标按 §9 的写法消费：每一行正好处理一次（处理记录有 unique，
+    重复处理会撞车），没有被越过的
+    """
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    cursor_comp, done, _hot = _def_consumer_tables()
+    create_ref(cursor_comp, backend)
+    create_ref(done, backend)
+    total = 30
+
+    async def produce():
+        for _ in range(total // 3):
+            await _insert(backend, log, _log(log, 7), _log(log, 7), _log(log, 7))
+            await asyncio.sleep(0)
+
+    async def consume():
+        positions: list[int] = [0]
+
+        async def txn():
+            positions.append(
+                await _consume_once(backend, log, cursor_comp, done, owner=7)
+            )
+
+        while positions[-1] < total:
+            await _until_committed(txn)
+            await asyncio.sleep(0)
+
+    await asyncio.gather(produce(), consume(), consume())
+    await backend.wait_for_synced()
+    assert await _done_seqs(backend, done) == list(range(1, total + 1))
+
+
+async def test_consumer_recovers_row_missed_by_fetch(
+    new_component_env, mod_auto_backend, monkeypatch
+):
+    """
+    取行落到进度不同的副本（这里模拟成取行时读不到中间那一行）：phantom_check=False 时 range 静默
+    跳过它，§9 的写法发现缺号后 get 回来补上处理，不会越过
+    """
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    cursor_comp, done, _hot = _def_consumer_tables()
+    create_ref(cursor_comp, backend)
+    create_ref(done, backend)
+    ids = await _insert(backend, log, *(_log(log, 7) for _ in range(4)))
+    dropped = {ids[2]}  # 3 号
+
+    def drop_once(client):
+        original = client.get_many_array_
+
+        async def patched(ref, row_ids):
+            rows, missing = await original(ref, row_ids)
+            if ref.comp_cls is log and dropped & set(row_ids):
+                lost = dropped.pop()
+                rows = rows[rows["id"] != lost]
+                missing = [*missing, lost]
+            return rows, missing
+
+        monkeypatch.setattr(client, "get_many_array_", patched)
+
+    for client in {id(c): c for c in (backend.master, backend.servant)}.values():
+        drop_once(client)
+    assert await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10) == 4
+    assert not dropped  # 确实漏读过一次
+    assert await _done_seqs(backend, done) == [1, 2, 3, 4]
+
+
+async def test_consumer_skips_permanent_gap(new_component_env, mod_auto_backend):
+    """删掉中间的一行留下永久缺口：§9 的写法 get 确认它在 master 上不存在之后跳过，提交成功"""
+    backend: Backend = mod_auto_backend()
+    log = def_log()
+    create_ref(log, backend)
+    cursor_comp, done, _hot = _def_consumer_tables()
+    create_ref(cursor_comp, backend)
+    create_ref(done, backend)
+    await _insert(backend, log, *(_log(log, 7) for _ in range(5)))
+    await _delete_seqs(backend, log, 7, (3,))
+    assert await _consume_once(backend, log, cursor_comp, done, owner=7, limit=10) == 5
+    assert await _done_seqs(backend, done) == [1, 2, 4, 5]
