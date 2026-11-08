@@ -285,6 +285,36 @@ def member_value_(member: bytes) -> bytes:
     return member[: -ROW_ID_TOKEN_LEN - 1]
 
 
+# 索引的存储格式版本，并进表的 schema 版本号（见 `schema_version_`）。member 的编码一变就加一：
+# 旧库每张表的版本号都对不上，服务器拒绝启动，`hetu upgrade` 按新格式重建索引。
+# 1：id 段是不补零的十进制；2：id 段定宽（`ROW_ID_TOKEN_LEN`）
+INDEX_FORMAT = 2
+
+
+def schema_version_(json_: str, index_format: int = INDEX_FORMAT) -> str:
+    """
+    内部方法：组件表 meta 里的 schema 版本号，由组件定义的 json 与索引格式版本一起算出。只改了
+    权限这类不动数据的定义版本号也会变，`hetu upgrade` 会把 meta 补写成新的。迁移脚本的文件名
+    也用它（`*_v旧版本_to_v新版本.py`）。索引格式 1 的版本号就是 json 的 md5，旧版 HeTu 写的
+    meta 和生成的迁移脚本都是这个
+    """
+    data = json_ if index_format == 1 else f"{json_}\nindex_format={index_format}"
+    return hashlib.md5(data.encode("utf-8")).hexdigest()
+
+
+def schema_versions_(json_: str) -> set[str]:
+    """内部方法：这份组件定义在各个索引格式下的版本号，认旧版 HeTu 生成的迁移脚本用"""
+    return {schema_version_(json_, fmt) for fmt in range(1, INDEX_FORMAT + 1)}
+
+
+def index_format_stale_(meta: TableMaintenance.TableMeta) -> bool:
+    """
+    内部方法：表的索引是不是旧格式。meta 的版本号写入时总是由同一份 meta 的 json 按当时的
+    `INDEX_FORMAT` 算出来，按当前格式重算对不上就是旧格式写的
+    """
+    return meta.version != schema_version_(meta.json)
+
+
 # 复合索引里 str / bytes 分组列编码后面跟的终止符。不能用单个 0x00：值的转义是 0x00 → 0x00 0xff，
 # 下一列的编码以 0xff 开头时（整数最大值、浮点 +inf / NaN、0xff 开头的 bytes）比较会越过
 # 终止符，把 "a\x00b" 组的行算进 "a" 组的区间。0x00 0x01 和转义的 0x00 0xff 在第二个字节就分开了
@@ -1323,12 +1353,13 @@ class TableMaintenance:
         if not meta:
             return "not_exists", None
         else:
-            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+            version = schema_version_(table_ref.comp_cls.json_)
             # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
             if meta.cluster_id != table_ref.cluster_id:
                 return "cluster_mismatch", meta
 
-            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+            # 如果版本不一致，组件结构可能有变化，也可能只是改权限、或者索引是旧格式写的
+            # （INDEX_FORMAT 变了），总之调用迁移代码
             if meta.version != version:
                 return "schema_mismatch", meta
 
@@ -1432,6 +1463,11 @@ class TableMaintenance:
                     ).format(comp_name=table_ref.comp_name)
                 )
                 return True
+            # 定义没变、只是索引格式（INDEX_FORMAT）变了：不搬数据，也不找迁移脚本（找不到会在
+            # 用户的 maint/migration 里给每个组件生成一份空跑的默认脚本），重建索引、补写 meta
+            if old_meta.json == table_ref.comp_cls.json_:
+                self._finish_schema_migration(table_ref)
+                return True
             from ..migration import MigrationScript
 
             migrator = MigrationScript(app_file, table_ref, old_meta)
@@ -1451,15 +1487,16 @@ class TableMaintenance:
         """
         迁移脚本只管搬数据：dtype 没变的那几级（只改了 table_sub / point_sub、索引、权限等）
         判 skip 不执行，表的 meta 还停在旧版本，check_table 会一直报 schema_mismatch。
-        这里把 meta 补写成当前定义；索引定义也变了的话（比如 point_sub 打开了 index），
-        先按当前定义重建索引。
+        这里把 meta 补写成当前定义；索引定义变了（比如 point_sub 打开了 index）、或者索引是
+        旧格式写的（`INDEX_FORMAT` 变了），先按当前定义重建索引。这一步不看
+        `--no-rebuild-index`：不重建就查不到 / 查错
         """
         from ..component import BaseComponent
 
         comp_cls = table_ref.comp_cls
         meta = self.read_meta(table_ref.instance_name, comp_cls)
         assert meta
-        if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
+        if meta.version == schema_version_(comp_cls.json_):
             return  # 迁移脚本已按当前定义重建了表
         stored = BaseComponent.load_json(meta.json)
         # 分组列也要比：给已有索引加 / 去 groupby 时 indexes_、uniques_ 都不变，不重建的话
@@ -1473,6 +1510,14 @@ class TableMaintenance:
             logger.warning(
                 _(
                     "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        elif index_format_stale_(meta):
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 索引的存储格式有变更，已按新格式"
+                    "重建Index"
                 ).format(comp_name=table_ref.comp_name)
             )
         self.do_update_meta_(table_ref)

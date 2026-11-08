@@ -358,6 +358,15 @@ slow; pass `--no-rebuild-index` to skip it. When you add or remove `groupby`
 component's indexes even with `--no-rebuild-index`: the index definition
 changed, and the old index could not be queried.
 
+The same happens when HeTu itself changes how indexes are stored. For example,
+after rows sharing an index value started being ordered by the numeric `id`,
+indexes written by older versions sort them wrongly: after upgrading HeTu every
+table reports that it needs migrating and the server refuses to start; one
+`upgrade` run rebuilds the indexes of all persistent components in the new
+format (regardless of `--no-rebuild-index`), without moving row data or
+generating migration scripts. Do not run old and new versions against the same
+database during this upgrade either.
+
 Turning an index that is in use into a composite index is a **breaking
 change**: every query without group values fails afterwards, older client SDKs
 subscribing to that index are disconnected by the server (4002, which the SDK

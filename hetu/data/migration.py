@@ -5,7 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-import hashlib
 import importlib.util
 import logging
 import sys
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING
 from hetu.data import BaseComponent
 from hetu.i18n import _
 
+from .backend.base import schema_version_, schema_versions_
 from .backend.table import TableReference
 
 if TYPE_CHECKING:
@@ -113,18 +113,21 @@ class MigrationScript:
         # 读取table迁移脚本
         # 首先看old_meta里的版本号，然后搜索该版本号开头的文件
         old_version = old_meta.version
-        new_version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+        new_version = schema_version_(table_ref.comp_cls.json_)
+        # 旧版 HeTu 生成的脚本按旧索引格式的版本号命名，升到当前定义的也算到头：索引格式的变化
+        # 不用脚本处理，脚本迁移完会按当前格式重建索引、按当前格式写 meta
+        targets = schema_versions_(table_ref.comp_cls.json_)
         # 然后看该文件的目标版本号，继续搜索，直到目标版本号和当前版本号相同为止
         app_root = Path(app_file).parent
         target_version = ""
-        while target_version != new_version:
+        while target_version not in targets:
             script_file, target_version = self._find_script(app_root, old_version)
             if not script_file:
                 break
             self.upgrade_stack.append(script_file)
             old_version = target_version
         # 如果最后一个版本号没找到，则尝试生成默认迁移脚本，如果是有损的，则看force
-        if target_version != new_version:
+        if target_version not in targets:
             script_file = self._generate_default_migration_script(
                 app_root, table_ref.comp_cls, old_meta.json, old_version, new_version
             )

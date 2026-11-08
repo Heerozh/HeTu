@@ -9,17 +9,19 @@
 import os
 import subprocess
 import sys
+from typing import cast
 
 import numpy as np
 import pytest
 from fixtures.backends import (
     raw_hset,
     raw_index_members,
+    raw_index_zset_keys,
     use_redis_family_backend_only,
 )
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Table
+from hetu.data.backend import Table, TableReference
 from hetu.data.backend.base import member_row_id_
 
 SnowflakeID().init(1, 0)
@@ -545,6 +547,159 @@ async def test_manager_permission_only_change(
     assert tm.create_or_migrate_all(app_file) is True
     assert _status(tm, beta) == "ok"
     assert tm.check_and_create_new_tables() is True
+
+
+def _make_legacy_index_format(backend, tbl) -> None:
+    """
+    把一张表改成旧版 HeTu（索引格式 1）写的样子：meta 的版本号是 json 的 md5，索引 member 的
+    id 段是不补零的十进制
+    """
+    from hetu.data.backend.base import member_row_id_, member_value_, schema_version_
+    from hetu.data.backend.redis.client import RedisBackendClient
+    from hetu.data.backend.sqlite.store import SQLiteStore
+
+    maint = backend.get_table_maintenance()
+    meta = maint.read_meta(tbl.instance_name, tbl.comp_cls)
+    assert meta
+    legacy_version = schema_version_(meta.json, 1)
+    master = backend.master
+    keys = [
+        key
+        for name in tbl.comp_cls.indexes_
+        for key in raw_index_zset_keys(backend, tbl, name)
+    ]
+    if isinstance(master, RedisBackendClient):
+        io = master.io
+        io.hset(f"{tbl.instance_name}:{tbl.comp_name}:meta", "version", legacy_version)
+        for key in keys:
+            for member in cast(list[bytes], io.zrange(key, 0, -1)):
+                io.zrem(key, member)
+                legacy = member_value_(member) + b"\x00%d" % member_row_id_(member)
+                io.zadd(key, {legacy: 0})
+        return
+
+    def _rewrite(store: SQLiteStore) -> None:
+        with store.write_txn():
+            store.meta_set(
+                tbl.instance_name,
+                tbl.comp_name,
+                meta.json,
+                legacy_version,
+                meta.cluster_id,
+            )
+            for key in keys:
+                for member in store.zmembers(key):
+                    store.zrem(key, member)
+                    legacy = member_value_(member) + b"\x00%d" % member_row_id_(member)
+                    store.zadd(key, legacy)
+
+    master.run_sync_(_rewrite)
+
+
+def _assert_current_index_format(backend, tbl, row_ids: set[int]) -> None:
+    """表的所有索引都是当前格式（id 段定宽 hex），且正好是这些行"""
+    from hetu.data.backend.base import ROW_ID_TOKEN_LEN, member_row_id_
+
+    for name in tbl.comp_cls.indexes_:
+        members = raw_index_members(backend, tbl, name)
+        assert all(m[-ROW_ID_TOKEN_LEN - 1] == 0 for m in members), name
+        assert {member_row_id_(m) for m in members} == row_ids, name
+
+
+async def test_manager_rebuilds_legacy_index_format(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """
+    旧版 HeTu 写的表（索引格式 1）：版本号对不上，服务器不肯启动；`hetu upgrade` 的迁移不搬数据、
+    不生成迁移脚本，按新格式重建索引（不看 --no-rebuild-index，create_or_migrate_all 自己就重建）
+    """
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+    instance = "mgr_legacy"
+
+    alpha, beta = _def_mgr_comps(alpha_v=False)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert tm.create_or_migrate_all(app_file) is True
+    for owner in (1, 2, 3):
+        await _insert_owner(tm, beta, owner)
+    await backend.wait_for_synced()
+    beta_tbl = tm.get_table(beta)
+    assert beta_tbl is not None
+    row_ids = set(
+        beta_tbl.backend.get_table_maintenance().range(beta_tbl, "owner", 1, 3)
+    )
+    assert len(row_ids) == 3
+
+    _make_legacy_index_format(backend, beta_tbl)
+    assert _status(tm, alpha) == "ok"
+    assert _status(tm, beta) == "schema_mismatch"
+    assert tm.check_and_create_new_tables() is False
+
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, beta) == "ok"
+    assert tm.check_and_create_new_tables() is True
+    assert not (tmp_path / "maint" / "migration").exists()
+    _assert_current_index_format(backend, beta_tbl, row_ids)
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, beta, 2)
+    assert row is not None and int(row.id) in row_ids
+
+
+async def test_manager_cluster_move_keeps_legacy_index_format_flag(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """
+    旧格式的表换簇：改名只搬 key，版本号照搬，迁移随后照样认出旧格式、重建索引。改名时按当前格式
+    重算版本号的话，表会直接变成 ok，旧格式的索引留在库里
+    """
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+    instance = "mgr_legacy_move"
+
+    alpha, beta = _def_mgr_comps(alpha_v=False)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert tm.create_or_migrate_all(app_file) is True
+    await _insert_owner(tm, beta, 2)
+    await backend.wait_for_synced()
+    _make_legacy_index_format(backend, tm.get_table(beta))
+
+    tm = _mgr(backend, instance, alpha, beta, merged=True)
+    assert _status(tm, beta) == "cluster_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, beta) == "ok"
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, beta, 2)
+    assert row is not None
+    _assert_current_index_format(backend, tm.get_table(beta), {int(row.id)})
+
+
+def test_migration_script_named_by_legacy_version(tmp_path):
+    """
+    旧版 HeTu 生成、用户改过并提交的迁移脚本按索引格式 1 的版本号命名（json 的 md5）。升级 HeTu
+    后再迁移：脚本升到当前定义就算到头，不再在后面补一份默认脚本（它会拿最早的旧定义当作
+    迁移前的结构，在脚本迁移完的数据上再迁一次）
+    """
+    from hetu.data import BaseComponent
+    from hetu.data.backend.base import TableMaintenance, schema_version_
+    from hetu.data.migration import MigrationScript
+    from hetu.system import FutureCalls
+
+    old_json = FutureCalls.json_
+    new_cls = BaseComponent.load_json(old_json, "Legacy")
+    old_v, new_v = schema_version_(old_json, 1), schema_version_(new_cls.json_, 1)
+    migration_dir = tmp_path / "maint" / "migration"
+    migration_dir.mkdir(parents=True)
+    script = migration_dir / f"FutureCalls-Legacy_v{old_v}_to_v{new_v}.py"
+    script.write_text("# 用户改过的脚本\n", encoding="utf-8")
+
+    meta = TableMaintenance.TableMeta(
+        version=old_v, json=old_json, cluster_id=1, extra={}
+    )
+    migrator = MigrationScript(
+        str(tmp_path / "app.py"), TableReference(new_cls, "pytest", 1), meta
+    )
+    assert migrator.upgrade_stack == [script]
+    assert [f.name for f in migration_dir.iterdir()] == [script.name]
 
 
 async def test_manager_flush_volatile(
