@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from ...i18n import _
-from .base import BackendClient, RowFormat, UniqueViolation, resolve_group_
+from .base import (
+    BackendClient,
+    RowFormat,
+    UniqueViolation,
+    overflows_column_,
+    resolve_group_,
+)
 from .idmap import (
     LocalIndex,
     RangeObservation,
@@ -65,22 +71,6 @@ def _is_bounds(value: object) -> bool:
     if isinstance(value, np.ndarray):
         return value.shape == (2,)
     return isinstance(value, (tuple, list)) and len(value) == 2
-
-
-def _overflows_column(comp_cls: type[BaseComponent], field: str, value: Any) -> bool:
-    """
-    str / bytes 值存进字符串列（U / S）会不会被截断。列宽按字符数（S 列是字节数），结尾的
-    `\\x00` 是补齐、本来就存不住，不算在内。别的类型的值、别的列都返回 False
-    """
-    if comp_cls.dtype_map_[field].kind not in "US":
-        return False
-    if isinstance(value, str):
-        value = value.rstrip("\x00")
-    elif isinstance(value, bytes):
-        value = value.rstrip(b"\x00")
-    else:
-        return False
-    return len(value) > comp_cls.str_max_len(field)
 
 
 class SessionRepository:
@@ -982,7 +972,7 @@ class UpsertContext:
             comp_cls = self.repo.ref.comp_cls
             # 字符串列存进去会按列宽截断，查询值却不截断：锚定值放不下的话，新行存的是截断后的
             # 值，拿原值永远查不到它，下次 upsert 又读空、去插入，撞上这一行报 UniqueViolation
-            if _overflows_column(comp_cls, self.index_name, self.query_value):
+            if overflows_column_(comp_cls, self.index_name, self.query_value):
                 raise ValueError(
                     _(
                         "upsert 的锚定值超过了 {comp_name}.{index_name} 的列宽 {max_len}："

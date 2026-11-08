@@ -371,12 +371,16 @@ def test_resolve_group(new_component_env):
     for text in ("3", "3.0", " 3 ", b"3", np.str_("3")):
         assert resolve_group_(comp, "level", {"zone": text}) == (3,), text
     assert resolve_group_(comp, "level", {"zone": "-2147483648"}) == (-(2**31),)
-    # 字符串按存储规则：截断到列宽、去掉结尾的 \x00
+    # 字符串按存储规则去掉结尾的 \x00，正好放满列宽的照常；超过列宽的在 bad 里
     assert resolve_group_(comp, "name", {"server": "s1\x00", "zone": 1}) == ("s1", 1)
-    assert resolve_group_(comp, "name", {"server": "abcdefghij", "zone": 1}) == (
+    assert resolve_group_(comp, "name", {"server": "abcdefgh\x00", "zone": 1}) == (
         "abcdefgh",
         1,
     )
+    codec_c = next(c for c in def_codecs() if c.__name__ == "CodecC")  # g 是 S3
+    assert resolve_group_(codec_c, "f", {"g": b"abc\x00", "h": "x"}) == (b"abc", "x")
+    with pytest.raises(ValueError, match="列宽"):
+        resolve_group_(codec_c, "f", {"g": b"abcd", "h": "x"})
     # 单列索引
     assert resolve_group_(comp, "owner", None) == ()
     assert resolve_group_(comp, "owner", {}) == ()
@@ -403,6 +407,8 @@ def test_resolve_group(new_component_env):
         ("level", {1: 3}, "正好给出"),  # 键不是 str
         ("level", [("zone", 3)], "dict"),
         ("name", {"server": b"s1", "zone": 1}, "只收 str"),
+        # 超过列宽（U8）：截断的话前 8 个字符相同的会查到别的组
+        ("name", {"server": "abcdefghi", "zone": 1}, "列宽"),
         ("name", {"server": "s1"}, "正好给出"),
         ("owner", {"zone": 1}, "不是复合索引"),
         ("nope", None, "没有叫"),
@@ -503,6 +509,36 @@ async def test_query_errors(slot_ref, mod_auto_backend):
         await backend.servant.range(slot_ref, "level", 0, 10)
     with pytest.raises(ValueError, match="分组"):
         backend.servant.check_range_(slot_ref, "level", 0, 10, 10, False)
+
+
+async def test_overlong_group_value(slot_ref, mod_auto_backend):
+    """
+    字符串分组值超过列宽报 ValueError。写进库的值赋值时就截断了（"europe-west-1" 存成
+    "europe-w"），查询值要是也截断，"europe-west-2" 会查到、upsert 改到 europe-west-1 那组的行
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    row = _slot(comp, server="europe-west-1", zone=1, name="bob", qty=11)
+    (row_id,) = await _insert(backend, comp, row)
+    other = "europe-west-2"
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="列宽"):
+            await repo.get(name="bob", server=other, zone=1)
+        with pytest.raises(ValueError, match="列宽"):
+            await repo.range(name=("a", "z"), server=other, zone=1)
+        with pytest.raises(ValueError, match="列宽"):
+            async with repo.upsert(name="bob", server=other, zone=1) as got:
+                got.qty = 22
+        # 按存进去的值照常查得到
+        got = await repo.get(name="bob", server="europe-w", zone=1)
+        assert got is not None and int(got.id) == row_id
+    with pytest.raises(ValueError, match="列宽"):
+        await backend.servant.range(
+            slot_ref, "name", "a", "z", group={"server": other, "zone": 1}
+        )
+    got = await backend.servant.get(slot_ref, row_id)
+    assert got is not None and got.qty == 11
 
 
 async def test_kwargs_edge_cases(new_component_env, mod_auto_backend):

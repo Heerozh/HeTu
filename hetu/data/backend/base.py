@@ -269,14 +269,31 @@ def _group_value_error(comp_cls: type[BaseComponent], col: str, value: Any, why:
     )
 
 
+def overflows_column_(comp_cls: type[BaseComponent], field: str, value: Any) -> bool:
+    """
+    内部方法：str / bytes 值存进字符串列（U / S）会不会被截断。列宽按字符数（S 列是字节数），
+    结尾的 `\\x00` 是补齐、本来就存不住，不算在内。别的类型的值、别的列都返回 False
+    """
+    if comp_cls.dtype_map_[field].kind not in "US":
+        return False
+    if isinstance(value, str):
+        value = value.rstrip("\x00")
+    elif isinstance(value, bytes):
+        value = value.rstrip(b"\x00")
+    else:
+        return False
+    return len(value) > comp_cls.str_max_len(field)
+
+
 def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) -> Any:
     """
     内部方法：一个分组值按分组列的 dtype 规范化成 python 值，不合法抛 ValueError。
 
     不能直接 `dtype.type(value)`：整数会静默回绕或截断（`np.int8(np.int64(300))` 是 44、
-    `np.int8(1.5)` 是 1），python int 越界抛的又是 OverflowError；字符串也不截断，和存进库里的
-    值对不上。所以整数要先按精确值判断范围，字符串按存储规则（`np.array(v, dtype)[()]`）截断到
-    列宽、去掉结尾的 `\\x00`。
+    `np.int8(1.5)` 是 1），python int 越界抛的又是 OverflowError；字符串结尾的 `\\x00` 也还在，
+    和存进库里的值对不上。所以整数要先按精确值判断范围；字符串超过列宽同样报错（存进去会被
+    截断，前 N 个字符相同的值落进同一组，按截断后的值查会拿到别的组的行），放得下的按存储
+    规则（`np.array(v, dtype)[()]`）去掉结尾的 `\\x00`。
 
     整数列也收数字字符串，和单列索引的查询值同一套解析（`exact_number_`）：先按整数、不行再按
     小数，所以 `"3"`、`"3.0"` 都等于 3。开闭区间的 `(` / `[` 前缀分组值用不上，带了就解析不了
@@ -309,8 +326,7 @@ def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) ->
     if kind == "U":
         if not isinstance(value, str):
             raise _group_value_error(comp_cls, col, value, _("str 列只收 str"))
-        return np.array(value, dtype=dtype)[()].item()
-    if kind == "S":
+    elif kind == "S":
         if isinstance(value, str):
             try:
                 value = value.encode("ascii")
@@ -320,6 +336,14 @@ def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) ->
                 ) from None
         elif not isinstance(value, bytes):
             raise _group_value_error(comp_cls, col, value, _("bytes 列只收 bytes"))
+    if kind in "US":
+        if overflows_column_(comp_cls, col, value):
+            raise _group_value_error(
+                comp_cls,
+                col,
+                value,
+                _("超过列宽 {max_len}").format(max_len=comp_cls.str_max_len(col)),
+            )
         return np.array(value, dtype=dtype)[()].item()
     # define_component 已限定分组列的类型，走不到
     raise _group_value_error(comp_cls, col, value, _("不支持的分组列类型"))

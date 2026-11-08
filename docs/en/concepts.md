@@ -77,9 +77,14 @@ A few invariants that surprise new users:
   a group, and different groups may share a value. Group-by columns must be
   integer, str or bytes fields; they can be updated, and the index entry moves
   to the new group. Giving only some of the group-by columns, a range over a
-  group-by column, or a scan across groups is not supported. Each group is
-  stored as its own zset: with a few rows or more per group this takes less
-  memory than one big index, while tiny groups (one or two rows) with long
+  group-by column, or a scan across groups is not supported. Give string
+  group-by columns enough width: an over-long value is truncated when it is
+  written, so values sharing the first N characters land in the same group,
+  and a group value longer than the column in a query or `upsert` raises
+  `ValueError` instead of reading another group. Prefer integer ids for
+  group-by columns where you can. Each group is stored as its own zset: with a
+  few rows or more per group this takes less memory than one big index, while
+  tiny groups (one or two rows) with long
   string group values can take up to 1.5–3.7× as much. Older HeTu versions
   cannot read the schema of a component that uses `groupby`, so do not run old
   and new versions against the same database while upgrading.
