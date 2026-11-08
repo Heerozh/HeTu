@@ -664,6 +664,16 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   | No row, and the group's largest number ≥ the cursor | The row was deleted (e.g. trimmed) | Read on as usual |
   | No row, and the group's largest number < the cursor | The data rolled back | Raise an alert and handle it as a rollback |
 
+  **Note: trim only up to the cursors saved in the snapshots, taking the
+  minimum over all consumers.** When reading on by number, a number that has
+  no row while a larger number exists can only be taken as deleted and
+  skipped; there is no telling whether it was deleted after being handled or
+  before. If a consumer restores from a snapshot file, trimming follows its
+  in-memory progress, and the snapshot is older than that progress, then after
+  a crash and restart the commands between the snapshot and that progress are
+  already deleted: they are skipped as gaps, and the consumer's state silently
+  diverges.
+
   Server-side consumers don't need this: their cursor and the log roll back
   together, in the same transaction.
 - **Client-side consumers**: subscribe with
