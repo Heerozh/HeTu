@@ -886,6 +886,13 @@ class RedisModelClient(BackendClient):
                 ]
             )
 
+        def _index_label(_comp_cls, _index_name: str) -> str:
+            """冲突信息里的索引名，复合索引带上分组列。只在发 UNIQ 时才拼"""
+            _groups = _comp_cls.index_groups_[_index_name]
+            if not _groups:
+                return f"{_comp_cls.name_}.{_index_name}"
+            return f"{_comp_cls.name_}.{_index_name}({','.join(_groups)})"
+
         def _enter_channel(_comp_cls, _index_name: str, _idx_key: str, _row, _value):
             """
             point_sub 索引登记"进入"的频道（insert 的值、update 后的新值）：单列索引是值频道，
@@ -951,14 +958,11 @@ class RedisModelClient(BackendClient):
             column_indexes = comp_cls.column_indexes_
             comp_name = comp_cls.name_
             absent_rows = absent_by_ref.get(ref, {})
-            # 冲突信息里的索引名，复合索引带上分组列
-            labels = {
-                name: f"{comp_name}.{name}"
-                + (f"({','.join(groups)})" if groups else "")
-                for name, groups in comp_cls.index_groups_.items()
-            }
+            dtype_map = comp_cls.dtype_map_
+            index_groups = comp_cls.index_groups_
             # 索引全部转换为bytes索引（score统一用0，不需要score排序），测试下来lex和score
-            # 排序性能是一样的。member 是值段 + 0x00 + 十进制 id，值段见 index_value_bytes_
+            # 排序性能是一样的。member 是值段 + 0x00 + 十进制 id，值段见 index_value_bytes_；
+            # 单列索引的值段就是本字段的编码，热路径上直接编码，不经过 index_value_bytes_
             # insert
             for insert in inserts:
                 row_id = str(insert["id"])
@@ -968,7 +972,12 @@ class RedisModelClient(BackendClient):
                     key, "id" in absent, f"{comp_name}.id id={row_id} insert"
                 )
                 values = {
-                    name: index_value_bytes_(comp_cls, name, insert) for name in indexes
+                    name: (
+                        index_value_bytes_(comp_cls, name, insert)
+                        if index_groups[name]
+                        else to_sortable_bytes(dtype_map[name].type(insert[name]))
+                    )
+                    for name in indexes
                 }
                 for name, value in values.items():
                     if name in unique_fields:
@@ -976,7 +985,7 @@ class RedisModelClient(BackendClient):
                             idx_prefix + name,
                             value,
                             name in absent,
-                            f"{labels[name]} id={row_id} insert",
+                            f"{_index_label(comp_cls, name)} id={row_id} insert",
                         )
                 # 版本号随机起步（见 FIRST_VERSION_SPAN）
                 _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
@@ -996,12 +1005,23 @@ class RedisModelClient(BackendClient):
                 touched = {
                     name for col in new_row for name in column_indexes.get(col, ())
                 }
-                merged = {**old_row, **new_row}
+                # 复合索引的新值段要用合成后的整行（旧值上覆盖改动列），用到时才合成
+                merged = new_row
                 changes = []
-                for name in indexes:
-                    if name in touched:
-                        old_value = index_value_bytes_(comp_cls, name, old_row)
-                        new_value = index_value_bytes_(comp_cls, name, merged)
+                if touched:
+                    for name in indexes:
+                        if name not in touched:
+                            continue
+                        if index_groups[name]:
+                            if merged is new_row:
+                                merged = {**old_row, **new_row}
+                            old_value = index_value_bytes_(comp_cls, name, old_row)
+                            new_value = index_value_bytes_(comp_cls, name, merged)
+                        else:
+                            # 单列索引：touched 说明本字段改了，new_row 里有它
+                            dtype_type = dtype_map[name].type
+                            old_value = to_sortable_bytes(dtype_type(old_row[name]))
+                            new_value = to_sortable_bytes(dtype_type(new_row[name]))
                         if old_value != new_value:
                             changes.append((name, old_value, new_value))
                 absent = absent_rows.get(int(row_id), set())
@@ -1011,7 +1031,7 @@ class RedisModelClient(BackendClient):
                             idx_prefix + name,
                             new_value,
                             name in absent,
-                            f"{labels[name]} id={row_id} update",
+                            f"{_index_label(comp_cls, name)} id={row_id} update",
                         )
                 _hset_key(key, old_version, new_row)
                 b_row_id = row_id.encode("ascii")
@@ -1035,7 +1055,11 @@ class RedisModelClient(BackendClient):
                 _version_must_match(key, old_version)
                 b_row_id = row_id.encode("ascii")
                 for name in indexes:
-                    value = index_value_bytes_(comp_cls, name, delete)
+                    value = (
+                        index_value_bytes_(comp_cls, name, delete)
+                        if index_groups[name]
+                        else to_sortable_bytes(dtype_map[name].type(delete[name]))
+                    )
                     pushes.append(
                         ["ZREM", idx_prefix + name, value + b"\x00" + b_row_id]
                     )
