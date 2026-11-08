@@ -1,6 +1,7 @@
 """
 复合索引（groupby）的订阅与线协议：按组订阅（每组一个 zset，订这一组 key 的 keyspace 频道）、离开
-与补位、组内换序、频道 API、sub_id 与共享键、分组值校验、hidden 分组列，以及 receiver 按位置转发 group。
+与补位、组内换序、频道 API、sub_id 与共享键、分组值校验、hidden 分组列、OWNER / RLS 组件（RLS 的本字段
+是浮点），以及 receiver 按位置转发 group。
 设计稿见 docs/superpowers/specs/2026-11-08-composite-index-design.md §6、§7。
 """
 
@@ -339,6 +340,131 @@ async def test_group_subscription_owner_permission(
     assert await broker.get_updates(timeout=0.5) == {}
     (new_id,) = await _insert(backend, Bag, {"owner": 10, "zone": 1, "level": 4})
     await updates_until(broker, lambda u: u[sub_id][new_id]["level"] == 4)
+
+
+def def_team_score():
+    """RLS 组件：同队可见（team == ctx.user_data["team"]），按 zone 分组、组内按浮点 score 排序"""
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    @define_component(
+        namespace="pytest",
+        permission=Permission.RLS,
+        rls_compare=("eq", "team", "team"),
+        force=True,
+    )
+    class TeamScore(BaseComponent):
+        team: np.int32 = property_field(0)
+        zone: np.int32 = property_field(0)
+        score: np.float32 = property_field(0.0, groupby="zone")
+        qty: np.int32 = property_field(0)
+
+    return TeamScore
+
+
+def _team_ctx(team: int):
+    from fixtures.contexts import make_ctx
+
+    ctx = make_ctx(caller=10)
+    ctx.user_data["team"] = team
+    return ctx
+
+
+async def _set(backend: Backend, comp, row_id: int, **fields) -> None:
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=row_id)
+        assert row is not None
+        for key, value in fields.items():
+            row[key] = value
+        await repo.update(row)
+
+
+async def test_group_subscription_rls_float_field(
+    broker, new_component_env, mod_auto_backend
+):
+    """
+    RLS 组件按组订阅、本字段是 float32：订阅按连接私有；初始行只有同队的，按浮点值排（负数在前），
+    闭区间上界 0.1 按 float32 取整才命中存进去的 0.1。补读后同组里别队的行也订上行频道但不推；
+    它改成同队（不经索引）时推出来，同队的行改成别队时推 None；本字段改动让行进入区间时推出来、
+    按浮点值排进结果；别的组的写入、本组别队的行插入都不推
+    """
+    backend = broker._backend
+    comp = def_team_score()
+    ref = create_ref(comp, backend)
+    a, other_team, c, d, _zone2 = await _insert(
+        backend,
+        comp,
+        {"team": 1, "zone": 1, "score": -1.5},
+        {"team": 2, "zone": 1, "score": -0.5},
+        {"team": 1, "zone": 1, "score": 0.1},
+        {"team": 1, "zone": 1, "score": 2.75},
+        {"team": 1, "zone": 2, "score": 0.0},
+    )
+    ctx = _team_ctx(1)
+    sub_id, rows = await broker.subscribe_range(
+        ref, ctx, "score", -10, 0.1, limit=10, group={"zone": 1}
+    )
+    assert sub_id and [r["id"] for r in rows] == [a, c]
+    assert rows[1]["score"] == pytest.approx(0.1)
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert idx_sub.rls_ctx is ctx
+    assert idx_sub.index_channel == backend.servant.index_channel(
+        ref, "score", group={"zone": 1}
+    )
+    # 补读过后：别队的行也在结果里、订上了行频道，但不推给客户端
+    assert await broker.get_updates(timeout=0.5) == {}
+    assert idx_sub.last_range_result == {a, other_team, c}
+    assert backend.servant.row_channel(ref, other_team) in idx_sub.row_subs
+
+    # 别的组的写入叫不醒它；本组插入别队的行叫醒了也不推
+    await _insert(backend, comp, {"team": 1, "zone": 2, "score": -1.0})
+    (hidden_new,) = await _insert(backend, comp, {"team": 2, "zone": 1, "score": -3.0})
+    assert await broker.get_updates(timeout=0.5) == {}
+    assert hidden_new in idx_sub.last_range_result
+
+    # 不经索引得失 RLS：改 team，从行频道推出来 / 推 None
+    await _set(backend, comp, other_team, team=1)
+    await _set(backend, comp, c, team=2)
+
+    def rls_changed(updates):
+        got = updates[sub_id]
+        assert got[other_team]["score"] == pytest.approx(-0.5)
+        assert got[c] is None
+
+    await updates_until(broker, rls_changed)
+
+    # 本字段改动：2.75 → -2.0 进入区间，排在 -3.0（别队）与 -1.5 之间
+    await _set(backend, comp, d, score=-2.0)
+    await updates_until(broker, lambda u: u[sub_id][d]["score"] == -2.0)
+    assert idx_sub.order == [hidden_new, d, a, other_team, c]
+
+
+async def test_group_subscribe_get_rls_float_field(
+    broker, new_component_env, mod_auto_backend
+):
+    """RLS 组件按组订单行、本字段是 float32：按 float32 取整后点查，别队的行订不到"""
+    backend = broker._backend
+    comp = def_team_score()
+    ref = create_ref(comp, backend)
+    mine, _theirs = await _insert(
+        backend,
+        comp,
+        {"team": 1, "zone": 1, "score": 0.1},
+        {"team": 2, "zone": 1, "score": 0.3},
+    )
+    ctx = _team_ctx(1)
+    sub_id, row = await broker.subscribe_get(ref, ctx, "score", 0.1, group={"zone": 1})
+    assert sub_id and row and row["id"] == mine
+    assert await broker.subscribe_get(ref, ctx, "score", 0.3, group={"zone": 1}) == (
+        None,
+        None,
+    )
+    assert await broker.subscribe_get(ref, ctx, "score", 0.1, group={"zone": 2}) == (
+        None,
+        None,
+    )
+    await _set(backend, comp, mine, qty=5)
+    await updates_until(broker, lambda u: u[sub_id][mine]["qty"] == 5)
 
 
 async def test_group_subscribe_get(broker, rank_ref, admin_ctx):
