@@ -1,7 +1,7 @@
 # 提交序号列（`commit_seq`）— 设计稿
 
 - 日期：2026-11-09
-- 状态：草稿，已过一轮独立审核（§16），已按审核意见改写。
+- 状态：已实现（分支 `feat/commit-seq`），实现记录见 §17。设计过了一轮独立审核（§16），已按审核意见改写。
   - §13 是定下来的做法；
   - §14 是用户的决定（2026-11-09 全部定完）。
 - 分支：`feat/commit-seq`（基于 dev `aaf30a73`）
@@ -740,3 +740,31 @@ zh 和 en 在同一个提交里手工同步。不要跑 `translate_new_content.p
 
 - §14.2：组内重复号改为报错。审核实测重复号会让消费方静默漏行。
 - §14.4："不登记版本的读"（get 和 range）以后单独做。
+
+## 17. 实现记录（2026-11-09）
+
+按 §15 的顺序在 `feat/commit-seq` 上实现，每步一个提交、带测试：
+
+1. 定义：`615f98d5`
+2. 提交：`94918e2a`
+3. 事务：`7e11c348`
+4. 维护：`49c430a2`
+5. 并发、前缀可见与消费方的用例：`39ff99e0`、`81e00a5f`
+6. 文档：`b8ce24ec`
+
+用例在 `tests/test_commit_seq.py`。sqlite、redis、valkey、redis_cluster 四个后端共 142 个通过；全量 2866 个通过，4 个跳过。
+
+和本文写法不同、或者本文没写到的地方：
+
+- **代码里的名字**：
+  - 计数器 key 由 `RedisModelClient.seq_counter_key_` 算；
+  - 重建时的统计、检查放在 `CommitSeqScan`（`redis_model.py`），两个后端共用；
+  - 上限是 `base.COMMIT_SEQ_LIMIT`；
+  - Redis 校准计数器用 `_RAISE_COUNTERS_LUA`，一批一条脚本。
+- **SQLite 的 drop / rename 提前到第 2 步**：测试之间靠 `create_ref` 的 flush 隔离，drop 不删计数器的话，号会串到下一个用例。
+- **两个后端提交脚本一致的用例**：没有加进 `test_backend_client.py`，放在 `test_commit_seq.py`、两个后端共跑。覆盖的是发号的全成或全不发、越界、HSETSEQ 最后一对覆盖残留的 0。
+- **upsert 锚定非 unique 字段从 assert 改成 raise ValueError**：`test_backend_session_basic.py::test_upsert_limit` 的预期跟着从 AssertionError 改成了 ValueError。
+- **C# 文档**：示例用 `long.MaxValue` 作整数列的上界。
+- **没有做的**：
+  - "先校准、再换上"只靠代码顺序保证，没有模拟中途被杀的用例；
+  - `LocalApp.get` / `range` 的 docstring 写的是"语义同 `repo.get` / `repo.range`"，例外已经写在 repo 那边，没有另改。
