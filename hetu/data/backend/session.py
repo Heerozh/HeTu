@@ -36,8 +36,8 @@ commit_observer: ContextVar[CommitObserver | None] = ContextVar(
 提交观察钩子：设置后，本上下文里每次有脏数据的 `Session.commit()` 都改为调用
 ``observer(session, commit_fn)``，由它决定是否 ``await commit_fn(session.idmap)`` 真正提交
 （dry-run 不调）、是否抛异常拒绝（写保护），并可读 ``session.idmap.get_dirty_rows()`` 记账。
-它的返回值就是 `Session.commit()` 的返回值（提交序号列发出的号）：真提交时原样交回
-``commit_fn`` 的返回值。
+它的返回值就是 `Session.commit()` 的返回值（提交序号列发出的号）：真提交时要原样交回
+``commit_fn`` 的返回值；返回 None 按没有号处理（空 dict），不让已经成功的提交在调用方那里出错。
 只有 `hetu call` / `hetu shell` 在执行用户代码期间设置它；服务器从不设置，每次提交只多一次
 ``ContextVar.get()``。用 ContextVar 是为了只管到设置它的任务及其子任务：事先建好的后台任务
 （如雪花号租约的续约、水位循环）复制的上下文里没有它。
@@ -148,7 +148,9 @@ class Session(AbstractAsyncContextManager):
             if observer is None:
                 seqs = await self._master.commit(self._idmap)
             else:
-                seqs = await observer(self, self._master.commit)
+                # 观察者没交回 commit_fn 的返回值时按没有号处理：提交可能已经成功了，调用方
+                # （比如 ctx.session_commit() 要对它取 items）不能因此出错
+                seqs = await observer(self, self._master.commit) or {}
         self.clean()
         return seqs
 

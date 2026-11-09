@@ -718,6 +718,30 @@ async def test_cli_commit_observer_passes_numbers(log_ref, mod_auto_backend):
     assert seqs == {comp: {row_id: 1}}
 
 
+async def test_observer_without_return_value(log_ref, mod_auto_backend):
+    """
+    提交观察钩子没交回 commit_fn 的返回值（返回 None）时按没有号处理：提交已经成功了，不能在调用方
+    那里变成异常（`ctx.session_commit()` 要对返回值取 items）
+    """
+    from hetu.data.backend.session import commit_observer
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+
+    async def no_return(session, commit_fn):
+        await commit_fn(session.idmap)
+
+    token = commit_observer.set(no_return)  # type: ignore  # 故意不按约定返回
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(_log(comp, 7))
+            assert await session.commit() == {}
+    finally:
+        commit_observer.reset(token)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+
+
 # ---------------------------------------------------------------- 禁写与分组列锁定
 
 
