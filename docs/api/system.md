@@ -980,14 +980,15 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
 不需要 master。
 
-一次读钉在一个节点上：先一条 ZRANGE 读这一组在 `after` 之后的 member（这个节点上的原子快照），
-再从同一个节点取行。号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行
-已经不在了，所以：
+先一条 ZRANGE 读这一组在 `after` 之后的 member（它落到的那个节点上的原子快照），再取行。
+号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行已经不在了，所以：
 
 - 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
   (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
-- 取行时读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：停在它
-  前面，它记为 `blocked`，下次再读；
+- 缺口只按这一条 ZRANGE 确认。取行不一定和它落在同一个节点上（读写分离代理、原生 cluster
+  都按命令分流），读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：
+  停在它前面，它记为 `blocked`，下次再读。所以落到哪个节点只影响进度，不会漏行；有只读节点
+  断了复制、还在回答读请求时，可能一直被它挡住，直到它恢复或者被摘掉；
 - 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
 
 注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
@@ -1014,8 +1015,8 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 **Returns**
 
 ``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
-``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：读的那个节点上
-`after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：ZRANGE 落到的那个
+节点上 `after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
 
 
 
@@ -1030,7 +1031,7 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1430`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1430)</small>
+<small>Source: [`hetu/data/backend/base.py:1431`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1431)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

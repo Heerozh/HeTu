@@ -675,12 +675,13 @@ read the master:
   row reads, so it **must not** be used to move the cursor past numbers whose
   rows you haven't seen.
 - `servant_seq_read(after, limit, group=..., after_id=...)`: reads the rows
-  after the cursor and returns `(rows, blocked)`. One read is pinned to one
-  node: it reads the group's index, then fetches the rows from the same node.
-  Numbers are handed out in commit order, so once a node shows number n, any
-  smaller number it doesn't show is gone, and is skipped; a row that is in the
-  index but can't be fetched is **not** skipped: the read stops in front of it,
-  reports it as `blocked`, and the next read tries again. `after_id` is the
+  after the cursor and returns `(rows, blocked)`. It reads the group's index
+  with a single command, then fetches the rows. Numbers are handed out in commit
+  order, so once a node shows number n, any smaller number it doesn't show is
+  gone, and is skipped; gaps are confirmed by that one index read alone. The
+  rows may be fetched from a different node, and a row that is in the index but
+  can't be fetched is **not** skipped: the read stops in front of it, reports it
+  as `blocked`, and the next read tries again. `after_id` is the
   snowflake id of the row at the cursor; when given, the read checks the
   sequence: if the cursor's number now holds another row (the number was
   reused), the cursor's row is gone while larger numbers exist, or the group
@@ -777,9 +778,10 @@ cursor, and check before deleting.**
   the same `(seq, id)` blocks for a long time: if `servant_get` never finds the
   row, an index entry was left behind (e.g. a maintenance script deleted only
   the row), so stop the servers and run `hetu upgrade` to rebuild indexes; if
-  the row can be read, a read-write splitting proxy is most likely sending
-  reads to a read-only node whose replication is broken: fix the replica, or
-  have the proxy take it out.
+  the row can be read, most likely a read-only node whose replication is broken
+  is still answering reads (a read-write splitting proxy and a native cluster
+  both send reads to it): fix that replica, or take it out. Until then the
+  consumer keeps stopping in front of that row; it never skips it.
 - **Caught up?** Look at whether `rows` is empty and `blocked` is None, not at
   whether the cursor equals the counter. If the newest rows were deleted before
   being consumed, the cursor stays at the last row seen until a newer row
