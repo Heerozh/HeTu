@@ -121,17 +121,21 @@ class Session(AbstractAsyncContextManager):
 
         Returns
         -------
-        The numbers this commit handed out to commit sequence columns:
-        ``{component class: {row id: number}}``, keyed by the class passed to `using`.
+        dict[type[BaseComponent], dict[int, int]]
+            The numbers this commit handed out to commit sequence columns
+            (``commit_seq``): ``{component class: {row id: number}}``, keyed by the
+            component class the repository was opened with (`using` / headless
+            ``s[...]``; for a component a headless client declared by name, that is
+            ``client.table(name).comp_cls``). Only rows this commit inserted into
+            components with a commit sequence column are included; empty dict if
+            there are none or nothing changed. The automatic commit on leaving
+            ``async with`` gives no numbers, so call this explicitly to get them.
 
-        这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类是
-        `using` 传入的那个。只含这次 insert 的、带 commit_seq 列的组件的行；没有这样的行（包括
-        没有任何修改）时是空 dict。要拿号就显式调用它，`async with` 退出时的自动提交不返回::
-
-            async with backend.session() as session:
-                await session.using(ChangeLog).insert(row)
-                seqs = await session.commit()
-            print(seqs[ChangeLog][row.id])
+            这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类是
+            取 repo 时给的那个（`using` / headless 的 ``s[...]``；headless 按组件名声明的，是
+            ``client.table(名字).comp_cls``）。只含这次 insert 的、带提交序号列的组件的行，没有
+            这样的行（包括没有任何修改）时是空 dict。`async with` 退出时的自动提交不返回号，要拿号
+            就显式调用它。
 
         Exceptions
         --------
@@ -140,6 +144,15 @@ class Session(AbstractAsyncContextManager):
             观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了，可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
+
+        Examples
+        --------
+        >>> async with client.session(ChangeLog) as s:  # headless
+        ...     row = ChangeLog.new_row(id_=-cmd_key)
+        ...     row.owner = owner
+        ...     await s[ChangeLog].insert(row)
+        ...     seqs = await s.commit()  # 行里的 seq 仍是 0，号看返回值
+        >>> seqs[ChangeLog][row.id]
         """
         # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
         seqs: dict[type[BaseComponent], dict[int, int]] = {}

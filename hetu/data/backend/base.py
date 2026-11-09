@@ -1240,9 +1240,14 @@ class BackendClient:
 
         Returns
         -------
-        这次提交里提交序号列（commit_seq）发出的号：``{组件类: {行 id: 号}}``，组件类是
-        idmap 里的（即 `Session.using` 传入的）。只含这次 insert 的、带 commit_seq 列的组件；
-        没有这样的行时是空 dict。
+        dict[type[BaseComponent], dict[int, int]]
+            The numbers this commit handed out to commit sequence columns:
+            ``{component class: {row id: number}}``, keyed by the component classes in
+            the idmap; empty dict if no row got one.
+
+            这次提交里提交序号列（commit_seq）发出的号：``{组件类: {行 id: 号}}``，组件类是
+            idmap 里的（即 `Session.using` 传入的）。只含这次 insert 的、带 commit_seq 列的
+            组件；没有这样的行时是空 dict。
 
         Exceptions
         --------

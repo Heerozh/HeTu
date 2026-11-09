@@ -44,25 +44,37 @@ class SystemContext(Context):
 
         Returns
         -------
-        The numbers this commit handed out to commit sequence columns:
-        ``{component class: {row id: number}}``, keyed like `ctx.repo` (the master
-        class for duplicated components).
+        dict[type[BaseComponent], dict[int, int]]
+            The numbers this commit handed out to commit sequence columns
+            (``commit_seq``): ``{component class: {row id: number}}``, keyed like
+            `ctx.repo` (the master class when the System references a duplicate).
+            Only rows this commit inserted into components with a commit sequence
+            column are included; empty dict if there are none. The automatic commit
+            after the System returns gives no numbers, so call this to get them.
 
-        这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类同
-        `ctx.repo` 的键（System 引用的是副本组件时也是主组件类）。只含这次 insert 的、带
-        commit_seq 列的组件的行；没有这样的行时是空 dict。System 返回后自动提交时拿不到号，
-        要拿号就在 System 里调用它::
+            这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类
+            同 `ctx.repo` 的键（System 引用的是副本组件时也是主组件类）。只含这次 insert 的、
+            带提交序号列的组件的行，没有这样的行时是空 dict。System 返回之后的自动提交不返回号，
+            要拿号就调用它。
 
-            await ctx.repo[ChangeLog].insert(row)
-            seqs = await ctx.session_commit()
-            return seqs[ChangeLog][row.id]
-
-        Raises
-        ------
+        Notes
+        -----
         如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition，UniqueViolation。
         异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试；
         UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` 观察其不存在），不重试。
         其他任何异常会记录日志并断开客户端连接。
+
+        Examples
+        --------
+        >>> @hetu.define_system(
+        ...     namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+        ... )
+        ... async def submit(ctx: hetu.SystemContext, kind: int):
+        ...     row = ChangeLog.new_row()
+        ...     row.owner, row.kind = ctx.caller, kind
+        ...     await ctx.repo[ChangeLog].insert(row)
+        ...     seqs = await ctx.session_commit()  # 行里的 seq 仍是 0，号看返回值
+        ...     return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
         """
         first_repo = next(iter(self.repo.values()), None)
         self.repo = {}
