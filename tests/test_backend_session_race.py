@@ -1115,7 +1115,9 @@ async def test_unique_absent_then_delete_same_value_is_race(item_ref, mod_auto_b
 
 # ---------------------------------------------------------------------------
 # 同一事务里并发读同一行（asyncio.gather）：两个读都没命中缓存、都去读库，读回来时以缓存为准，
-# 和顺序执行时后一个命中缓存一样。见 docs/superpowers/specs/2026-11-09-untracked-reads-design.md §5.1
+# 和顺序执行时后一个命中缓存一样。别的协程在读的期间写这张表时，按 id 读仍是这样；range、非 id
+# 的 get 遇到改了查询列、截断读时删了行不保证（见 _range_read 的注释），这里只测改非查询列和删行。
+# 见 docs/superpowers/specs/2026-11-09-untracked-reads-design.md §5.1
 # ---------------------------------------------------------------------------
 
 
@@ -1129,12 +1131,13 @@ def _ids(result) -> list[int]:
 
 
 def _readers(a):
-    """读同一行（a）的几种普通读；owner=6 上可能还有别的行"""
+    """读同一行（a）的几种普通读；owner=6 上可能还有别的行，a 的 model 要和它们都不同"""
     return {
         "get_by_id": lambda repo: repo.get_by_id(int(a.id)),
         "get_id": lambda repo: repo.get(id=int(a.id)),
         "get_unique": lambda repo: repo.get(name=str(a.name)),
-        "get_index": lambda repo: repo.get(time=int(a.time)),
+        "get_time": lambda repo: repo.get(time=int(a.time)),  # 也是 unique 列
+        "get_nonunique": lambda repo: repo.get(model=float(a.model)),
         "range": lambda repo: repo.range(owner=(6, 6), limit=-1),
     }
 
@@ -1188,10 +1191,13 @@ def _before_first_row_fetch(backend: Backend, meddle):
     [
         ("get_by_id", "get_by_id"),
         ("get_by_id", "get_id"),
-        ("get_unique", "get_index"),
+        ("get_unique", "get_time"),
+        ("get_nonunique", "get_nonunique"),
+        ("get_nonunique", "get_by_id"),
         ("range", "range"),
         ("get_by_id", "range"),
         ("range", "get_unique"),
+        ("range", "get_nonunique"),
     ],
 )
 async def test_gather_reads_same_row(item_ref, mod_auto_backend, first, second):
@@ -1199,7 +1205,7 @@ async def test_gather_reads_same_row(item_ref, mod_auto_backend, first, second):
     提交时只校验一次"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
-    a = _item(comp, owner=6, time=1, name="a")
+    a = _item(comp, owner=6, time=1, name="a", model=1.5)
     b = _item(comp, owner=6, time=2, name="b")
     await _insert_rows(backend, comp, a, b)
     readers = _readers(a)
@@ -1216,16 +1222,18 @@ async def test_gather_reads_same_row(item_ref, mod_auto_backend, first, second):
         await repo.insert(_item(comp, owner=9, time=3, name="c"))
 
 
-@pytest.mark.parametrize("reader", ["get_by_id", "get_unique", "range"])
+@pytest.mark.parametrize(
+    "reader", ["get_by_id", "get_unique", "get_nonunique", "range"]
+)
 @pytest.mark.parametrize("action", ["update", "delete"])
 async def test_read_returns_row_changed_in_txn_during_fetch(
     item_ref, mod_auto_backend, reader, action
 ):
-    """读库期间，同一事务的别的协程把这一行读进来并改了 / 删了：读回来以缓存为准，返回改后的
-    值、None、不在结果里，同顺序执行时命中缓存"""
+    """读库期间，同一事务的别的协程把这一行读进来并改了（非查询列）/ 删了：读回来以缓存为准，
+    返回改后的值、None、不在结果里，同顺序执行时命中缓存"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
-    a = _item(comp, owner=6, time=1, name="a", qty=1)
+    a = _item(comp, owner=6, time=1, name="a", qty=1, model=1.5)
     await _insert_rows(backend, comp, a)
     read = _readers(a)[reader]
 
@@ -1311,6 +1319,33 @@ async def test_id_read_returns_none_if_marked_absent_during_fetch(
         with fetch_get, fetch_many:
             assert await repo.get(id=int(late.id)) is None
         assert s1.idmap.get(repo.ref, int(late.id)) == (None, None)
+
+
+@pytest.mark.parametrize("desc", [False, True])
+async def test_range_orders_cached_and_fetched_rows(item_ref, mod_auto_backend, desc):
+    """range 读库期间，同一事务的别的协程只把中间那一行读进了缓存：重新查缓存后，缓存里的和
+    读回的按索引顺序排好，值和库里一样，缓存里每行只有一份"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, time=1, name="a", qty=1)
+    b = _item(comp, time=2, name="b", qty=2)
+    c = _item(comp, time=3, name="c", qty=3)
+    await _insert_rows(backend, comp, a, b, c)
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+
+        async def meddle():
+            assert await repo.get(id=int(b.id)) is not None
+
+        fetch_get, fetch_many = _before_first_row_fetch(backend, meddle)
+        with fetch_get, fetch_many:
+            result = await repo.range(time=(1, 3), limit=-1, desc=desc)
+        expected = [c, b, a] if desc else [a, b, c]
+        assert _ids(result) == [int(r.id) for r in expected]
+        assert result.qty.tolist() == [int(r.qty) for r in expected]
+        assert set(s1.idmap.get_clean_rows()[repo.ref]) == {int(r.id) for r in expected}
 
 
 async def test_range_skips_own_insert_deleted_during_fetch(item_ref, mod_auto_backend):
