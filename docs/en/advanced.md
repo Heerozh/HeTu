@@ -647,7 +647,8 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   services) run again when the transaction retries; make them idempotent.
 - **Trimming**: only delete the head that every consumer has passed. Deleting a
   row in the middle leaves a hole: server-side consumers confirm and skip it as
-  above, client-side consumers stop in front of it.
+  above, client-side consumers stop in front of it. A consumer outside the
+  database also needs its cursor row kept; see the note in the next subsection.
 - **Volatile tables**: numbering starts over from 1 after every maintenance;
   reset consumer cursors along with it.
 - **Consumers outside the database** (cursors kept outside the database, e.g.
