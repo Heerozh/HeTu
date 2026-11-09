@@ -22,8 +22,12 @@ if TYPE_CHECKING:
     from . import Backend, BackendClient
 
 
-type CommitFn = Callable[[IdentityMap], Awaitable[None]]
-type CommitObserver = Callable[[Session, CommitFn], Awaitable[None]]
+type CommitFn = Callable[
+    [IdentityMap], Awaitable[dict[type[BaseComponent], dict[int, int]]]
+]
+type CommitObserver = Callable[
+    [Session, CommitFn], Awaitable[dict[type[BaseComponent], dict[int, int]]]
+]
 
 commit_observer: ContextVar[CommitObserver | None] = ContextVar(
     "hetu_commit_observer", default=None
@@ -32,6 +36,8 @@ commit_observer: ContextVar[CommitObserver | None] = ContextVar(
 提交观察钩子：设置后，本上下文里每次有脏数据的 `Session.commit()` 都改为调用
 ``observer(session, commit_fn)``，由它决定是否 ``await commit_fn(session.idmap)`` 真正提交
 （dry-run 不调）、是否抛异常拒绝（写保护），并可读 ``session.idmap.get_dirty_rows()`` 记账。
+它的返回值就是 `Session.commit()` 的返回值（提交序号列发出的号）：真提交时原样交回
+``commit_fn`` 的返回值。
 只有 `hetu call` / `hetu shell` 在执行用户代码期间设置它；服务器从不设置，每次提交只多一次
 ``ContextVar.get()``。用 ContextVar 是为了只管到设置它的任务及其子任务：事先建好的后台任务
 （如雪花号租约的续约、水位循环）复制的上下文里没有它。
@@ -109,9 +115,23 @@ class Session(AbstractAsyncContextManager):
         assert self._entered, "Session must be used in `async with` block"
         return self._idmap
 
-    async def commit(self) -> None:
+    async def commit(self) -> dict[type[BaseComponent], dict[int, int]]:
         """
         向数据库提交Session中的所有数据修改
+
+        Returns
+        -------
+        The numbers this commit handed out to commit sequence columns:
+        ``{component class: {row id: number}}``, keyed by the class passed to `using`.
+
+        这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类是
+        `using` 传入的那个。只含这次 insert 的、带 commit_seq 列的组件的行；没有这样的行（包括
+        没有任何修改）时是空 dict。要拿号就显式调用它，`async with` 退出时的自动提交不返回::
+
+            async with backend.session() as session:
+                await session.using(ChangeLog).insert(row)
+                seqs = await session.commit()
+            print(seqs[ChangeLog][row.id])
 
         Exceptions
         --------
@@ -122,13 +142,15 @@ class Session(AbstractAsyncContextManager):
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
         """
         # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
+        seqs: dict[type[BaseComponent], dict[int, int]] = {}
         if self._idmap.is_dirty:
             observer = commit_observer.get()
             if observer is None:
-                await self._master.commit(self._idmap)
+                seqs = await self._master.commit(self._idmap)
             else:
-                await observer(self, self._master.commit)
+                seqs = await observer(self, self._master.commit)
         self.clean()
+        return seqs
 
     def discard(self) -> None:
         """放弃Session中的所有数据修改"""

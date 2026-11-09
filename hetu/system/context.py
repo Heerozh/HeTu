@@ -36,7 +36,7 @@ class SystemContext(Context):
     """`depends` 依赖中声明的父事务函数字典，键为System名（可带":副本名"后缀）。
     通过 `ctx.depend["system_name"](ctx, ...)` 调用以在同一事务中执行。"""
 
-    async def session_commit(self) -> None:
+    async def session_commit(self) -> dict[type[BaseComponent], dict[int, int]]:
         """
         提前显式结束事务，提交所有写入操作。如果遇到事务冲突，会抛出异常，因此后续的代码行不会执行。
         注意：调用完 `session_commit`，`ctx` 将不再能够读写 `repo` 。且后续不再属于事务，
@@ -44,6 +44,21 @@ class SystemContext(Context):
 
         Returns
         -------
+        The numbers this commit handed out to commit sequence columns:
+        ``{component class: {row id: number}}``, keyed like `ctx.repo` (the master
+        class for duplicated components).
+
+        这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类同
+        `ctx.repo` 的键（System 引用的是副本组件时也是主组件类）。只含这次 insert 的、带
+        commit_seq 列的组件的行；没有这样的行时是空 dict。System 返回后自动提交时拿不到号，
+        要拿号就在 System 里调用它::
+
+            await ctx.repo[ChangeLog].insert(row)
+            seqs = await ctx.session_commit()
+            return seqs[ChangeLog][row.id]
+
+        Raises
+        ------
         如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition，UniqueViolation。
         异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试；
         UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` 观察其不存在），不重试。
@@ -51,8 +66,11 @@ class SystemContext(Context):
         """
         first_repo = next(iter(self.repo.values()), None)
         self.repo = {}
-        if first_repo is not None:
-            await first_repo.session.commit()
+        if first_repo is None:
+            return {}
+        seqs = await first_repo.session.commit()
+        # 和 SystemCaller 挂 ctx.repo 时一样，副本组件换成主组件类
+        return {(comp.master_ or comp): numbers for comp, numbers in seqs.items()}
 
     async def session_discard(self) -> None:
         """

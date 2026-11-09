@@ -106,11 +106,11 @@ def _run_checks(
     return None
 
 
-def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
+def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> list[tuple[int, int]] | bytes:
     """
-    Phase 2 开头：提交序号列这次要发的号，返回 {seq_allocs 的下标（从 1 起）: 第一个号}。全成或
-    全不发，同 Lua 的减回：先读出各计数器、检查完，全部通过才写；有一个不是整数、加了会溢出
-    int64，或者发出的号不在 [1, 2^53) 里，就返回失败串，什么都不写。
+    Phase 2 开头：提交序号列这次要发的号，返回每个计数器的 (第一个号, 发完之后的值)，顺序同
+    seq_allocs。全成或全不发，同 Lua 的减回：先读出各计数器、检查完，全部通过才写；有一个不是
+    整数、加了会溢出 int64，或者发出的号不在 [1, 2^53) 里，就返回失败串，什么都不写。
 
     不是整数、溢出 int64 时 Redis 是 INCRBY 报错，提交脚本原样返回它的错误（redis-py 抛
     ResponseError）；这里返回同样内容的 SEQ 失败串（抛 RuntimeError），报错信息对得上
@@ -128,7 +128,7 @@ def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
         pending.append((counter_key.decode(), last, current + 1))
     for key, last, _first in pending:
         store.kv_set(key, b"%d" % last)
-    return {slot: first for slot, (_k, _l, first) in enumerate(pending, start=1)}
+    return [(first, last) for _key, last, first in pending]
 
 
 def _run_pushes(
@@ -188,12 +188,15 @@ def _run_pushes(
 
 def run_commit(
     store: SQLiteStore, packed: bytes, cleanup_before: float | None = None
-) -> bytes:
+) -> bytes | list:
     """
     执行一次提交。packed 是 `RedisModelClient.build_commit_payload_` 的 payload 经 msgpack 打包，
     结构: [ [checks...], [pushes...], {deleted...}, [table_pubs...], [value_chans...],
     [seq_allocs...] ]；按 `raw=True` 解开，和 Lua 里一样全是字节串，末尾缺的元素按空处理（同 Lua
     的 nil）。cleanup_before 不为 None 时，顺手清掉这之前的通知（和提交同一个事务；校验不过时照样清）。
+
+    返回值同 Lua：成功时没有号要发是 ``b"committed"``，有号要发是 ``[b"committed", 各计数器发完
+    之后的值, ...]``（顺序同 seq_allocs）；失败时是失败串。
     """
     payload: list = list(msgpack.unpackb(packed, raw=True))
     payload += [None] * (6 - len(payload))
@@ -206,13 +209,17 @@ def run_commit(
     with store.write_txn():
         # 校验只读：没通过时什么都还没写，不用回滚
         failure = _run_checks(store, checks, deleted, pushes)
-        seq_next: dict[int, int] = {}
+        seq_next: dict[int, int] = {}  # seq_allocs 的下标（从 1 起）→ 下一个要发的号
+        seq_lasts: list[int] = []
         if failure is None and seq_allocs:
             allocated = _alloc_seqs(store, seq_allocs)
             if isinstance(allocated, bytes):
                 failure = allocated
             else:
-                seq_next = allocated
+                seq_next = {
+                    slot: first for slot, (first, _last) in enumerate(allocated, 1)
+                }
+                seq_lasts = [last for _first, last in allocated]
         if failure is None:
             channels = _run_pushes(store, pushes, seq_next)
             # Phase 3: 表频道（payload 是 msgpack 的 row_id 列表）/ 索引值频道（无 payload）
@@ -224,4 +231,6 @@ def run_commit(
                 store.notify_insert(channels.items(), time.time())
         if cleanup_before is not None:
             store.notify_cleanup(cleanup_before)
-    return b"committed" if failure is None else failure
+    if failure is not None:
+        return failure
+    return [b"committed", *seq_lasts] if seq_allocs else b"committed"

@@ -914,9 +914,9 @@ async def test_commit_routes_to_group_keys(slot_ref, mod_auto_backend):
     original = master.build_commit_payload_
 
     def capture(idmap):
-        keys, payload = original(idmap)
+        keys, payload, seq_rows = original(idmap)
         payloads.append(payload)
-        return keys, payload
+        return keys, payload, seq_rows
 
     def level_writes() -> list[tuple[str, str]]:
         """最近一次提交里 level 索引的 (命令, key)"""

@@ -533,7 +533,9 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         )
 
     @override
-    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
+    def commit_script_(
+        self, keys: list[str], args: list[bytes]
+    ) -> Awaitable[bytes | list]:
         """
         执行 commit_v2.lua（`configure_master` 里加载），见基类。不包一层 async：直接交出
         lua_commit 的 awaitable，commit 路径上少一层协程

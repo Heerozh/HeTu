@@ -170,9 +170,9 @@ async def test_nan_sign_update_no_self_collision(pair_ref, mod_auto_backend):
     payloads: list[list] = []
 
     def capture(idmap):
-        keys, payload = original(idmap)
+        keys, payload, seq_rows = original(idmap)
         payloads.append(payload)
-        return keys, payload
+        return keys, payload, seq_rows
 
     master.build_commit_payload_ = capture  # type: ignore
     try:

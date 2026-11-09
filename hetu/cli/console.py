@@ -37,6 +37,7 @@ from ..i18n import _
 from .base import UsageError
 
 if TYPE_CHECKING:
+    from ..data import BaseComponent
     from ..data.backend.session import CommitFn, Session
     from ..local import LocalApp
 
@@ -470,6 +471,18 @@ def summarize_writes(session: Session, dirty: dict, committed: bool) -> dict | N
     }
 
 
+def _dry_run_seqs(dirty: dict) -> dict[type[BaseComponent], dict[int, int]]:
+    """
+    dry-run 不提交、不发号：本该拿号的行（带提交序号列的组件这次 insert 的行）都给 0，提交序号
+    列里 0 就是"没有号"。提前 `ctx.session_commit()`、之后用到号的 System 照样能跑完
+    """
+    return {
+        ref.comp_cls: {int(row["id"]): 0 for row in inserts}
+        for ref, (inserts, _updates, _deletes) in dirty.items()
+        if ref.comp_cls.commit_seq_ and inserts
+    }
+
+
 def _ids_by_op(dirty: dict) -> dict:
     """审计里只记各表按操作分组的 id，全部记（写集摘要每种操作只列 MAX_WRITE_ROWS 行）"""
     out: dict[str, dict[str, list]] = {}
@@ -506,7 +519,9 @@ class WriteRecorder:
         self.warnings: list[str] = []
         self._production_warned = False
 
-    async def __call__(self, session: Session, commit_fn: CommitFn) -> None:
+    async def __call__(
+        self, session: Session, commit_fn: CommitFn
+    ) -> dict[type[BaseComponent], dict[int, int]]:
         from ..data.backend.base import RaceCondition, UniqueViolation
 
         dirty = session.idmap.get_dirty_rows()
@@ -516,12 +531,11 @@ class WriteRecorder:
         if self.mode == "dry_run":
             if entry is not None:
                 self.writes.append(entry)
-            return
+            return _dry_run_seqs(dirty)
         if entry is None:
-            await commit_fn(session.idmap)
-            return
+            return await commit_fn(session.idmap)
         try:
-            await commit_fn(session.idmap)
+            seqs = await commit_fn(session.idmap)
         except RaceCondition, UniqueViolation:
             raise  # 后端拒绝了这次提交，什么都没写（RaceCondition 时事务会重试）
         except BaseException:
@@ -538,6 +552,7 @@ class WriteRecorder:
             )
             self.warnings.append(msg)
             logger.warning("⚠️ " + msg)
+        return seqs
 
     def _record(self, entry: dict, dirty: dict) -> None:
         self.writes.append(entry)

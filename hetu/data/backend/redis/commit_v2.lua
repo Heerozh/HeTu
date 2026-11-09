@@ -15,6 +15,9 @@ local value_chans = payload[5]
 -- 提交序号列（commit_seq）这次要发的号：[[计数器 key, 个数], ...]。没有号要发时不带这一段，
 -- 下面相关的表、循环都不建：所有提交都走这个脚本，不能让不用提交序号列的也多付开销
 local seq_allocs = payload[6]
+-- 提交成功的返回值：没有号要发时是 "committed"；有号要发时是 {"committed", 各计数器发完之后的
+-- 值, ...}（顺序同 seq_allocs），Python 侧按 HSETSEQ 的顺序算出每一行拿到的号
+local committed = "committed"
 
 -- ============================================================================
 -- Phase 1: Checks
@@ -118,6 +121,7 @@ end
 local seq_next = nil
 if seq_allocs then
     seq_next = {}
+    committed = { "committed" }
     for i, alloc in ipairs(seq_allocs) do
         local last = redis.pcall("INCRBY", alloc[1], alloc[2])
         local failed = type(last) == "table"
@@ -133,6 +137,8 @@ if seq_allocs then
             return "SEQ: Counter out of range " .. alloc[1]
         end
         seq_next[i] = last - alloc[2] + 1
+        -- 号 < 2^53，Lua 的数转成 Redis 整数回复时是精确的
+        committed[i + 1] = last
     end
 end
 
@@ -188,4 +194,4 @@ if value_chans then
     end
 end
 
-return "committed"
+return committed

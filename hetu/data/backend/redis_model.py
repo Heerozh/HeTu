@@ -1204,15 +1204,20 @@ class RedisModelClient(BackendClient):
             kept_all.extend(kept)
         return kept_all
 
-    def build_commit_payload_(self, idmap: IdentityMap) -> tuple[list[str], list]:
+    def build_commit_payload_(
+        self, idmap: IdentityMap
+    ) -> tuple[list[str], list, list[tuple[type[BaseComponent], list[int]]]]:
         """
-        把 IdentityMap 里的修改组装成提交脚本的输入：返回 (keys, payload)，payload 为
+        把 IdentityMap 里的修改组装成提交脚本的输入：返回 (keys, payload, seq_rows)，payload 为
         `[checks, pushes, deleted, table_pubs, value_chans, seq_allocs]`（格式见
         `redis/commit_v2.lua`），没有号要发时不带最后的 `seq_allocs`。
 
         提交序号列（commit_seq）的组件，insert 的 HSET 换成 HSETSEQ：号由提交脚本在检查都通过
         之后发（`seq_allocs` 是这次每个计数器要发几个），写进这一行、拼出这一行在这个索引上的
         member（见 `seq_counter_key_`、设计稿 docs/superpowers/specs/2026-11-09-commit-seq-design.md）。
+
+        seq_rows 和 seq_allocs 一一对应：(组件类, 这个计数器发号的行 id，按 HSETSEQ 的顺序)。
+        提交脚本按这个顺序发号，返回各计数器发完之后的值，`commit` 据此算出每一行拿到的号。
         """
 
         def _key_must_not_exist(_key: str, _race: bool, _label: str):
@@ -1287,14 +1292,19 @@ class RedisModelClient(BackendClient):
             _zset_key: str,
             _prefix: bytes,
             _b_row_id: bytes,
+            _comp_cls: type[BaseComponent],
+            _row_id: int,
         ):
             """
             添加 HSETSEQ：提交脚本按 seq_allocs 的第 _slot 项发号，写进这一行（号放在 HSET 的最后
             一对，中间要是还留着 0 也会被它盖掉），再把 P + 号的编码 + 0x00 + id 段 ZADD 到组 key
             """
-            # 下标按第一次出现的顺序从 1 起（Lua 数组从 1 开始），和 seq_counts 的顺序一致
-            _slot = seq_slots.setdefault(_counter_key, len(seq_slots) + 1)
-            seq_counts[_counter_key] = seq_counts.get(_counter_key, 0) + 1
+            # 下标按第一次出现的顺序从 1 起（Lua 数组从 1 开始），和 seq_allocs 的顺序一致
+            _alloc = seq_allocs.get(_counter_key)
+            if _alloc is None:
+                _alloc = seq_allocs[_counter_key] = (len(seq_allocs) + 1, _comp_cls, [])
+            _slot = _alloc[0]
+            _alloc[2].append(_row_id)
             _update.pop(_seq_name, None)  # 行里的 0 不写，号由提交脚本填
             _args = _hset_args(random.randrange(FIRST_VERSION_SPAN), _update)
             pushes.append(
@@ -1345,11 +1355,10 @@ class RedisModelClient(BackendClient):
         # - 值频道 channel（消息为空串）：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条
         table_pubs: list[list[str | bytes]] = []
         value_chans: dict[str, None] = {}  # 有序去重
-        # 提交序号列这次要发的号：计数器 key → 个数，按第一次出现的顺序，最后变成 payload 的
-        # seq_allocs [[计数器 key, 个数], …]；seq_slots 是计数器 key → 在其中的下标（从 1 起），
-        # HSETSEQ 按下标取号
-        seq_counts: dict[str, int] = {}
-        seq_slots: dict[str, int] = {}
+        # 提交序号列这次要发的号：计数器 key → (下标, 组件类, 这个计数器发号的行 id)，按第一次
+        # 出现的顺序，下标从 1 起，HSETSEQ 按下标取号。最后变成 payload 的 seq_allocs
+        # [[计数器 key, 个数], …] 和返回的 seq_rows
+        seq_allocs: dict[str, tuple[int, type[BaseComponent], list[int]]] = {}
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             cluster_prefix = self.cluster_prefix(ref)
@@ -1414,6 +1423,8 @@ class RedisModelClient(BackendClient):
                         self.index_zset_key_(idx_prefix + seq_name, seq_prefix),
                         seq_prefix,
                         b_row_id,
+                        comp_cls,
+                        int(row_id),
                     )
                 for name, idx_key, value in entries:
                     _enter_channel(comp_cls, name, idx_key, value)
@@ -1550,45 +1561,53 @@ class RedisModelClient(BackendClient):
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
         payload: list[Any] = [checks, pushes, deleted, table_pubs, list(value_chans)]
-        if seq_counts:
+        seq_rows: list[tuple[type[BaseComponent], list[int]]] = []
+        if seq_allocs:
             # 没有号要发时不带这一段：提交脚本读到 nil，就不建发号用的表、不进发号的循环
-            payload.append([[key, count] for key, count in seq_counts.items()])
-        return keys, payload
+            payload.append(
+                [[key, len(ids)] for key, (_slot, _cls, ids) in seq_allocs.items()]
+            )
+            seq_rows = [(cls, ids) for _slot, cls, ids in seq_allocs.values()]
+        return keys, payload, seq_rows
 
     @staticmethod
-    def raise_for_commit_response_(resp: bytes) -> None:
+    def raise_for_commit_response_(resp: bytes | list) -> Never:
         """
-        提交脚本的返回串 → 异常：`RACE` 可重试，`UNIQUE` 是确定性冲突，`SEQ` 是提交序号列发号失败
-        （发出的号会超出 [1, 2^53)：计数器到了上限，或者被手工改成了负数），一个号都没发、什么都
-        没写，不重试。计数器上的 Redis 命令出错（比如 key 被写成了别的类型）时，提交脚本把已经
-        加上去的计数器减回去，再原样返回 Redis 的错误，由 redis-py 抛出
+        提交脚本没有返回成功（见 `commit_script_`）→ 异常：`RACE` 可重试，`UNIQUE` 是确定性冲突，
+        `SEQ` 是提交序号列发号失败（发出的号会超出 [1, 2^53)：计数器到了上限，或者被手工改成了
+        负数），一个号都没发、什么都没写，不重试。计数器上的 Redis 命令出错（比如 key 被写成了
+        别的类型）时，提交脚本把已经加上去的计数器减回去，再原样返回 Redis 的错误，由 redis-py 抛出
         """
-        text = resp.decode("utf-8")
-        if text != "committed":
-            if text.startswith("RACE"):
-                raise RaceCondition(text)
-            elif text.startswith("UNIQUE"):
-                # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
-                raise UniqueViolation(text)
-            elif text.startswith("SEQ"):
-                raise RuntimeError(
-                    _("提交序号列发号失败，本次提交没有写入：{resp}").format(resp=text)
-                )
-            else:
-                raise RuntimeError(_("未知的提交错误：{resp}").format(resp=text))
+        text = resp.decode("utf-8") if isinstance(resp, bytes) else repr(resp)
+        if text.startswith("RACE"):
+            raise RaceCondition(text)
+        elif text.startswith("UNIQUE"):
+            # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
+            raise UniqueViolation(text)
+        elif text.startswith("SEQ"):
+            raise RuntimeError(
+                _("提交序号列发号失败，本次提交没有写入：{resp}").format(resp=text)
+            )
+        raise RuntimeError(_("未知的提交错误：{resp}").format(resp=text))
 
-    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
+    def commit_script_(
+        self, keys: list[str], args: list[bytes]
+    ) -> Awaitable[bytes | list]:
         """
         原子执行一次提交：`args[0]` 是 msgpack 打包的 payload（见 `build_commit_payload_`），返回
-        `b"committed"` 或 `b"RACE: …"` / `b"UNIQUE: …"` 的 awaitable。Redis 是 `commit_v2.lua`，
-        SQLite 是它的 Python 版。测试的碰头点、抓 payload 都 patch 这里。
+        的 awaitable 结果是：成功时 `b"committed"`，有号要发（payload 带 seq_allocs）时是
+        `[b"committed", 各计数器发完之后的值, …]`（顺序同 seq_allocs）；失败时是
+        `b"RACE: …"` / `b"UNIQUE: …"` / `b"SEQ: …"`。Redis 是 `commit_v2.lua`，SQLite 是它的
+        Python 版。测试的碰头点、抓 payload 都 patch 这里。
         """
         raise NotImplementedError
 
     @override
-    async def commit(self, idmap: IdentityMap) -> None:
+    async def commit(
+        self, idmap: IdentityMap
+    ) -> dict[type[BaseComponent], dict[int, int]]:
         """
-        使用事务，向数据库提交IdentityMap中的所有数据修改
+        使用事务，向数据库提交IdentityMap中的所有数据修改，返回提交序号列发出的号（见基类）
 
         Exceptions
         --------
@@ -1601,10 +1620,21 @@ class RedisModelClient(BackendClient):
 
         """
         assert not self.is_servant, _("从节点不允许提交事务")
-        keys, payload = self.build_commit_payload_(idmap)
+        keys, payload, seq_rows = self.build_commit_payload_(idmap)
         resp = await self.commit_script_(keys, [msg_packer.pack(payload)])  # type: ignore
-        if resp != b"committed":
-            self.raise_for_commit_response_(resp)
+        if not seq_rows:
+            if resp == b"committed":
+                return {}
+        elif type(resp) is list and resp[:1] == [b"committed"]:
+            # 各计数器这次发的号是连续的一段，到发完之后的值为止，按 HSETSEQ 的顺序分给各行
+            seqs: dict[type[BaseComponent], dict[int, int]] = {}
+            for (comp_cls, row_ids), last in zip(seq_rows, resp[1:], strict=True):
+                first = int(last) - len(row_ids) + 1
+                seqs.setdefault(comp_cls, {}).update(
+                    zip(row_ids, range(first, first + len(row_ids)))
+                )
+            return seqs
+        self.raise_for_commit_response_(resp)
 
     # ============ 其他 ============
 
