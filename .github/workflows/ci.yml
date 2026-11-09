@@ -47,6 +47,10 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  # docs/api 由 scripts/gen_api_docs.py 从 docstring 生成，每个条目带源码行号：功能 PR 各自提交
+  # 的话，改了同一个源文件的 PR 必定因为行号互相冲突。它的读者（文档站、hetu/llms.txt）只读 main，
+  # 所以功能 PR 不提交 docs/api，这里只确认生成脚本能跑通；只有发版 PR（dev → main）才比对是否
+  # 过期。job 名不改：分支保护里可能把它设成了必过的检查
   api-docs-drift:
     timeout-minutes: 5
     runs-on: ubuntu-latest
@@ -63,12 +67,13 @@ jobs:
           pip install --group dev
       - name: Regenerate API docs
         run: python scripts/gen_api_docs.py
-      - name: Fail if docs/api/ has drifted
+      - name: Fail if docs/api/ has drifted (release PRs into main only)
+        if: github.base_ref == 'main'
         run: |
           if ! git diff --exit-code -- docs/api/; then
             echo ""
-            echo "::error::docs/api/ is out of date. Run:"
+            echo "::error::docs/api/ is out of date. On dev, run:"
             echo "::error::    uv run python scripts/gen_api_docs.py"
-            echo "::error::then commit the result."
+            echo "::error::then commit the result to dev and push before merging this release PR."
             exit 1
           fi
