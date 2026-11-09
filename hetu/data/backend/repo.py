@@ -243,21 +243,44 @@ class SessionRepository:
         从数据库获取单行数据，并放入`Session`缓存。
         本指令如果命中缓存，不会去数据库查询。
         """
-        # 主键查询，先查缓存
-        row_id = cast(int, row_id)
-        row, row_stat = self._session.idmap.get(self.ref, row_id)
-        if row_stat is not None:
-            return None if row_stat == RowState.DELETE else row
-        return await self._fetch_by_id(row_id)
+        return await self._get_by_id(cast(int, row_id), absent=False)
 
-    async def _fetch_by_id(self, row_id: int) -> np.record | None:
-        """缓存未命中：查数据库，读到就放进 Session 缓存"""
-        row = await self._session.master_or_servant.get(
+    def _cached_by_id(self, row_id: int, absent: bool) -> tuple[bool, np.record | None]:
+        """
+        按 id 读时本事务里已有的答案：缓存里有这一行（本事务删掉的算 None），或者 absent 时读空
+        记录里有。返回 (有没有答案, 答案)
+        """
+        idmap = self._session.idmap
+        row, row_stat = idmap.get(self.ref, row_id)
+        if row_stat is not None:
+            return True, (None if row_stat == RowState.DELETE else row)
+        if absent and idmap.observed_absent(self.ref, "id", row_id):
+            return True, None
+        return False, None
+
+    async def _get_by_id(self, row_id: int, absent: bool) -> np.record | None:
+        """
+        按 id 读：缓存（含本事务新 insert 的行）→ absent 时看读空记录 → 读数据库。读到的放进缓存；
+        absent 时读空登记读空记录（主键恒为 unique）
+        """
+        known, row = self._cached_by_id(row_id, absent)
+        if known:
+            return row
+        fetched = await self._session.master_or_servant.get(
             self.ref, row_id, RowFormat.STRUCT
         )
-        if row is not None:
-            self._session.idmap.add_clean(self.ref, row)
-        return row
+        # 读库期间，同一事务的别的协程可能已经把这一行读进缓存、改了它，或者读空登记了它
+        # （asyncio.gather 并发读）：以本事务里已有的为准，同顺序执行时后一个读命中缓存一样。
+        # 缓存里那份和读回的版本不同也用缓存的：版本号分不出新旧，提交时它的 VER 照常校验
+        known, row = self._cached_by_id(row_id, absent)
+        if known:
+            return row
+        idmap = self._session.idmap
+        if fetched is not None:
+            idmap.add_clean(self.ref, fetched)
+        elif absent:
+            idmap.mark_absent(self.ref, "id", row_id)
+        return fetched
 
     def _point_kwargs(
         self,
@@ -446,18 +469,7 @@ class SessionRepository:
                 idmap.mark_absent(self.ref, index_name, absent_key)
             return None
         else:
-            row_id = int(query_value)
-            # 先查cache（含本事务新 insert 的行），再看 negative cache，最后才去数据库
-            row, row_stat = idmap.get(self.ref, row_id)
-            if row_stat is not None:
-                return None if row_stat == RowState.DELETE else row
-            if idmap.observed_absent(self.ref, "id", row_id):
-                return None
-            row = await self._fetch_by_id(row_id)
-            if row is None:
-                # 主键id恒为unique，登记“本事务观察到该id不存在”
-                idmap.mark_absent(self.ref, "id", row_id)
-            return row
+            return await self._get_by_id(int(query_value), absent=True)
 
     async def range(
         self,
@@ -752,6 +764,12 @@ class SessionRepository:
         if miss_ids:
             # 读不到的行是读索引与取行之间刚被删除的，跳过（记进观察，commit 直接判竞态）
             fetched, missing = await client.get_many_array_(ref, miss_ids)
+            if len(fetched) and idmap.has_any(ref, fetched["id"].tolist()):
+                # 读库期间，同一事务的别的协程把其中一些行读进了缓存、或者改了它们（asyncio.gather
+                # 并发读）：这些行以缓存为准，同顺序执行时命中缓存一样，缓存里还没有的才放进去。
+                # 版本不同也用缓存的：版本号分不出新旧，提交时它的 VER 照常校验
+                cached, index_of, miss_ids = idmap.lookup(ref, ids)
+                fetched = cast(np.recarray, fetched[np.isin(fetched["id"], miss_ids)])
             if len(fetched) == 1:
                 # 点查通常只取一行：单行缓存路径比按批加入快
                 idmap.add_clean(ref, fetched[0])

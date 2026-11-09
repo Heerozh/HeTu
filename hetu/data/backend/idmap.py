@@ -685,6 +685,13 @@ class IdentityMap:
         """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
         return len(self._row_cache.get(table_ref, ())) > 0
 
+    def has_any(self, table_ref: TableReference, row_ids: Collection[int]) -> bool:
+        """这些 id 里有没有已经在缓存里的（读到的、本事务写入的、删掉的都算）"""
+        states = self._row_states.get(table_ref)
+        if not states:
+            return False
+        return any(row_id in states for row_id in row_ids)
+
     def lookup(
         self, table_ref: TableReference, row_ids: list[int]
     ) -> tuple[np.recarray | None, dict[int, int], list[int]]:

@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 from fixtures.backends import raw_hset
 
@@ -1110,3 +1111,203 @@ async def test_unique_absent_then_delete_same_value_is_race(item_ref, mod_auto_b
             assert await repo.get(id=int(theirs.id)) is not None
             repo.delete(int(theirs.id))
             await repo.insert(_item(comp, time=2, name="v"))
+
+
+# ---------------------------------------------------------------------------
+# 同一事务里并发读同一行（asyncio.gather）：两个读都没命中缓存、都去读库，读回来时以缓存为准，
+# 和顺序执行时后一个命中缓存一样。见 docs/superpowers/specs/2026-11-09-untracked-reads-design.md §5.1
+# ---------------------------------------------------------------------------
+
+
+def _ids(result) -> list[int]:
+    """get 返回的一行 / None、range 返回的 recarray，统一成 id 列表"""
+    if result is None:
+        return []
+    if isinstance(result, np.record):
+        return [int(result.id)]
+    return [int(i) for i in result.id]
+
+
+def _readers(a):
+    """读同一行（a）的几种普通读；owner=6 上可能还有别的行"""
+    return {
+        "get_by_id": lambda repo: repo.get_by_id(int(a.id)),
+        "get_id": lambda repo: repo.get(id=int(a.id)),
+        "get_unique": lambda repo: repo.get(name=str(a.name)),
+        "get_index": lambda repo: repo.get(time=int(a.time)),
+        "range": lambda repo: repo.range(owner=(6, 6), limit=-1),
+    }
+
+
+def _patch_row_fetch(backend: Backend, wrapper):
+    """把 master 的两种取行（按 id 的 get、range 的 get_many_array_）都包一层：
+    wrapper(orig, *args, **kwargs)。调用方的 session 要 only_master"""
+    master = backend.master
+    orig_get, orig_many = master.get, master.get_many_array_
+
+    async def get(*args, **kwargs):
+        return await wrapper(orig_get, *args, **kwargs)
+
+    async def get_many_array_(*args, **kwargs):
+        return await wrapper(orig_many, *args, **kwargs)
+
+    return (
+        patch.object(master, "get", new=get),
+        patch.object(master, "get_many_array_", new=get_many_array_),
+    )
+
+
+def _meet_at_row_fetch(backend: Backend, parties: int = 2):
+    """每个读在取行之前碰头：都查过缓存、都没命中之后才一起去读库"""
+    meet = _rendezvous(parties)
+
+    async def wrapper(orig, *args, **kwargs):
+        await meet()
+        return await orig(*args, **kwargs)
+
+    return _patch_row_fetch(backend, wrapper)
+
+
+def _before_first_row_fetch(backend: Backend, meddle):
+    """第一次取行之前先跑 meddle()（之后的取行照常）：构造"这个读查过缓存、还没读回来时，
+    同一事务的别的协程动了这一行"。meddle 里自己的读不再拦"""
+    fired = False
+
+    async def wrapper(orig, *args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            await meddle()
+        return await orig(*args, **kwargs)
+
+    return _patch_row_fetch(backend, wrapper)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("get_by_id", "get_by_id"),
+        ("get_by_id", "get_id"),
+        ("get_unique", "get_index"),
+        ("range", "range"),
+        ("get_by_id", "range"),
+        ("range", "get_unique"),
+    ],
+)
+async def test_gather_reads_same_row(item_ref, mod_auto_backend, first, second):
+    """两个读并发读同一行：不报 "already exists in cache"，拿到同一份；缓存里这一行只有一份，
+    提交时只校验一次"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a")
+    b = _item(comp, owner=6, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+    readers = _readers(a)
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        fetch_get, fetch_many = _meet_at_row_fetch(backend)
+        with fetch_get, fetch_many:
+            r1, r2 = await asyncio.gather(readers[first](repo), readers[second](repo))
+        assert int(a.id) in _ids(r1) and int(a.id) in _ids(r2)
+        read_ids = set(_ids(r1)) | set(_ids(r2))
+        assert set(s1.idmap.get_clean_rows()[repo.ref]) == read_ids
+        await repo.insert(_item(comp, owner=9, time=3, name="c"))
+
+
+@pytest.mark.parametrize("reader", ["get_by_id", "get_unique", "range"])
+@pytest.mark.parametrize("action", ["update", "delete"])
+async def test_read_returns_row_changed_in_txn_during_fetch(
+    item_ref, mod_auto_backend, reader, action
+):
+    """读库期间，同一事务的别的协程把这一行读进来并改了 / 删了：读回来以缓存为准，返回改后的
+    值、None、不在结果里，同顺序执行时命中缓存"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a", qty=1)
+    await _insert_rows(backend, comp, a)
+    read = _readers(a)[reader]
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+
+        async def meddle():
+            row = await repo.get(id=int(a.id))
+            assert row is not None
+            if action == "update":
+                row.qty = 7
+                await repo.update(row)
+            else:
+                repo.delete(int(a.id))
+
+        fetch_get, fetch_many = _before_first_row_fetch(backend, meddle)
+        with fetch_get, fetch_many:
+            result = await read(repo)
+        if action == "update":
+            assert _ids(result) == [int(a.id)]
+            row = result if isinstance(result, np.record) else result[0]
+            assert row.qty == 7
+        else:
+            assert _ids(result) == []
+
+
+@pytest.mark.parametrize("reader", ["get_by_id", "range"])
+async def test_read_keeps_cached_version_if_row_changed_between_reads(
+    item_ref, mod_auto_backend, reader
+):
+    """先到的读放进缓存的是旧版本，后到的读回的是别的事务改过的新版本：以缓存为准（版本号分不出
+    新旧，读回的也可能来自更落后的副本），提交时缓存那份的 VER 判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a", qty=1)
+    await _insert_rows(backend, comp, a)
+    read = _readers(a)[reader]
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+
+            async def meddle():
+                row = await repo.get(id=int(a.id))
+                assert row is not None and row.qty == 1
+                async with backend.session("pytest", 1) as s2:
+                    s2.only_master = True
+                    theirs = await s2.using(comp).get(id=int(a.id))
+                    assert theirs is not None
+                    theirs.qty = 2
+                    await s2.using(comp).update(theirs)
+
+            fetch_get, fetch_many = _before_first_row_fetch(backend, meddle)
+            with fetch_get, fetch_many:
+                result = await read(repo)
+            row = result if isinstance(result, np.record) else result[0]
+            assert row.qty == 1
+            await repo.insert(_item(comp, owner=9, time=3, name="c"))
+
+
+async def test_id_read_returns_none_if_marked_absent_during_fetch(
+    item_ref, mod_auto_backend
+):
+    """按 id 读，读库期间同一事务的别的协程读空登记了这个 id、随后它被别的事务插入：读回来以
+    读空记录为准，返回 None，读回的行不进缓存，同顺序执行时命中读空记录"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    late = _item(comp, owner=6, time=1, name="late", id_=987654321)
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+
+        async def meddle():
+            assert await repo.get(id=int(late.id)) is None
+            async with backend.session("pytest", 1) as s2:
+                s2.only_master = True
+                await s2.using(comp).insert(late)
+
+        fetch_get, fetch_many = _before_first_row_fetch(backend, meddle)
+        with fetch_get, fetch_many:
+            assert await repo.get(id=int(late.id)) is None
+        assert s1.idmap.get(repo.ref, int(late.id)) == (None, None)
