@@ -160,12 +160,25 @@ async def test_seq_head_requires_commit_seq(new_component_env, mod_auto_backend)
 
 @pytest.mark.parametrize("raw", [b"abc", b"-1", b" 5", b"05", b"+5", b"5.0"])
 async def test_seq_head_rejects_corrupted_counter(cmd: Table, raw: bytes):
-    """计数器被写坏（不是 Redis 认的非负整数）：RuntimeError，报错里带着 key"""
+    """计数器被写坏（不是 Redis 认的非负整数）：RuntimeError，报错里带着 key 和值"""
     key = raw_seq_counter_key(cmd.backend, cmd, owner=7)
     raw_kv_set(cmd.backend, key, raw)
+    await cmd.backend.wait_for_synced()
     with pytest.raises(RuntimeError, match="计数器") as err:
         await cmd.servant_seq_head(group={"owner": 7})
     assert key in str(err.value)
+    assert repr(raw) in str(err.value)
+
+
+@pytest.mark.parametrize("raw", [b"abc", b"-1"])
+async def test_seq_head_many_isolates_corrupted_counter(cmd: Table, raw: bytes):
+    """批量读：计数器被写坏的那一组是 None，别的组照常返回，不整批抛异常"""
+    await insert(cmd, *[{"owner": 7}] * 3)
+    await insert(cmd, *[{"owner": 8}] * 2)
+    raw_kv_set(cmd.backend, raw_seq_counter_key(cmd.backend, cmd, owner=7), raw)
+    await cmd.backend.wait_for_synced()
+    heads = await cmd.servant_seq_head_many([{"owner": 8}, {"owner": 7}, {"owner": 9}])
+    assert heads == [2, None, 0]
 
 
 @use_redis_family_backend_only
@@ -504,7 +517,7 @@ async def test_seq_read_row_formats(cmd: Table):
 class Consumer:
     """
     设计稿 §6 的写法：每组的游标是（号、雪花 id），存在快照里；先读计数器，只读有新号的组；
-    按组捕获 CommitSeqDiverged，只停那一组
+    按组捕获 CommitSeqDiverged，只停那一组；计数器被写坏的组报警、照常读
     """
 
     def __init__(self, tbl: Table, owners: list[int], snapshot=None):
@@ -512,6 +525,7 @@ class Consumer:
         self.owners = owners
         self.cursors: dict[int, tuple[int, int | None]] = dict(snapshot or {})
         self.stopped: dict[int, CommitSeqDiverged] = {}
+        self.bad_counters: set[int] = set()  # 报过警的、计数器被写坏的组
         self.handled: list[tuple[int, int, int]] = []  # (owner, 号, 行 id)
 
     def snapshot(self) -> dict[int, tuple[int, int | None]]:
@@ -527,7 +541,9 @@ class Consumer:
             if owner in self.stopped:
                 continue
             seq, row_id = self.cursors.get(owner, (0, None))
-            if head <= seq:
+            if head is None:
+                self.bad_counters.add(owner)  # 报警，照常读：读行不靠计数器
+            elif head <= seq:
                 continue  # 没有新号；小于游标的报警计时这里不测
             try:
                 rows, _blocked = await self.tbl.servant_seq_read(
@@ -659,6 +675,26 @@ async def test_recipe_isolates_diverged_group(cmd: Table):
     assert consumer.stopped[1].reason == "reused"
     assert consumer.handled_seqs(1) == [1, 2, 3]
     assert consumer.handled_seqs(2) == [1, 2, 3, 4]
+
+
+async def test_recipe_isolates_corrupted_counter(cmd: Table):
+    """
+    一组的计数器被写坏了：只影响这一组。这一组的提交会失败，已有的行照样读完（读行不靠计数器）；
+    别的组照常提交、照常消费
+    """
+    await insert(cmd, *[{"owner": 1}] * 3)
+    await insert(cmd, *[{"owner": 2}] * 2)
+    consumer = Consumer(cmd, [1, 2])
+    await consumer.poll_all(limit=2)  # 每组先处理到 2 号
+    raw_kv_set(cmd.backend, raw_seq_counter_key(cmd.backend, cmd, owner=1), b"abc")
+    with pytest.raises(Exception, match="not an integer"):
+        await insert(cmd, {"owner": 1})
+    await insert(cmd, *[{"owner": 2}] * 2)
+    await consumer.poll_all()
+    assert consumer.bad_counters == {1}
+    assert consumer.handled_seqs(1) == [1, 2, 3]
+    assert consumer.handled_seqs(2) == [1, 2, 3, 4]
+    assert not consumer.stopped
 
 
 # ============ headless ============

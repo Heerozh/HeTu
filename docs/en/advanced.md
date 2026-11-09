@@ -670,10 +670,11 @@ read the master:
 
 - `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`: the latest
   number the group has issued, i.e. how far numbering has got; 0 if none yet.
-  The batch form takes one round trip. Use it only to notice new numbers,
-  monitor the backlog and raise alerts: it is not in the same snapshot as the
-  row reads, so it **must not** be used to move the cursor past numbers whose
-  rows you haven't seen.
+  The batch form takes one round trip and answers per group: a group whose
+  counter is corrupted gets None (see below). Use it only to notice new
+  numbers, monitor the backlog and raise alerts: it is not in the same snapshot
+  as the row reads, so it **must not** be used to move the cursor past numbers
+  whose rows you haven't seen.
 - `servant_seq_read(after, limit, group=..., after_id=...)`: reads the rows
   after the cursor and returns `(rows, blocked)`. It reads the group's index
   with a single command, then fetches the rows. Numbers are handed out in commit
@@ -717,12 +718,14 @@ async def poll_all(owners: list[int]) -> None:
         if owner in stopped:
             continue
         seq = cursors.get(owner, (0, None))[0]
-        if head < seq:  # this replica lags or is resyncing, the cluster changed, or the data rolled back
+        if head is not None and head < seq:  # this replica lags or is resyncing, the cluster changed, or the data rolled back
             if now - behind_since.setdefault(owner, now) > 30:
                 await alarm_behind(owner, head, seq)  # call client.check_schema() first, see "Cluster changes"
             continue
         behind_since.pop(owner, None)
-        if head == seq:
+        if head is None:  # corrupted counter: alert and read anyway, row reads don't use it (see below)
+            await alarm_counter(owner)
+        elif head == seq:
             continue  # nothing new
         try:
             await poll(owner)
@@ -801,10 +804,14 @@ cursor, and check before deleting.**
   groups; the consumer keeps the group list itself (e.g. from the game's room
   table). The larger `limit` is, the longer one read holds the replica;
   a few hundred to a few thousand rows is typical.
-- **Corrupted counters**: `servant_seq_head_many` raises RuntimeError for the
-  whole batch, naming the key; `hetu upgrade` recalibrates it when rebuilding
-  indexes. On Redis, a counter key overwritten with another type reads as 0
-  (commits then fail with WRONGTYPE as well).
+- **Corrupted counters** (a value that isn't a non-negative integer, usually
+  from a manual edit): `servant_seq_head_many` returns None for that group and
+  the other groups' values as usual; `servant_seq_head` raises RuntimeError
+  naming the key and the value. Commits to that group fail, but its rows can
+  still be read, so the example alerts and keeps reading the group.
+  `hetu upgrade` recalibrates it when rebuilding indexes. On Redis, a counter
+  key overwritten with another type reads as 0 (commits then fail with
+  WRONGTYPE as well).
 - **Rows left by a failed commit**: on Redis, a runtime error halfway through the
   commit script can leave a row without its index entry; it is skipped as a gap.
   A later index rebuild puts it back at its number, and consumers already past

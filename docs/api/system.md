@@ -930,16 +930,18 @@ Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错�
 ```python
 servant_seq_head_many(
     groups: collections.abc.Sequence[collections.abc.Mapping[str, typing.Any] | None],
-) -> list[int]
+) -> list[int | None]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1289`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1289)</small>
+<small>Source: [`hetu/data/backend/base.py:1290`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1290)</small>
 
 Read the latest numbers issued by many commit_seq groups in one round trip.
 
 批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
-一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。有一个计数器被写坏，
-整批抛 RuntimeError。
+一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。
+
+逐组返回：计数器被写坏了的组是 None，不抛异常，别的组照常返回，一组坏了不会拖住所有组。
+要看是哪个 key、什么值，对这一组调 `seq_head`。
 
 
 **Parameters**
@@ -951,7 +953,7 @@ Read the latest numbers issued by many commit_seq groups in one round trip.
 
 **Returns**
 
-每个组最近发出的号，没发过号是 0，顺序同 `groups`。
+每个组最近发出的号，没发过号是 0，计数器被写坏了是 None，顺序同 `groups`。
 
 
 
@@ -973,7 +975,7 @@ servant_seq_read(
 ) -> hetu.data.backend.base.SeqReadResult[typing.Any]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1366`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1366)</small>
+<small>Source: [`hetu/data/backend/base.py:1367`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1367)</small>
 
 Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
 
@@ -1031,7 +1033,7 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1431`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1431)</small>
+<small>Source: [`hetu/data/backend/base.py:1432`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1432)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
