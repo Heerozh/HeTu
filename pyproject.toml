@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
+# babel：setup.py 打 wheel 时把 hetu/i18n 的 .po 编译成 .mo
+requires = ["setuptools>=80", "setuptools-scm[simple]>=8", "babel>=2.18.0"]
 build-backend = "setuptools.build_meta"
 
 [project]

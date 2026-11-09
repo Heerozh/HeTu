@@ -3,7 +3,8 @@ FROM python:3.14-slim
 
 # 从项目文件安装Hetu
 WORKDIR /src/hetu
-COPY ./pyproject.toml ./README.md ./
+# setup.py 是构建钩子：把 hetu/i18n 的 .po 编译成 .mo 装进包
+COPY ./pyproject.toml ./README.md ./setup.py ./
 COPY ./hetu ./hetu
 RUN pip install --no-cache-dir . && rm -rf /src/hetu/
 
