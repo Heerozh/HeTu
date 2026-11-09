@@ -367,7 +367,9 @@ class ChangeLog(hetu.BaseComponent):
 就在 System 里提前提交：`ctx.session_commit()` 返回这次发出的号，`{组件类: {行 id: 号}}`：
 
 ```python
-@hetu.define_system(namespace="ssw", components=(ChangeLog,))
+@hetu.define_system(
+    namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+)
 async def submit(ctx: hetu.SystemContext, kind: int):
     row = ChangeLog.new_row()
     row.owner, row.kind = ctx.caller, kind
@@ -378,9 +380,12 @@ async def submit(ctx: hetu.SystemContext, kind: int):
 
 - 键同 `ctx.repo`：System 引用的是副本组件时也是主组件类。只含这次 insert 的、带提交序号列的组件的行，没有这样的行时
   是空 dict。
-- System 返回之后的自动提交不返回号，要拿号就提前提交（提交之后的代码不在事务里，见「提前 `session_commit`」）。
-- headless 等直接用 session 的写入方，显式调用 `await session.commit()`，返回值的形状相同，键是传给
-  `session.using` / `session[...]` 的组件类。
+- 号只在返回值里：提交之后，手里那个行对象的 `seq` 仍是 0。
+- System 返回之后的自动提交不返回号，要拿号就提前提交（提交之后的代码不在事务里、不参与重试，见「提前
+  `session_commit`」）。
+- headless 等直接用 session 的写入方，显式调用 `await session.commit()`，返回值的形状相同，键是取 repo 时给的组件类
+  （`session.using(...)` / `s[...]`）。headless 按组件名声明的组件，键是 `client.table("ChangeLog").comp_cls`，不是
+  字符串。
 - `hetu call --dry-run` 不提交、不发号，返回值里本该拿号的行都是 0（提交序号列里 0 就是"没有号"）。
 
 消费方在服务端这样写（一个游标只给一个消费方用）：

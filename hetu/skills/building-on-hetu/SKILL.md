@@ -80,8 +80,12 @@ working examples — read them first.
   uncommitted rows don't show up on that index. To get the numbers a writer's
   rows received, commit early: `seqs = await ctx.session_commit()` →
   `seqs[Comp][row.id]` (`{component class: {row id: number}}`, keyed like
-  `ctx.repo`; headless: `await session.commit()`); the automatic commit after
-  the System returns doesn't return them. For binlog-style consumers read
+  `ctx.repo`); code after the early commit runs outside the transaction and is
+  not retried, and the row object's `seq` stays 0. The automatic commit after
+  the System returns doesn't return numbers. Headless writers call
+  `await s.commit()`, keyed by the class the repo was opened with
+  (`client.table(name).comp_cls` for components declared by name). For
+  binlog-style consumers read
   `range(seq=(cursor + 1, np.inf), owner=..., phantom_check=False)` and, when
   numbers are missing before `row.seq`, read that span once with
   `range(seq=(expected, row.seq - 1), owner=..., limit=-1)` (range check on)

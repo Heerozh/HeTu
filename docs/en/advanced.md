@@ -595,7 +595,9 @@ send it back to the client, say), commit early in the System:
 `{component class: {row id: number}}`:
 
 ```python
-@hetu.define_system(namespace="ssw", components=(ChangeLog,))
+@hetu.define_system(
+    namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+)
 async def submit(ctx: hetu.SystemContext, kind: int):
     row = ChangeLog.new_row()
     row.owner, row.kind = ctx.caller, kind
@@ -609,12 +611,16 @@ async def submit(ctx: hetu.SystemContext, kind: int):
   System references a duplicate. Only rows inserted by this commit into
   components with a commit sequence column are included; with none, it is an
   empty dict.
+- The number is only in the return value: after the commit, the row object you
+  hold still has `seq` 0.
 - The automatic commit after the System returns doesn't return the numbers;
   commit early to get them (code after the commit runs outside the
-  transaction, see "Early `session_commit`").
+  transaction and isn't retried, see "Early `session_commit`").
 - Writers that use a session directly, such as headless clients, call
   `await session.commit()` explicitly; the result has the same shape, keyed by
-  the component class passed to `session.using` / `session[...]`.
+  the component class the repository was opened with (`session.using(...)` /
+  `s[...]`). For a component a headless client declared by name, the key is
+  `client.table("ChangeLog").comp_cls`, not the string.
 - `hetu call --dry-run` commits nothing and hands out no numbers: rows that
   would have got one map to 0 (0 means "no number" in a commit sequence column).
 
