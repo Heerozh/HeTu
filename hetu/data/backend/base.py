@@ -86,10 +86,10 @@ class RaceCondition(Exception):
     - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
       陈旧读（stale read）；纯读的行同样参与乐观锁校验；
     - 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
-      `get`（或等值 `range`）观察到该值不存在**（negative observation，见
-      `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
-      行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
-      `UniqueViolation`；
+      `get` / `get_by_id`（或等值 `range`）观察到该值不存在**（negative observation，
+      见 `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中
+      对方的行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突
+      则是 `UniqueViolation`；
     - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
       返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
       过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
@@ -177,8 +177,9 @@ class UniqueViolation(IndexError):
       两行写入相同 unique 值时立即抛出（0 往返）；
     - `commit()`（`async with session` 退出、`SystemCaller` 提交、`ctx.session_commit()`）：
       由后端原子检查主键与 unique 索引（本事务删除的行不算冲突）。数据库已有同值记录、且
-      本事务从未 `get` 观察过该值不存在时抛出此异常（典型如“用户名已被占用”）；若曾观察其
-      不存在，则改抛 `RaceCondition` 交由重试机制处理。同时存在两类冲突时竞态优先。
+      本事务从未 `get` / `get_by_id` 观察过该值不存在时抛出此异常（典型如“用户名已被
+      占用”）；若曾观察其不存在，则改抛 `RaceCondition` 交由重试机制处理。同时存在两类
+      冲突时竞态优先。
 
     异常消息包含组件名、字段名、行 id 与操作（insert / update）。要在事务内对“已存在”
     分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用

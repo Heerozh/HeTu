@@ -240,30 +240,44 @@ class SessionRepository:
 
     async def get_by_id(self, row_id: Int64) -> np.record | None:
         """
-        从数据库获取单行数据，并放入`Session`缓存。
-        本指令如果命中缓存，不会去数据库查询。
-        """
-        return await self._get_by_id(cast(int, row_id), absent=False)
+        按主键 id 读一行，读到的放入`Session`缓存，和 `get(id=row_id)` 完全一样。
+        命中缓存（含本事务新 insert 的行）时不去数据库查询。
 
-    def _cached_by_id(self, row_id: int, absent: bool) -> tuple[bool, np.record | None]:
+        读空会登记"本事务观察到该 id 不存在"：同一事务内再读这个 id（`get_by_id` 或
+        `get(id=)`）直接返回 None，不再查询数据库；之后本事务 insert 这个 id、提交时撞上
+        并发写入的同 id 行，判为 `RaceCondition` 重试，而不是 `UniqueViolation`。
+
+        Parameters
+        ----------
+        row_id: Int64
+            行的主键 id。
+
+        Returns
+        -------
+        row: np.record or None
+            读空（含本事务删掉的行）返回 None，否则返回 np.record (c-struct) 格式的行。
         """
-        按 id 读时本事务里已有的答案：缓存里有这一行（本事务删掉的算 None），或者 absent 时读空
-        记录里有。返回 (有没有答案, 答案)
+        return await self._get_by_id(cast(int, row_id))
+
+    def _cached_by_id(self, row_id: int) -> tuple[bool, np.record | None]:
+        """
+        按 id 读时本事务里已有的答案：缓存里有这一行（本事务删掉的算 None），或者读空记录里
+        有。返回 (有没有答案, 答案)
         """
         idmap = self._session.idmap
         row, row_stat = idmap.get(self.ref, row_id)
         if row_stat is not None:
             return True, (None if row_stat == RowState.DELETE else row)
-        if absent and idmap.observed_absent(self.ref, "id", row_id):
+        if idmap.observed_absent(self.ref, "id", row_id):
             return True, None
         return False, None
 
-    async def _get_by_id(self, row_id: int, absent: bool) -> np.record | None:
+    async def _get_by_id(self, row_id: int) -> np.record | None:
         """
-        按 id 读：缓存（含本事务新 insert 的行）→ absent 时看读空记录 → 读数据库。读到的放进缓存；
-        absent 时读空登记读空记录（主键恒为 unique）
+        按 id 读，`get_by_id` 和 `get(id=)` 共用：缓存（含本事务新 insert 的行）→ 读空记录 →
+        读数据库。读到的放进缓存；读空登记读空记录（主键恒为 unique）
         """
-        known, row = self._cached_by_id(row_id, absent)
+        known, row = self._cached_by_id(row_id)
         if known:
             return row
         fetched = await self._session.master_or_servant.get(
@@ -272,13 +286,13 @@ class SessionRepository:
         # 读库期间，同一事务的别的协程可能已经把这一行读进缓存、改了它，或者读空登记了它
         # （asyncio.gather 并发读）：以本事务里已有的为准，同顺序执行时后一个读命中缓存一样。
         # 缓存里那份和读回的版本不同也用缓存的：版本号分不出新旧，提交时它的 VER 照常校验
-        known, row = self._cached_by_id(row_id, absent)
+        known, row = self._cached_by_id(row_id)
         if known:
             return row
         idmap = self._session.idmap
         if fetched is not None:
             idmap.add_clean(self.ref, fetched)
-        elif absent:
+        else:
             idmap.mark_absent(self.ref, "id", row_id)
         return fetched
 
@@ -469,7 +483,7 @@ class SessionRepository:
                 idmap.mark_absent(self.ref, index_name, absent_key)
             return None
         else:
-            return await self._get_by_id(int(query_value), absent=True)
+            return await self._get_by_id(int(query_value))
 
     async def range(
         self,

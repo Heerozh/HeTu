@@ -453,6 +453,75 @@ async def test_get_negative_cache(item_ref, mod_auto_backend):
         assert (await repo.get(id=424242)) is not None
 
 
+async def test_get_by_id_negative_cache(item_ref, mod_auto_backend):
+    """get_by_id 读空同 get(id=)：登记 absent，同一事务内再按 id 读不再打远程，get_by_id 和
+    get(id=) 两种写法共用这条记录；本事务 insert 这个 id 之后能读到"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with patch.object(master, "get", wraps=master.get) as m_get:
+            assert await repo.get_by_id(434343) is None
+            assert m_get.call_count == 1
+            assert await repo.get_by_id(434343) is None
+            assert m_get.call_count == 1
+            # get_by_id 读空 → get(id=) 不再读库，反过来也一样
+            assert await repo.get(id=434343) is None
+            assert m_get.call_count == 1
+            assert await repo.get(id=434344) is None
+            assert m_get.call_count == 2
+            assert await repo.get_by_id(434344) is None
+            assert m_get.call_count == 2
+
+            # 本事务 insert 曾观察不存在的 id 后能读到（本地缓存先于读空记录）
+            row = comp.new_row(id_=434343)
+            row.name, row.time = "by_id", 1
+            await repo.insert(row)
+            got = await repo.get_by_id(434343)
+            assert got is not None and got.name == "by_id"
+            assert m_get.call_count == 2
+
+
+async def test_get_by_id_repeatable_absent(item_ref, mod_auto_backend):
+    """get(id=) 读空、别的事务随后插入这个 id：同一事务里再 get_by_id 仍返回 None，不会一边
+    登记着"不存在"、一边把读到的行放进缓存"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        repo = s.using(comp)
+        assert await repo.get(id=-81) is None
+        async with backend.session("pytest", 1) as s2:  # 并发插入 -81
+            r2 = comp.new_row(id_=-81)
+            r2.name, r2.time = "late", 1
+            await s2.using(comp).insert(r2)
+        assert await repo.get_by_id(-81) is None
+
+
+async def test_get_by_id_absent_insert_conflict_is_race(item_ref, mod_auto_backend):
+    """get_by_id 读空后 insert 同一个 id，撞上并发插入的行：同 get(id=) 判 RaceCondition 重试，
+    不是 UniqueViolation"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    with pytest.raises(RaceCondition, match=r"Item\.id"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get_by_id(-79) is None
+            async with backend.session("pytest", 1) as s2:  # 并发插入 -79
+                r2 = comp.new_row(id_=-79)
+                r2.name, r2.time = "by_id2", 2
+                await s2.using(comp).insert(r2)
+            r = comp.new_row(id_=-79)
+            r.name, r.time = "by_id3", 3
+            await repo.insert(r)
+
+
 async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
     """测试upsert操作"""
     backend = mod_auto_backend()
