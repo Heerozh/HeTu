@@ -316,8 +316,13 @@ var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
   after a while, call a server `System` that confirms and skips the gap.
 - **Getting the number of a row you just inserted**: a row inserted in a
   `System` only gets its number at commit, so the row the `System` returns
-  still has 0. Watch the group and call with `CallSystemAwaitPush`: by the time
-  it returns, the push has arrived; find the pushed row by the id the `System`
+  still has 0. The direct way is to have the `System` commit early and send the
+  number back: `seqs = await ctx.session_commit()`, then
+  `return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})` (see
+  "Binlog-style syncing" in [Advanced](advanced.md)); the cost is that code
+  after the commit runs outside the transaction. If you don't want to commit
+  early, watch the group and call with `CallSystemAwaitPush`: by the time it
+  returns, the push has arrived; find the pushed row by the id the `System`
   returned to get its number. This needs the new row to fall inside the
   subscription's window, e.g. watch the latest rows with `desc: true`, or make
   sure the window isn't full; otherwise the new row is not pushed and

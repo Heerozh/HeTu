@@ -230,10 +230,12 @@ var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
   又不推送，客户端会永远停在它前面；做不到全部可见的，改在服务端消费（见[高级功能](advanced.md)的「binlog 式同步」）。
 - **缺号一直不补**：客户端没法确认缺号是不是永久的（比如中间的行被删了），只能保证服务端不删中间的行，或者等一会儿
   还没补上时，调一个服务端 `System` 来确认、跳过缺口。
-- **拿到刚插入那一行的号**：`System` 里 insert 的行，号要到提交之后才有，`System` 返回的行里是 0。订阅这一组，再用
-  `CallSystemAwaitPush` 调用，返回时推送已经到了，按 `System` 返回的行 id 找到推送来的那一行，就能拿到号。前提是
-  新行落在订阅的窗口里：比如用 `desc: true` 订最新的几行，或者确认窗口还没满；窗口满了的话新行不会推送，
-  `CallSystemAwaitPush` 照样返回，但拿不到号。
+- **拿到刚插入那一行的号**：`System` 里 insert 的行，号要到提交之后才有，`System` 返回的行里是 0。最直接的做法是让
+  `System` 提前提交、把号回给客户端：`seqs = await ctx.session_commit()`，再
+  `return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})`（见[高级功能](advanced.md)的「binlog 式同步」），
+  代价是提交之后的代码不在事务里。不想提前提交的话，订阅这一组，再用 `CallSystemAwaitPush` 调用，返回时推送已经到了，
+  按 `System` 返回的行 id 找到推送来的那一行，就能拿到号。前提是新行落在订阅的窗口里：比如用 `desc: true` 订最新的
+  几行，或者确认窗口还没满；窗口满了的话新行不会推送，`CallSystemAwaitPush` 照样返回，但拿不到号。
 
 ## 类型化组件 vs `DictComponent`
 

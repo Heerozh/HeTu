@@ -451,6 +451,9 @@ Two important caveats:
   Only the pre-commit half of the body participates in HeTu's optimistic
   retry. If the post-commit work fails, you own the recovery.
 
+`session_commit()` returns the numbers that commit handed out to commit
+sequence columns (`commit_seq`); see "Binlog-style syncing" on this page.
+
 `session_discard()` is the same shape but throws everything away. Use it
 when the `System` has decided early that the right answer is "do nothing"
 and you want to skip the commit entirely.
@@ -585,8 +588,43 @@ class ChangeLog(hetu.BaseComponent):
     kind: np.int16 = hetu.property_field(0)
 ```
 
-Writers insert as usual and leave `seq` at 0. A server-side consumer looks like
-this (one consumer per cursor):
+Writers insert as usual and leave `seq` at 0. The number is handed out at
+commit, so the transaction can't see it. To learn the number your row got (to
+send it back to the client, say), commit early in the System:
+`ctx.session_commit()` returns the numbers handed out by that commit,
+`{component class: {row id: number}}`:
+
+```python
+@hetu.define_system(
+    namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+)
+async def submit(ctx: hetu.SystemContext, kind: int):
+    row = ChangeLog.new_row()
+    row.owner, row.kind = ctx.caller, kind
+    await ctx.repo[ChangeLog].insert(row)
+    # on RaceCondition the whole System reruns; the failed attempt uses no number
+    seqs = await ctx.session_commit()
+    return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+- Keys are the same as `ctx.repo`'s: the master component class even when the
+  System references a duplicate. Only rows inserted by this commit into
+  components with a commit sequence column are included; with none, it is an
+  empty dict.
+- The number is only in the return value: after the commit, the row object you
+  hold still has `seq` 0.
+- The automatic commit after the System returns doesn't return the numbers;
+  commit early to get them (code after the commit runs outside the
+  transaction and isn't retried, see "Early `session_commit`").
+- Writers that use a session directly, such as headless clients, call
+  `await session.commit()` explicitly; the result has the same shape, keyed by
+  the component class the repository was opened with (`session.using(...)` /
+  `s[...]`). For a component a headless client declared by name, the key is
+  `client.table("ChangeLog").comp_cls`, not the string.
+- `hetu call --dry-run` commits nothing and hands out no numbers: rows that
+  would have got one map to 0 (0 means "no number" in a commit sequence column).
+
+A server-side consumer looks like this (one consumer per cursor):
 
 ```python
 @hetu.define_component(namespace="ssw")

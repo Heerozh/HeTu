@@ -269,7 +269,7 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
     # ============ 写 ============
 
     @override
-    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes:
+    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes | list:
         """commit_v2.lua 的 Python 版（`sqlite/commit.py`），在一个写事务里原子执行，见基类"""
         now = time.time()
         cleanup_before = None

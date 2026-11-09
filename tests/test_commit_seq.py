@@ -460,11 +460,21 @@ async def test_wrongtype_counter_keeps_redis_error(log_ref, mod_auto_backend):
     "start", [0, 254, 255, 2**31 - 1, 2**32 - 1, 2**48 - 1, 10**14 - 1, 2**53 - 2]
 )
 async def test_seq_encoding_boundaries(log_ref, mod_auto_backend, start):
-    """提交脚本拼的号（行里的十进制串、索引里的 8 字节编码）和 Python 侧逐字节一致"""
+    """
+    提交脚本拼的号（行里的十进制串、索引里的 8 字节编码）和 Python 侧逐字节一致；提交返回的号
+    （Lua 的数转成 Redis 整数回复）精确、是 int
+    """
     backend: Backend = mod_auto_backend()
     comp = log_ref.comp_cls
     raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=7), b"%d" % start)
-    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    row = _log(comp, 7)
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(row)
+        seqs = await session.commit()
+    row_id = int(row.id)
+    assert seqs == {comp: {row_id: start + 1}}
+    assert type(seqs[comp][row_id]) is int
+    await backend.wait_for_synced()
     prefix = to_sortable_bytes(np.int64(7))
     expected = index_member_(prefix + to_sortable_bytes(np.int64(start + 1)), row_id)
     assert raw_index_members(backend, log_ref, "seq") == [expected]
@@ -481,14 +491,16 @@ async def test_hsetseq_number_wins_over_stray_zero(log_ref, mod_auto_backend):
     async with backend.session("pytest", 1) as session:
         row = _log(comp, 7)
         await session.using(comp).insert(row)
-        keys, payload = master.build_commit_payload_(session.idmap)
+        keys, payload, seq_rows = master.build_commit_payload_(session.idmap)
         session.discard()
     [cmd] = [cmd for cmd in payload[1] if cmd[0] == "HSETSEQ"]
     assert "seq" not in cmd[6:-2:2]  # Python 已经把行里的 0 去掉了
     cmd[6:6] = ["seq", "0"]  # 模拟漏删
     assert payload[5] == [[raw_seq_counter_key(backend, log_ref, owner=7), 1]]
+    assert seq_rows == [(comp, [int(row.id)])]
     resp = await master.commit_script_(keys, [msg_packer.pack(payload)])  # type: ignore
-    assert resp == b"committed"
+    # 有号要发时提交脚本返回各计数器发完之后的值
+    assert resp == [b"committed", 1]
     await backend.wait_for_synced()
     assert await _seqs(backend, comp, owner=7) == [(1, 0)]
 
@@ -509,10 +521,11 @@ async def test_payload_without_commit_seq_unchanged(
     assert isinstance(master, RedisModelClient)
     async with backend.session("pytest", 1) as session:
         await session.using(Plain).insert(Plain.new_row())
-        _keys, payload = master.build_commit_payload_(session.idmap)
+        _keys, payload, seq_rows = master.build_commit_payload_(session.idmap)
         session.discard()
     # 没有号要发时不带第 6 段：提交脚本读到 nil，不建发号用的表
     assert len(payload) == 5
+    assert seq_rows == []
     assert [cmd[0] for cmd in payload[1]] == ["HSET", "ZADD", "ZADD"]
 
 
@@ -566,6 +579,197 @@ async def test_counter_keys_layout(new_component_env, mod_auto_backend):
     assert key == f"{master.cluster_prefix(ref)}:seq:seq:room,zone:{prefix.hex()}"
     assert raw_kv_keys(backend, master.cluster_prefix(ref) + ":seq:") == [key]
     assert _counter(backend, ref, room=room, zone=3) == 2
+
+
+# ---------------------------------------------------------------- 提交返回发出的号
+
+
+async def test_commit_returns_issued_numbers(log_ref, event_ref, mod_auto_backend):
+    """
+    `Session.commit()` 返回这次发出的号 {组件类: {行 id: 号}}：同组按 insert 的顺序连号、各组各自
+    编号，和库里存的一致；两张表里行 id 相同（headless 只能用显式 id）也各归各的。没有发号（只改了
+    行、没有修改）时是空 dict
+    """
+    backend: Backend = mod_auto_backend()
+    log, event = log_ref.comp_cls, event_ref.comp_cls
+    await _insert(backend, log, _log(log, 7))  # owner=7 先发到 1
+    rows = [_log(log, 7, kind=1), _log(log, 8, kind=2), _log(log, 7, kind=3)]
+    same_id = event.new_row()
+    same_id.id = rows[0].id
+    async with backend.session("pytest", 1) as session:
+        for row in rows:
+            await session.using(log).insert(row)
+        await session.using(event).insert(same_id)
+        seqs = await session.commit()
+    a, b, c = (int(row.id) for row in rows)
+    assert seqs == {log: {a: 2, b: 1, c: 3}, event: {a: 1}}
+    assert seqs[log][rows[2].id] == 3  # 键是 int，直接拿 np.int64 的 row.id 查也行
+    await backend.wait_for_synced()
+    assert await _seqs(backend, log, owner=7) == [(1, 0), (2, 1), (3, 3)]
+    assert await _seqs(backend, log, owner=8) == [(1, 2)]
+
+    async with backend.session("pytest", 1) as session:
+        row = await session.using(log).get(id=a)
+        assert row is not None
+        row.kind = 5
+        await session.using(log).update(row)
+        assert await session.commit() == {}
+    async with backend.session("pytest", 1) as session:
+        assert await session.commit() == {}
+
+
+async def test_commit_returns_upserted_not_deleted(log_ref, mod_auto_backend):
+    """upsert 新建的行照样拿号、在返回值里；本事务 insert 了又删掉的行不发号、不在返回值里"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    gone, kept = _log(comp, 7), _log(comp, 7)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(gone)
+        repo.delete(gone.id)
+        async with repo.upsert(uid=10**9 + 1) as created:
+            created.owner = 7
+        await repo.insert(kept)
+        seqs = await session.commit()
+    assert seqs == {comp: {int(created.id): 1, int(kept.id): 2}}
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0), (2, 0)]
+
+
+async def test_session_commit_returns_issued_numbers(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """
+    System 里提前 `ctx.session_commit()` 返回这次发出的号，键同 `ctx.repo`：System 引用的是副本
+    组件时也是主组件类。提交撞 RaceCondition、整个 System 重跑时，返回的是成功那次的号，失败的那次
+    不占号；再调一次 `session_commit()` 没有东西可提交，返回空 dict
+    """
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, SystemContext, define_system
+    from hetu.system.caller import SystemCaller
+
+    @define_component(namespace="pytest", force=True)
+    class Order(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")
+
+    @define_component(namespace="pytest", force=True)
+    class Wallet(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        gold: np.int32 = property_field(0)
+
+    copy = Order.duplicate("pytest", "copy")
+    attempts: list[list[int]] = []
+
+    @define_system(namespace="pytest", components=(copy, Wallet))
+    async def place_orders(ctx, owner):
+        ids = []
+        for _ in range(2):
+            row = Order.new_row()
+            row.owner = owner
+            await ctx.repo[Order].insert(row)
+            ids.append(int(row.id))
+        async with ctx.repo[Wallet].upsert(owner=owner) as wallet:
+            wallet.gold -= 1
+        attempts.append(ids)
+        if ctx.race_count == 0:
+            # 提交之前钱包被别的事务改了：这次提交撞 RaceCondition，整个 System 重跑
+            assert wallet_tbl is not None
+            async with wallet_tbl.session() as other:
+                other.only_master = True
+                theirs = await other.using(Wallet).get(owner=owner)
+                assert theirs is not None
+                theirs.gold += 10
+                await other.using(Wallet).update(theirs)
+            await backend.wait_for_synced()
+        seqs = await ctx.session_commit()
+        return seqs, ids, await ctx.session_commit()
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+    wallet_tbl = tbl_mgr.get_table(Wallet)
+    order_tbl = tbl_mgr.get_table(copy)
+    assert wallet_tbl is not None and order_tbl is not None
+    async with wallet_tbl.session() as session:
+        wallet = Wallet.new_row()
+        wallet.owner = 7
+        await session.using(Wallet).insert(wallet)
+    await backend.wait_for_synced()
+
+    ctx = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    ctx.systems = SystemCaller("pytest", tbl_mgr, ctx)
+    sys_def = SystemClusters().get_system("place_orders", namespace="pytest")
+    assert sys_def is not None
+    seqs, ids, again = await ctx.systems.call_(sys_def, 7)
+    assert len(attempts) == 2 and attempts[1] == ids
+    assert seqs == {Order: {ids[0]: 1, ids[1]: 2}}
+    assert again == {}
+    await backend.wait_for_synced()
+    async with order_tbl.session() as session:
+        stored = await session.using(copy).range(
+            seq=(-np.inf, np.inf), owner=7, limit=-1
+        )
+    assert [(int(r.id), int(r.seq)) for r in stored] == [(ids[0], 1), (ids[1], 2)]
+
+
+async def test_cli_commit_observer_passes_numbers(log_ref, mod_auto_backend):
+    """
+    `hetu call` / `hetu shell` 的提交观察者：真提交时原样交回发出的号；dry-run 不提交、不发号，
+    本该拿号的行都给 0（提交序号列里 0 就是没有号），提前提交之后用到号的 System 照样能跑完
+    """
+    from hetu.cli.console import WriteRecorder
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+
+    async def insert_one(recorder: WriteRecorder):
+        row = _log(comp, 7)
+        with recorder.active():
+            async with backend.session("pytest", 1) as session:
+                await session.using(comp).insert(row)
+                return int(row.id), await session.commit()
+
+    row_id, seqs = await insert_one(WriteRecorder("dry_run"))
+    assert seqs == {comp: {row_id: 0}}
+    assert _counter(backend, log_ref, owner=7) == 0
+    row_id, seqs = await insert_one(WriteRecorder("commit"))
+    assert seqs == {comp: {row_id: 1}}
+
+
+async def test_observer_without_return_value(log_ref, mod_auto_backend):
+    """
+    提交观察钩子没交回 commit_fn 的返回值（返回 None）时按没有号处理：提交已经成功了，不能在调用方
+    那里变成异常（`ctx.session_commit()` 要对返回值取 items）
+    """
+    from hetu.data.backend.session import commit_observer
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+
+    async def no_return(session, commit_fn):
+        await commit_fn(session.idmap)
+
+    token = commit_observer.set(no_return)  # type: ignore  # 故意不按约定返回
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(_log(comp, 7))
+            assert await session.commit() == {}
+    finally:
+        commit_observer.reset(token)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
 
 
 # ---------------------------------------------------------------- 禁写与分组列锁定
@@ -1533,7 +1737,7 @@ async def test_two_seq_tables_in_one_commit(log_ref, mod_auto_backend):
 
 
 async def test_headless_session_assigns_seq(log_ref, mod_auto_backend):
-    """headless 客户端的写入走同一条提交路径，照常发号"""
+    """headless 客户端的写入走同一条提交路径，照常发号；显式 commit() 拿得到发出的号"""
     from hetu import headless
 
     backend: Backend = mod_auto_backend()
@@ -1544,10 +1748,15 @@ async def test_headless_session_assigns_seq(log_ref, mod_auto_backend):
             row = _log(comp, 7)
             row.id = 777
             await session[comp].insert(row)
+        async with client.session(comp) as session:
+            row = _log(comp, 7)
+            row.id = 778
+            await session[comp].insert(row)
+            assert await session.commit() == {comp: {778: 2}}
     finally:
         await client.close()
     await backend.wait_for_synced()
-    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+    assert await _seqs(backend, comp, owner=7) == [(1, 0), (2, 0)]
 
 
 async def test_unnumbered_rows_on_the_index(log_ref, mod_auto_backend):

@@ -496,6 +496,7 @@ def define_system(
             获取定义时在 `depends` 中传入的System函数。
         await ctx.session_commit():
             提前显式提交当前System事务，如果遇到事务冲突，则此行下面的代码不会执行。
+            返回这次提交里提交序号列（commit_seq）发出的号：`{组件类: {行 id: 号}}`。
             注意：调用完 `session_commit`，`ctx` 将不再能够获取 `repo`/`depend` 实列
         ctx.session_discard():
             提前显式放弃当前System事务，放弃所有写入操作。
