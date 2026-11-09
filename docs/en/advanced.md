@@ -808,10 +808,14 @@ cursor, and check before deleting.**
   from a manual edit): `servant_seq_head_many` returns None for that group and
   the other groups' values as usual; `servant_seq_head` raises RuntimeError
   naming the key and the value. Commits to that group fail, but its rows can
-  still be read, so the example alerts and keeps reading the group.
-  `hetu upgrade` recalibrates it when rebuilding indexes. On Redis, a counter
-  key overwritten with another type reads as 0 (commits then fail with
-  WRONGTYPE as well).
+  still be read, so the example alerts and keeps reading the group. While the
+  group still has rows, `hetu upgrade` recalibrates it to the group's largest
+  number when rebuilding indexes; if the group has no rows (e.g. rows are
+  deleted once consumed), upgrade leaves it alone: set it by hand to a value no
+  smaller than any consumer's cursor (e.g. the largest one in the cursor
+  table). Don't just delete it: numbering would restart from 1 and reuse
+  numbers. On Redis, a counter key overwritten with another type reads as 0
+  (commits then fail with WRONGTYPE as well).
 - **Rows left by a failed commit**: on Redis, a runtime error halfway through the
   commit script can leave a row without its index entry; it is skipped as a gap.
   A later index rebuild puts it back at its number, and consumers already past

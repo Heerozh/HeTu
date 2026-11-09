@@ -1278,8 +1278,9 @@ class BackendClient:
         ValueError
             组件没有提交序号列，或者分组值不对。
         RuntimeError
-            计数器的值被写坏了（不是 Redis 认的非负整数），报错里带着它的 key 和值。`hetu upgrade`
-            重建索引时会把它校准回来。
+            计数器的值被写坏了（不是 Redis 认的非负整数），报错里带着它的 key 和值。组里还有行时，
+            `hetu upgrade` 重建索引会把它校准回来；没有行时 upgrade 不动它，要手工改，见文档
+            "binlog 式同步"一节。
 
         Notes
         -----

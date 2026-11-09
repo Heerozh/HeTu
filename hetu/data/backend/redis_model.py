@@ -897,8 +897,9 @@ class RedisModelClient(BackendClient):
         if head is None:
             raise RuntimeError(
                 _(
-                    "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。"
-                    "跑 hetu upgrade 重建索引时会把它校准回来"
+                    "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。组里还有行时，"
+                    "跑 hetu upgrade 重建索引会把它校准回来；没有行时 upgrade 不动它，要手工"
+                    "改成不小于所有消费方游标的值，不能直接删"
                 ).format(key=key, raw=repr(raw))
             )
         return head

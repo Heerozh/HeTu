@@ -933,7 +933,7 @@ servant_seq_head_many(
 ) -> list[int | None]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1290`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1290)</small>
+<small>Source: [`hetu/data/backend/base.py:1291`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1291)</small>
 
 Read the latest numbers issued by many commit_seq groups in one round trip.
 
@@ -975,7 +975,7 @@ servant_seq_read(
 ) -> hetu.data.backend.base.SeqReadResult[typing.Any]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1367`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1367)</small>
+<small>Source: [`hetu/data/backend/base.py:1368`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1368)</small>
 
 Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
 
@@ -1033,7 +1033,7 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1432`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1432)</small>
+<small>Source: [`hetu/data/backend/base.py:1433`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1433)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

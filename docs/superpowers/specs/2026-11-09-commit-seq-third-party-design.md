@@ -104,7 +104,7 @@
 
 ### 4.1 计数器：`servant_seq_head` / `servant_seq_head_many`
 
-> 已改（§16）：`servant_seq_head_many` 返回 `list[int | None]`，计数器被写坏的组是 None，不再整批抛异常；`servant_seq_head` 照旧抛 RuntimeError。
+> 已改（§16）：`servant_seq_head_many` 返回 `list[int | None]`，计数器被写坏的组是 None，不再整批抛异常；`servant_seq_head` 照旧抛 RuntimeError。`hetu upgrade` 只校准还有行的组，下面"会把它校准回来"说多了。
 
 ```python
 head = await tbl.servant_seq_head(group={"owner": 7})                    # -> int
@@ -482,3 +482,9 @@ async def poll_all(owners: list[int]) -> None:
 - 抛一个带部分结果的异常：示例里要多包一层 try。
 
 接口只在 dev 上（#217 还没进任何 tag），直接改返回值，不留兼容。
+
+**顺带改正：`hetu upgrade` 不校准没有行的组。** §4.1 和文档里"计数器被写坏，`hetu upgrade` 重建索引时会把它校准回来"说多了：原稿 §8.2 定的是"没有行的组，计数器不动"（`CommitSeqScan.counters` 只给出还有行的组），写坏了的也不动。库里没有这一组的行，重建不知道它发到了第几号，改小或者删掉都会让号被复用，所以规则不改，改说法：
+
+- 文档（中英）"计数器被写坏"一条、`seq_head` 的 docstring、报错信息：组里还有行时 upgrade 会校准；没有行时（比如行消费完就删了）要手工改成不小于所有消费方游标的值，不能直接删。
+- 测试：`test_rebuild_leaves_counters_of_empty_groups`（`tests/test_commit_seq.py`）：没有行的组，写坏的和正常的计数器重建后都原样；还有行的组照常校准。
+- 不做：重建时报告"没有行、计数器又被写坏"的组。只有手工改坏才会出现，这时提交报错、`servant_seq_head_many` 返回 None，已经看得到。
