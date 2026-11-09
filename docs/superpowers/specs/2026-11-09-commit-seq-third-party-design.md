@@ -3,6 +3,7 @@
 - 日期：2026-11-09
 - 状态：已实现（§14），设计过了一轮两路独立审核（§13），已按审核意见改写。
   - 用户已定（2026-11-09）：读计数器和封装好的增量读都做。审核之后改了的命名和返回值见 §13。
+  - 合并之后去掉了钉节点（§15）：§3.2、§5、§8、§9、§14 里钉节点的写法以 §15 为准。
 - 分支：`feat/commit-seq-third-party`（基于 dev `fce72f5b`）
 - 前置：提交序号列（PR #215，`2026-11-09-commit-seq-design.md`，下称"原稿"）
 - 影响范围：
@@ -65,6 +66,8 @@
 例外是原稿 §4.5 的回退（故障切换丢了最后几次提交、AOF / RDB 重启、整库恢复、易失表清空）和计数器落后于数据（手工删了计数器、淘汰、只导入了行）：节点的历史本身倒退了，或者号重复了。靠锚点和重号检查发现（§4.2）。
 
 ### 3.2 一次读必须钉在一个节点上
+
+> 已改（§15）：不再钉节点。本节对两步落在不同节点上的分析仍然成立，结论改成只影响进度、不影响对错。
 
 `servant_range` 是两步：一条 ZRANGE 拿 id，再用 pipeline 逐行 HGETALL，读不到的行直接跳过（`redis_model.py` 的 `range`）。这两步不一定落在同一个节点上：
 
@@ -430,3 +433,23 @@ async def poll_all(owners: list[int]) -> None:
 测试：`tests/test_commit_seq_servant.py` 在 sqlite、redis、valkey、redis_cluster 上全部通过（cluster 钉节点的用例只在 redis_cluster 上跑）；守门与读预算用例通过；四个后端全量 3100 个通过、6 个跳过（`pytest==9.1.1 -n 8`）。
 
 没有做的：重建索引时报告孤儿行（§8）、`limit` 上限、缓存组 key、§8 记的 cluster 客户端认不出新副本的既有问题。
+
+## 15. 去掉钉节点（2026-11-09，#217 合并之后）
+
+起因：复查时发现 §3.2 "显式配置了 servants 时两步在同一个节点上"不准确。`RedisBackendClient` 的 endpoint 可以是 URL 列表，`aio` 每次随机挑一个连接；非 cluster 下 `pinned_reader_` 直接返回自己，`zrange_bylex_` 和 `hgetall_many_` 各取一次 `aio`，查索引和取行可能落在不同的节点上。
+
+用户定：不补这个洞，把钉节点整个去掉（`pinned_reader_`、`SeqReader`、`_PinnedClusterReader`），所有部署方式同一个说法。理由：
+
+- **钉节点只管进度，不管对错**。缺口只按那一条 ZRANGE 确认（一条命令只落在一个节点上，§3.1）；取行读不到、或者值段对不上，就停下、不跳过（§4.2 第 6 步）。所以取行落在哪个节点上都不会漏行，也不会误确认缺口。
+- **推荐的部署是读写分离代理**，节点藏在代理后面，本来就钉不住（§3.2 最后一条），代价早已接受。原生 cluster 不推荐（`CONFIG_TEMPLATE.yml`），它的副本发现还有没修的问题（§8 最后一条）；URL 列表形式的 servant 没写进配置说明。
+- **正常的复制延迟只让某一轮 `blocked`**，下一轮就过。会一直挡住的只有"断了复制、还在回答读请求"的只读节点；这时别的 servant 读也在读旧数据，本来就要修。
+- 原生 cluster 的钉节点只能用桩测（测试用的 cluster 没有副本）。
+
+代价：§13 A1 在原生 cluster 下重新出现。每个分片有两个以上副本、其中一个断了复制还在回答读请求时，`ROUND_ROBIN_REPLICAS` 按命令轮询，消费方会一直停住（§14 的对照：30 轮都停在 10），直到这个副本修好或者被摘掉；这期间 `blocked` 一直是同一个 `(号, id)`，按 §6 报警。和读写分离代理下的代价是同一种：只停、不漏。
+
+改动：
+
+- `redis_model.py`：删 `SeqReader`、`pinned_reader_`，`seq_read` 直接用 `zrange_bylex_`、`hgetall_many_`。
+- `redis/client.py`：删 `pinned_reader_` 的覆盖和 `_PinnedClusterReader`。
+- 测试：模拟取行读不到的桩改成包住 `hgetall_many_`；删掉 cluster 钉节点的用例。
+- 文档：`seq_read` 的 docstring（`docs/api` 重新生成）；`docs/zh|en/advanced.md` 里 `servant_seq_read` 的说明和"被挡住"一条，不再只说读写分离代理。
