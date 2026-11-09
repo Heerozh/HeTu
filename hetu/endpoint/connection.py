@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from hetu.data.backend import RaceCondition
-from hetu.data.backend.base import RowFormat
+from hetu.data.backend.base import RowFormat, literal_bound_
 
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..i18n import _
@@ -57,7 +57,8 @@ CLOSE_REASONS = {
 class Connection(BaseComponent):
     # point_sub：顶号检测 watch 的是 "owner == 本用户" 的值频道（见 ConnectionAliveChecker）
     owner: np.int64 = property_field(0, index=True, point_sub=True)
-    address: str = property_field("", dtype="<U32", index=True)  # 连接地址
+    # 连接地址。要放得下 IPv6：最长 39 个字符，代理头给的带方括号、内嵌 IPv4 的能到 47 个
+    address: str = property_field("", dtype="<U64", index=True)
     device_name: str = property_field("", dtype="<U32")  # 物理设备名
     device_id: str = property_field("", dtype="<U128")  # 设备id
     admin: str = property_field("", dtype="<U16")  # 是否是admin
@@ -72,21 +73,26 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
     """
     table = tbl_mgr.get_table(Connection)
     assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
+    # 代理头里的地址可以是任意字符串。列存进去会按列宽截断、查询值不截断，放不下的地址计数
+    # 永远是 0，所以先截断成存进去的样子，计数和写入用同一个值
+    address = address[: Connection.str_max_len("address")]
 
     # 不会事务冲突只会连接错误
     async with table.session() as session:
         repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）
+            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）。按字面查：
+            # 代理头给的 IPv6 带方括号，开头的 [ 会被 range 当成闭区间标记剥掉，查不到
             same_ips = await repo.range(
-                "address", address, limit=1000, phantom_check=False
+                "address", literal_bound_(address), limit=1000, phantom_check=False
             )
             same_ip_guests = same_ips[same_ips.owner == 0]
-            if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
+            # 不含正在建的这一条：已经有 MAX 条就不再放行
+            if len(same_ip_guests) >= MAX_ANONYMOUS_CONNECTION_BY_IP:
                 msg = _(
                     "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
-                ).format(count=len(same_ips))
+                ).format(count=len(same_ip_guests))
                 logger.warning(msg)
                 raise RuntimeError(msg)
 

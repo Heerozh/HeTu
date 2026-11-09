@@ -177,6 +177,18 @@ Things to know about the API:
   precision. A call may run late but never before `at`: the `ctx.timestamp`
   the target `System` sees is never less than `at`, so checking "is it time
   yet" inside it (e.g. a cast finishing) is safe.
+- **A call that keeps colliding doesn't hold up the scheduler.** Each
+  `worker` runs future calls one at a time. When the target `System` hits
+  `RaceCondition`, it is retried in place for about 2 seconds; if it still
+  collides, the scheduler gives up on this round, moves on to the next call,
+  and logs a rate-limited warning with the conflict reason. The call is
+  re-run within about 5 seconds (or `timeout`, if shorter), so one-shot calls
+  are still guaranteed to succeed. A call that always collides never
+  succeeds: shrink what it reads and writes, e.g. pass `phantom_check=False`
+  to a `range` that doesn't depend on the interval. `timeout=0` calls have no
+  such limit because giving up would lose them: they retry up to the
+  `System`'s `retry=` limit, holding this `worker`'s loop while later calls
+  wait.
 - **The execution `ctx` has no user identity.** The scheduler runs as
   internal traffic — `ctx.caller` is `0`, `ctx.address` is `localhost`. If
   the work needs a user id, pass it explicitly in `args`.
@@ -276,7 +288,8 @@ Mechanics:
   a slot earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
   `SystemLock` is volatile: `hetu upgrade` clears it.
 
-`uuid=` is a keyword-only argument on `ctx.systems.call(...)`.
+`uuid=` is a keyword-only argument on `ctx.systems.call(...)`, at most 64
+characters long (`str(uuid.uuid4())` is 36); a longer one raises `ValueError`.
 `ctx.depend[...](...)` is a plain function call inside the same
 transaction: it takes no `uuid=` and does no deduplication.
 
@@ -438,6 +451,9 @@ Two important caveats:
   Only the pre-commit half of the body participates in HeTu's optimistic
   retry. If the post-commit work fails, you own the recovery.
 
+`session_commit()` returns the numbers that commit handed out to commit
+sequence columns (`commit_seq`); see "Binlog-style syncing" on this page.
+
 `session_discard()` is the same shape but throws everything away. Use it
 when the `System` has decided early that the right answer is "do nothing"
 and you want to skip the commit entirely.
@@ -488,7 +504,7 @@ back empty is checked at commit too. When `get` finds a row, only that
 returned row is guarded; rows with the same value inserted afterwards don't
 count as a conflict.
 
-Two things to watch:
+Things to watch:
 
 - **Read it all.** A truncated read (one that returned `limit` rows) only
   guards the first `limit` rows it saw; rows it didn't read are treated as
@@ -499,35 +515,48 @@ Two things to watch:
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.
+- **In `range`, a leading `(` / `[` on a string bound marks an open / closed
+  end.** When you `range` over a string that comes from a player (a name like
+  "[GM]Bob"), put one more `[` in front, or a different value gets queried.
+  To look up a single value, use `get` / `upsert`: they compare literally.
 
-### Hot paths: unique anchor + `upsert`
+### Hot paths: unique within a group + `upsert`
 
-Give the compound key its own unique field and anchor an `upsert` on it; the
-transaction touches a single row:
+Give the compound key a composite index that is unique within a group
+(`unique=True, groupby=...`), and anchor an `upsert` on it by giving both the
+field and the group-by columns; the transaction touches a single row:
 
 ```python
 @hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
 class Item(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
-    template: np.int32 = hetu.property_field(0)
+    # one row per item kind per player: grouped by owner, unique within it
+    template: np.int32 = hetu.property_field(0, unique=True, groupby="owner")
     qty: np.int32 = hetu.property_field(0)
-    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
 
 
 @hetu.define_system(
     namespace="game", components=(Item,), permission=hetu.Permission.USER
 )
 async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
-    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
-        item.owner, item.template = ctx.caller, tpl
-        item.qty += n
+    async with ctx.repo[Item].upsert(template=tpl, owner=ctx.caller) as item:
+        item.qty += n  # a new row already has template and owner filled in
 ```
 
 When two transactions both reach the insert branch, the later commit hits
-the unique constraint and is treated as a race; on retry the `upsert` finds
-the other row and updates it instead. The price: one more unique index,
-`slot` must be kept in sync when an item changes owner, and existing rows
-need a backfill when you add the field.
+the unique-within-group constraint and is treated as a race; on retry the
+`upsert` finds the other row and updates it instead. The price: one more
+composite index, and adding it to an existing component needs `hetu upgrade`
+to rebuild the index (duplicates within a group in existing data raise an
+error). The old workaround — a concatenated string such as
+`f"{owner}:{template}"` as the unique key — is no longer needed: a composite
+index stores no extra column, and nothing has to be kept in sync when an item
+changes owner.
+
+Moving unique values between rows within one transaction (refilling a slot
+after moving an item away, swapping two rows through a temporary value)
+commits fine: a taken value is not a conflict if this commit moves it off its
+current row.
 
 ### Turning the range check off
 
@@ -538,6 +567,299 @@ message makes concurrent transactions race and retry for nothing. Pass
 in the version check, but rows added to the range are ignored. The
 `[RaceCondition]` lines in `replay.log` carry the reason (e.g.
 `Range changed Item.owner`), which helps find the ranges that conflict a lot.
+
+## Binlog-style syncing: commit sequence columns
+
+Writers append rows to a log table; a consumer remembers "consumed up to
+number N" and reads onward by number. If numbers are handed out before the
+commit (a counter outside the transaction, or reading and bumping a counter row
+inside it), then with several processes number 2 may commit before number 1 and
+the consumer has to stop and wait; a transaction that took a number and then
+conflicted, retried or failed leaves that number empty forever; and a counter
+row makes every write to the same group conflict and retry. With a commit
+sequence column the number is handed out at commit:
+
+```python
+@hetu.define_component(namespace="ssw", permission=hetu.Permission.OWNER)
+class ChangeLog(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0)
+    # numbered from 1 per owner; without groupby the whole table is one sequence
+    seq: np.int64 = hetu.property_field(0, commit_seq=True, groupby="owner")
+    kind: np.int16 = hetu.property_field(0)
+```
+
+Writers insert as usual and leave `seq` at 0. The number is handed out at
+commit, so the transaction can't see it. To learn the number your row got (to
+send it back to the client, say), commit early in the System:
+`ctx.session_commit()` returns the numbers handed out by that commit,
+`{component class: {row id: number}}`:
+
+```python
+@hetu.define_system(
+    namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+)
+async def submit(ctx: hetu.SystemContext, kind: int):
+    row = ChangeLog.new_row()
+    row.owner, row.kind = ctx.caller, kind
+    await ctx.repo[ChangeLog].insert(row)
+    # on RaceCondition the whole System reruns; the failed attempt uses no number
+    seqs = await ctx.session_commit()
+    return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+- Keys are the same as `ctx.repo`'s: the master component class even when the
+  System references a duplicate. Only rows inserted by this commit into
+  components with a commit sequence column are included; with none, it is an
+  empty dict.
+- The number is only in the return value: after the commit, the row object you
+  hold still has `seq` 0.
+- The automatic commit after the System returns doesn't return the numbers;
+  commit early to get them (code after the commit runs outside the
+  transaction and isn't retried, see "Early `session_commit`").
+- Writers that use a session directly, such as headless clients, call
+  `await session.commit()` explicitly; the result has the same shape, keyed by
+  the component class the repository was opened with (`session.using(...)` /
+  `s[...]`). For a component a headless client declared by name, the key is
+  `client.table("ChangeLog").comp_cls`, not the string.
+- `hetu call --dry-run` commits nothing and hands out no numbers: rows that
+  would have got one map to 0 (0 means "no number" in a commit sequence column).
+
+A server-side consumer looks like this (one consumer per cursor):
+
+```python
+@hetu.define_component(namespace="ssw")
+class LogCursor(hetu.BaseComponent):  # the consumer's own cursor per owner
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    last: np.int64 = hetu.property_field(0)
+
+
+@hetu.define_system(namespace="ssw", components=(ChangeLog, LogCursor))
+async def consume(ctx: hetu.SystemContext, owner: int):
+    async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
+        log = ctx.repo[ChangeLog]
+        rows = await log.range(
+            seq=(cursor.last + 1, np.inf), owner=owner, limit=100, phantom_check=False
+        )
+        expected = cursor.last + 1
+        for row in rows:
+            if expected < row.seq:  # numbers are missing: confirm the whole gap in one read
+                for missing in await log.range(
+                    seq=(expected, row.seq - 1), owner=owner, limit=-1
+                ):
+                    handle(missing)  # this read missed it: rows came from a lagging replica
+            handle(row)
+            expected = row.seq + 1
+        cursor.last = expected - 1
+```
+
+- **`phantom_check=False`**: when fewer than `limit` rows come back, the range
+  read stays open up to `inf`, so every new log row in the group between the
+  read and the commit would make the consumer race and retry. The consumer
+  doesn't depend on "nothing else is in the range", so turn the check off; the
+  rows it read are still version-checked. A cursor belongs to one logical
+  consumer, and several instances of that consumer may share it: the cursor
+  row's version check keeps them from advancing it at once and handling rows
+  twice.
+- **Confirm missing numbers before skipping them**: numbers are normally
+  consecutive. Numbers can be missing in two ways: behind a read/write
+  splitting proxy that routes per command, or on native cluster with several
+  replicas, one read may fetch rows from replicas at different replication
+  points and miss a row in the middle (temporary); or the rows were deleted
+  (permanent — in rare cases a commit script that fails halfway on Redis leaves
+  such a gap too). When numbers are missing, read that span once with a closed
+  `range`: rows it finds are handled; the read keeps the range check (the
+  default), so the commit confirms on the master that the span has no rows. The
+  span ends below a number that has already been committed, so new writes
+  can't land in it and won't make the read race for nothing; numbers are
+  handed out in commit order, so the span will never get rows later and can be
+  skipped. If the empty read came from a lagging replica while the master does
+  have the rows, the commit races and retries. Each gap costs one read however
+  long it is: after a long head has been trimmed, a new consumer starting from
+  0 only reads once more. Don't just step over missing numbers: with
+  `phantom_check=False` rows that fail to fetch are skipped silently.
+- **Cost**: every row read into the transaction gets a version check on the
+  master at commit, about 1µs of master time per consumed row. Where the log can
+  be consumed by a client through a subscription, prefer that: it doesn't touch
+  the master.
+- **External side effects in `handle`** (granting rewards, calling other
+  services) run again when the transaction retries; make them idempotent.
+- **Trimming**: only delete the head that every consumer has passed. Deleting a
+  row in the middle leaves a hole: server-side consumers confirm and skip it as
+  above, client-side consumers stop in front of it. A consumer outside the
+  database also needs its cursor row kept; see the note in the next subsection.
+- **Volatile tables**: numbering starts over from 1 after every maintenance;
+  reset consumer cursors along with it.
+- **Consumers outside the database** (cursors kept outside the database, e.g.
+  reading a command table through headless, or syncing the log to an external
+  system): they are not in a transaction; use `servant_seq_read`, see the next
+  subsection.
+- **Client-side consumers**: subscribe with
+  `WatchRange("seq", cursor + 1, inf, limit, group: …)`, see
+  [Unity Client SDK](unity-client.md).
+
+### Consumers outside the database: `servant_seq_read`
+
+A consumer whose cursor lives outside the database (e.g. a process that reads a
+command table through headless and keeps its cursor in its own snapshot file,
+see "Reading and writing tables from a non-server process" on this page) is not
+in a transaction and can't get the commit-time confirmation used above. `Table`
+has three non-transactional reads for it; they all go to replicas and never
+read the master:
+
+- `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`: the latest
+  number the group has issued, i.e. how far numbering has got; 0 if none yet.
+  The batch form takes one round trip and answers per group: a group whose
+  counter is corrupted gets None (see below). Use it only to notice new
+  numbers, monitor the backlog and raise alerts: it is not in the same snapshot
+  as the row reads, so it **must not** be used to move the cursor past numbers
+  whose rows you haven't seen.
+- `servant_seq_read(after, limit, group=..., after_id=...)`: reads the rows
+  after the cursor and returns `(rows, blocked)`. It reads the group's index
+  with a single command, then fetches the rows. Numbers are handed out in commit
+  order, so once a node shows number n, any smaller number it doesn't show is
+  gone, and is skipped; gaps are confirmed by that one index read alone. The
+  rows may be fetched from a different node, and a row that is in the index but
+  can't be fetched is **not** skipped: the read stops in front of it, reports it
+  as `blocked`, and the next read tries again. `after_id` is the
+  snowflake id of the row at the cursor; when given, the read checks the
+  sequence: if the cursor's number now holds another row (the number was
+  reused), the cursor's row is gone while larger numbers exist, or the group
+  has duplicate numbers, it raises `CommitSeqDiverged`.
+
+```python
+import time
+
+from hetu.data.backend import CommitSeqDiverged
+
+tbl = client.table(ChangeLog)
+cursors = load_snapshot()             # {owner: (seq, row_id)}, in the same snapshot as the consumer's state
+stopped: set[int] = set()             # groups stopped because the sequence no longer matches
+behind_since: dict[int, float] = {}   # when the counter first dropped below the cursor
+
+
+async def poll(owner: int) -> None:
+    seq, row_id = cursors.get(owner, (0, None))
+    rows, blocked = await tbl.servant_seq_read(
+        seq, limit=1000, group={"owner": owner}, after_id=row_id
+    )
+    for row in rows:
+        handle(row)  # numbers that didn't show up in between are confirmed gone
+    if len(rows):
+        cursors[owner] = (int(rows[-1].seq), int(rows[-1].id))
+    watch_blocked(owner, blocked)  # alert only if the same (seq, id) blocks for long, see below
+
+
+async def poll_all(owners: list[int]) -> None:
+    heads = await tbl.servant_seq_head_many([{"owner": o} for o in owners])
+    now = time.monotonic()
+    for owner, head in zip(owners, heads):
+        if owner in stopped:
+            continue
+        seq = cursors.get(owner, (0, None))[0]
+        if head is not None and head < seq:  # this replica lags or is resyncing, the cluster changed, or the data rolled back
+            if now - behind_since.setdefault(owner, now) > 30:
+                await alarm_behind(owner, head, seq)  # call client.check_schema() first, see "Cluster changes"
+            continue
+        behind_since.pop(owner, None)
+        if head is None:  # corrupted counter: alert and read anyway, row reads don't use it (see below)
+            await alarm_counter(owner)
+        elif head == seq:
+            continue  # nothing new
+        try:
+            await poll(owner)
+        except CommitSeqDiverged as exc:
+            stopped.add(owner)  # stop only this group; the others go on
+            await alarm_diverged(owner, exc)
+```
+
+**Note: trim only rows numbered strictly below every consumer's persisted
+cursor, and check before deleting.**
+
+- When `servant_seq_read` sees a number with no row while a larger number
+  exists, it takes that number as gone and skips it, without an error. There is
+  no telling whether the row was deleted after being handled or before.
+- Consumers restore from snapshot files. If trimming follows a consumer's
+  in-memory progress and the snapshot is older than that progress, then after a
+  crash and restart the commands between the snapshot and that progress are
+  already deleted: they are skipped as gaps, and the consumer's state silently
+  diverges. So trimming must go by cursors that have **already been persisted**.
+- The trimmer (a server-side System or an ops script) can't read the consumers'
+  local snapshots: after each snapshot is persisted, the consumer writes the
+  snapshot's `(seq, row id)` back to a cursor table in the database (an upsert
+  in a headless session, one commit per snapshot), and the trimmer takes the
+  minimum from that table.
+- Delete only rows numbered **strictly below** the minimum cursor, keeping each
+  consumer's cursor row. It is never deleted in normal operation, so if it is
+  gone something is wrong, and `servant_seq_read` raises `CommitSeqDiverged`.
+- Check before deleting: the minimum cursor's number must still hold the row
+  recorded in the cursor table (in a System, `range(seq=(s, s), ...)`; through
+  headless, `servant_range(..., row_format=RowFormat.ID_LIST)`). If it doesn't,
+  don't delete; raise an alert. After a rollback, the new rows that reuse
+  numbers all sit at or below the old cursor; trimming without the check would
+  delete these never-consumed rows, and the rollback would go unnoticed.
+- With `after_id`, don't delete each row as soon as it is consumed; keep at
+  least the last handled row. To consume-and-delete, don't pass `after_id`,
+  which means number reuse can't be detected. Game logic must not delete
+  commands that haven't been consumed; to cancel one, write a separate "cancel"
+  command.
+
+| Case | Meaning | What to do |
+|---|---|---|
+| The cursor's number still holds the same row | Normal | Read on (`servant_seq_read` handles it) |
+| The cursor's number holds another row, the group has duplicate numbers, or the cursor's row is gone while larger numbers exist | The sequence no longer matches: the data rolled back (a failover that lost the last commits, an AOF / RDB restart, a full restore, clearing a volatile table), or the counter fell behind the data (counter deleted by hand, evicted, rows imported alone) | `CommitSeqDiverged` is raised, its `reason` says which: stop this group and raise an alert |
+| Nothing was read | No new commands; or this replica lags; or the data rolled back to before the cursor and the numbers haven't been reused yet | Wait. Alert only if the counter stays below the cursor (see below) |
+
+- **Counter staying below the cursor**: alert only when every counter read
+  within a window (e.g. 30 seconds, longer than replication lag) is below the
+  cursor. The alert should name the possible causes: a replica far behind or
+  in a full resync, a cluster change, or a rollback.
+- **Blocked**: a non-None `blocked` only means this round was blocked by that
+  row: a fetch that hit a lagging replica, or a row deleted after the index was
+  read, both do it, and the next round usually goes through. Alert only when
+  the same `(seq, id)` blocks for a long time: if `servant_get` never finds the
+  row, an index entry was left behind (e.g. a maintenance script deleted only
+  the row), so stop the servers and run `hetu upgrade` to rebuild indexes; if
+  the row can be read, most likely a read-only node whose replication is broken
+  is still answering reads (a read-write splitting proxy and a native cluster
+  both send reads to it): fix that replica, or take it out. Until then the
+  consumer keeps stopping in front of that row; it never skips it.
+- **Caught up?** Look at whether `rows` is empty and `blocked` is None, not at
+  whether the cursor equals the counter. If the newest rows were deleted before
+  being consumed, the cursor stays at the last row seen until a newer row
+  appears; meanwhile the counter minus the cursor is positive, but there is
+  nothing to consume.
+- **Snapshots**: store the cursor (number and snowflake id) in the same snapshot
+  as the consumer's own state. Restoring from a snapshot after a crash replays
+  the commands after it: `handle` must be idempotent, or the state and the
+  cursor must be restored together.
+- **Cluster changes**: counters and data move with a cluster change; a consumer
+  that hasn't reconnected reads all counters as 0 and finds nothing. Before
+  alerting, call `client.check_schema()`; on `ClusterChanged`, reconnect and keep
+  the cursors as they are.
+- **Many groups**: each group costs one key computation per round (about 3µs):
+  100k groups take about 0.3 s of CPU per round, and the replica looks up 100k
+  keys per round. With many groups, poll less often or only poll active
+  groups; the consumer keeps the group list itself (e.g. from the game's room
+  table). The larger `limit` is, the longer one read holds the replica;
+  a few hundred to a few thousand rows is typical.
+- **Corrupted counters** (a value that isn't a non-negative integer, usually
+  from a manual edit): `servant_seq_head_many` returns None for that group and
+  the other groups' values as usual; `servant_seq_head` raises RuntimeError
+  naming the key and the value. Commits to that group fail, but its rows can
+  still be read, so the example alerts and keeps reading the group. While the
+  group still has rows, `hetu upgrade` recalibrates it to the group's largest
+  number when rebuilding indexes; if the group has no rows (e.g. rows are
+  deleted once consumed), upgrade leaves it alone: set it by hand to a value no
+  smaller than any consumer's cursor (e.g. the largest one in the cursor
+  table). Don't just delete it: numbering would restart from 1 and reuse
+  numbers. On Redis, a counter key overwritten with another type reads as 0
+  (commits then fail with WRONGTYPE as well).
+- **Rows left by a failed commit**: on Redis, a runtime error halfway through the
+  commit script can leave a row without its index entry; it is skipped as a gap.
+  A later index rebuild puts it back at its number, and consumers already past
+  it won't handle it.
+- **Server-side consumers** keep their cursor and the log in the same
+  transaction, so they roll back together and don't need these checks.
 
 ## NumPy patterns for range queries
 
@@ -598,9 +920,12 @@ version raises:
 critical = rows[(rows.hp < 30) & (rows.shield == 0)]
 ```
 
-This is the recommended pattern for **compound queries**: pull a small
-window from the database with one indexed column, refine in memory with
-NumPy. Asking the backend to evaluate compound predicates is slower
+When the condition is "a range of one field within a group" (levels 10–20 in
+one zone, a player's latest N entries), declare a composite index
+(`property_field(groupby=...)`, see [Concepts](concepts.md)) so the database
+reads only that group. For other **compound queries** the recommended pattern
+is: pull a small window from the database with one indexed column, refine in
+memory with NumPy. Asking the backend to evaluate compound predicates is slower
 because the database interprets a query while NumPy uses SIMD.
 
 ```python
@@ -942,12 +1267,12 @@ It has exactly one principle: **writes go through the very same `Session.commit(
 When the server creates a table it stores the component's schema and `cluster_id` in the table meta. `connect()` only reads that meta; it never recomputes clusters locally:
 
 - Table missing → `TableNotFound`. Creating and migrating tables is the server's job; run `hetu start` once, then connect.
-- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"). Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
+- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index, groupby, commit_seq. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"); a column property in the meta that this version doesn't know (added by a newer HeTu) also counts as a difference, so upgrade headless clients together with the server. Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
 - Passing a **component name**: a class is generated from the schema in the meta, so the process shares no code at all; when you need the class, take `client.table("BattleReport").comp_cls` and use `new_row(id_=...)` as usual.
 
 ### Reading: `Table.servant_*`
 
-`client.table(comp)` returns the engine's own `Table`. Non-transactional reads use its existing `servant_get` / `servant_range`, plus the batch `servant_get_many(ids)`. Polling a command queue looks like this:
+`client.table(comp)` returns the engine's own `Table`. Non-transactional reads use its existing `servant_get` / `servant_range`, plus the batch `servant_get_many(ids)`, and `servant_seq_head` / `servant_seq_head_many` / `servant_seq_read` for commit sequence columns. Polling a command queue looks like this:
 
 ```python
 cmd_tbl = client.table(BattleCommand)
@@ -958,6 +1283,8 @@ for row in rows:
 ```
 
 Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend. `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
+
+For a command table that must be consumed in order without gaps, give it a commit sequence column (`commit_seq`) and consume it with `servant_seq_read`; see the consumers-outside-the-database subsection of "Binlog-style syncing" on this page. Don't treat gaps in `servant_range` results as real gaps: it reads the index first and then fetches the rows one by one, and rows that a lagging replica can't return are silently skipped.
 
 ### Writing: `client.session(*comps)`
 

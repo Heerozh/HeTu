@@ -18,6 +18,9 @@ namespace HeTu.Editor.PostStation
 
         private string _rangeComponentName = string.Empty;
         private bool _rangeDesc;
+
+        // 复合索引的分组值（JSON 对象，如 {"zone": 3}）；单列索引留空
+        private string _rangeGroup = string.Empty;
         private string _rangeIndex = "owner";
         private string _rangeLeft = "0";
         private string _rangeLimit = "10";
@@ -107,6 +110,11 @@ namespace HeTu.Editor.PostStation
                 _rangeRight = EditorGUILayout.TextField("Right(JSON)", _rangeRight);
                 _rangeLimit = EditorGUILayout.TextField("Limit", _rangeLimit);
                 _rangeDesc = EditorGUILayout.Toggle("Desc", _rangeDesc);
+                _rangeGroup = EditorGUILayout.TextField(
+                    new GUIContent("Group(JSON)",
+                        "复合索引（groupby）的分组值，JSON 对象，如 {\"zone\": 3}；单列索引留空。" +
+                        "Group values of a composite index, e.g. {\"zone\": 3}."),
+                    _rangeGroup);
 
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -195,6 +203,7 @@ namespace HeTu.Editor.PostStation
 
                 var left = ParseJsonValue(_rangeLeft);
                 var right = ParseJsonValue(_rangeRight);
+                var group = ParseGroupJson(_rangeGroup);
 
 #if UNITY_6000_0_OR_NEWER
                 sub = await HeTuClient.Instance.WatchRange(
@@ -203,7 +212,8 @@ namespace HeTu.Editor.PostStation
                     left,
                     right,
                     limit,
-                    _rangeDesc
+                    _rangeDesc,
+                    group: group
                 );
 #else
                 sub = await HeTuClient.Instance.WatchRange(
@@ -212,7 +222,8 @@ namespace HeTu.Editor.PostStation
                     left,
                     right,
                     limit,
-                    _rangeDesc
+                    _rangeDesc,
+                    group: group
                 );
 #endif
 
@@ -272,6 +283,15 @@ namespace HeTu.Editor.PostStation
 
             return MiniJson.Parse(json.Trim());
         }
+
+        // Group 输入框：空或 null 表示不带 group；否则必须是 JSON 对象（值的类型由 SDK 检查）
+        private static IReadOnlyDictionary<string, object> ParseGroupJson(string json) =>
+            ParseJsonValue(json) switch
+            {
+                null => null,
+                Dictionary<string, object> dict => dict,
+                _ => throw new Exception("Group 必须是 JSON 对象，如 {\"zone\": 3}")
+            };
 
         private static class MiniJson
         {

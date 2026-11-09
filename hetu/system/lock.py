@@ -42,7 +42,8 @@ class SystemLock(BaseComponent):
     秒后由 future_call_task 定期清理；on_start 的锁只在 worker 启动时清 7 天前的。
     """
 
-    uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
+    # 唯一标识。定宽，放不下的 uuid 存进去会被截断、拿原值查不到，SystemCaller.call_ 入口拦下
+    uuid: str = property_field("", dtype="<U64", unique=True)
     name: str = property_field("", dtype="<U32")  # 系统名
     caller: np.int64 = property_field(0)
     called: np.double = property_field(0, index=True)  # 执行时间

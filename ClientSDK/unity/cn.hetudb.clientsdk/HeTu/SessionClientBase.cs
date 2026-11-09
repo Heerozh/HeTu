@@ -119,13 +119,15 @@ namespace HeTu
 
         // 订阅按共享核心收发（见 HeTuClientBase.WatchRowCoreSync）：回调拿到的核心可能已有
         // 别的句柄，句柄由会话发给各调用方。reusable：重连恢复时把回复绑回原核心。
+        // group：复合索引的分组值，会话入口已用 HeTuClientBase.CopyGroup 检查、拷贝过
         void WatchRow<T>(
             string index,
             object value,
             Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName = null,
             ManagedRowCore<T> reusable = null,
-            StackTrace creationTrace = null)
+            StackTrace creationTrace = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent;
 
         void WatchRange<T>(
@@ -138,7 +140,8 @@ namespace HeTu
             bool force = true,
             string componentName = null,
             ManagedIndexCore<T> reusable = null,
-            StackTrace creationTrace = null)
+            StackTrace creationTrace = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent;
 
         void WatchTable<T>(
@@ -415,15 +418,19 @@ namespace HeTu
             _pendingCalls.Enqueue(pending);
         }
 
+        // group：复合索引的分组值（见 HeTuClientBase.WatchRowSync）。一进来就检查、拷贝，排队的
+        // 闭包和发出的请求都用这份，调用方事后改字典不影响。行订阅解析出行之后按 id 恢复，不带 group
         public void WatchRow<T>(
             string index,
             object value,
             string componentName,
             Action<RowSubscription<T>> onCompleted,
-            Action<Exception> onFailed)
+            Action<Exception> onFailed,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             ThrowIfClosed();
+            var groupCopy = HeTuClientBase.CopyGroup(index, group);
             componentName ??= typeof(T).Name;
             var creationTrace = HeTuClientBase.CaptureCreationTrace();
             var knownSubId = index == HeTuClientBase.IndexId
@@ -469,7 +476,8 @@ namespace HeTu
                         else promise.TryComplete(core);
                     },
                     componentName,
-                    creationTrace: creationTrace),
+                    creationTrace: creationTrace,
+                    group: groupCopy),
                 onCompleted,
                 onFailed,
                 creationTrace);
@@ -477,6 +485,9 @@ namespace HeTu
             DispatchPendingIfReady(watch);
         }
 
+        // group：复合索引的分组值（见 HeTuClientBase.WatchRangeSync）。一进来就检查、拷贝，排队
+        // 的闭包、查重键和重连恢复都用这份。带 group 的查重键和服务端 sub_id 永远对不上，下面按
+        // sub_id 的快路径查不到，落到 transport，由客户端的别名表认出已有的订阅（不发请求）
         public void WatchRange<T>(
             string index,
             object left,
@@ -486,14 +497,16 @@ namespace HeTu
             Action<IndexSubscription<T>> onCompleted,
             Action<Exception> onFailed,
             bool desc = false,
-            bool force = true)
+            bool force = true,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             ThrowIfClosed();
+            var groupCopy = HeTuClientBase.CopyGroup(index, group);
             componentName ??= typeof(T).Name;
             var creationTrace = HeTuClientBase.CaptureCreationTrace();
             var subId = HeTuClientBase.MakeSubId(
-                componentName, index, left, right, limit, desc);
+                componentName, index, left, right, limit, desc, groupCopy);
 
             if (TryGetSubscription<ManagedIndexCore<T>>(subId, out var existing))
             {
@@ -535,7 +548,8 @@ namespace HeTu
                     desc,
                     force,
                     componentName,
-                    creationTrace: creationTrace),
+                    creationTrace: creationTrace,
+                    group: groupCopy),
                 onCompleted,
                 onFailed,
                 creationTrace);

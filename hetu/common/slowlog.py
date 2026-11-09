@@ -91,7 +91,7 @@ class SlowLog:
         tops = [name for name, avg in slow20]
         tops.extend(name for name, avg in retry20 if name not in tops)
         rows = [
-            (name, self._time_averages[name].value, self._time_averages[name].value)
+            (name, self._time_averages[name].value, self._retry_averages[name].value)
             for name in tops
         ]
         return tabulate(

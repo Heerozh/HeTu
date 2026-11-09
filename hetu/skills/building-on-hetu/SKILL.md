@@ -22,7 +22,7 @@ Everything an app touches is exported at the top level:
 | Symbol                                                                               | Role                                                     |
 |--------------------------------------------------------------------------------------|----------------------------------------------------------|
 | `@define_component(namespace=, permission=, backend=, volatile=)`                    | Declare a typed table                                    |
-| `property_field(default, dtype=, index=, unique=, hidden=)`                          | Declare a column                                         |
+| `property_field(default, dtype=, index=, unique=, point_sub=, hidden=, groupby=, commit_seq=)` | Declare a column                               |
 | `BaseComponent`                                                                      | Base class for a component; `.new_row()`, `.new_rows(n)` |
 | `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC                              |
 | `@define_endpoint(namespace=, permission=)`                                          | Declare a raw (non-transactional) RPC                    |
@@ -64,6 +64,41 @@ working examples — read them first.
   Field names must not shadow NumPy row attributes: `size`, `item`, `shape`,
   `data`, … are rejected at definition (`row.size` would read NumPy's `size`),
   so use `bag_size`, `item_id`.
+- **Composite index** — `level = property_field(0, groupby="zone")` is ordered
+  by `level` within each `zone`; queries must give every group-by column:
+  `range(level=(10, 20), zone=3)`, `get(name="x", zone=3)`,
+  `upsert(name="x", zone=3)`. With `unique=True` it is unique within a group —
+  use it instead of a concatenated `f"{a}:{b}"` unique key. Group-by columns:
+  int / str / bytes only. Clients subscribe with a `group` argument; each group
+  is its own zset, so a group subscription only wakes on that group's writes —
+  no `point_sub` needed (it is ignored on composite indexes).
+- **Commit sequence** — `seq: np.int64 = property_field(0, commit_seq=True,
+  groupby="owner")` is numbered by the commit script: per group from 1,
+  consecutive, in commit order, only for commits that succeed (retries and
+  failures consume nothing). Leave it 0 on insert and never update it; a row
+  that has a number cannot change group. Inside the transaction it stays 0 and
+  uncommitted rows don't show up on that index. To get the numbers a writer's
+  rows received, commit early: `seqs = await ctx.session_commit()` →
+  `seqs[Comp][row.id]` (`{component class: {row id: number}}`, keyed like
+  `ctx.repo`); code after the early commit runs outside the transaction and is
+  not retried, and the row object's `seq` stays 0. The automatic commit after
+  the System returns doesn't return numbers. Headless writers call
+  `await s.commit()`, keyed by the class the repo was opened with
+  (`client.table(name).comp_cls` for components declared by name). For
+  binlog-style consumers read
+  `range(seq=(cursor + 1, np.inf), owner=..., phantom_check=False)` and, when
+  numbers are missing before `row.seq`, read that span once with
+  `range(seq=(expected, row.seq - 1), owner=..., limit=-1)` (range check on)
+  before skipping it (see Advanced "Binlog-style syncing"); never derive the
+  next number yourself. Consumers outside the database (headless, cursor in a
+  snapshot file) use `tbl.servant_seq_read(cursor, limit, group={...},
+  after_id=cursor_row_id)` → `(rows, blocked)`: gaps are confirmed from one
+  node's index snapshot, unreadable rows block instead of being skipped, and a
+  reused number / missing cursor row / duplicate raises `CommitSeqDiverged`;
+  `servant_seq_head(_many)` reads how far a group has got (alerts only, never
+  to advance the cursor). Trim only rows strictly below every consumer's
+  **persisted** cursor, after checking the cursor row is still the recorded
+  one. Don't infer gaps from `servant_range` results.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
@@ -175,7 +210,9 @@ hetu call --as 1001 buy_item 3 2     # USER Systems REQUIRE --as <uid> (exit 2 o
 hetu call add_gold 1001 500 --dry-run          # run, don't commit; see `writes`
 hetu call send_mail --args-file args.json      # args as a JSON array (- = stdin)
 hetu get Player owner=1001           # one row by id / indexed field (no app import)
+hetu get Item template=3 owner=1001  # composite index: field + every group-by column
 hetu range Item owner 1001 --limit 50 --master # read master right after a write
+hetu range Rank level 10 20 --group zone=3     # composite index: --group per group-by column
 hetu shell -c "await call_system('add_gold', 1001, 5); show(await get('Player', owner=1001))"
 ```
 
@@ -216,6 +253,11 @@ async with client.session("BattleReport") as s:  # s[Comp] is a SessionRepositor
         row.kind = 1
 await client.close()
 ```
+
+Non-transactional reads on `client.table(...)`: `servant_get` / `servant_range` /
+`servant_get_many`, plus `servant_seq_head` / `servant_seq_head_many` /
+`servant_seq_read` for consuming a `commit_seq` command table in order without gaps
+(see the Commit sequence bullet above).
 
 Writes go through the same `Session.commit()` path as Systems, so client
 subscriptions fire identically. It reads cluster ids/schemas from the server's table

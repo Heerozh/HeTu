@@ -9,13 +9,79 @@ weight: 50
 
 
 
+## `CommitSeqDiverged`
+
+```python
+CommitSeqDiverged(
+    comp_name: str,
+    group: collections.abc.Mapping[str, Any] | None,
+    seq: int,
+    expected_id: int,
+    found_id: int | None,
+    reason: str,
+)
+```
+
+<small>Source: [`hetu/data/backend/base.py:128`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L128)</small>
+
+
+**Bases:** `Exception`
+
+
+
+The commit_seq sequence no longer matches what the consumer recorded.
+
+提交序号列的序列和库外消费方记下的对不上了，由 `BackendClient.seq_read` 抛出。重试不会好，
+所以不继承 RaceCondition：这一组要停下来、报警，由人来处理，别的组照常消费。
+
+`reason` 是下面三种之一：
+
+- ``"reused"``：游标那一号现在是另一行，号被复用了。可能是数据回退（故障切换丢了最后几次提交、
+  AOF / RDB 重启、整库从备份恢复、易失表清空），也可能是计数器落后于数据之后又发了一遍（手工删了
+  计数器、内存淘汰、只导入了行、改了组件名或字段名之后重新校准）；
+- ``"anchor_missing"``：游标那一行没了，后面却有号。数据回退了，或者游标那一行被误删了（按文档的
+  裁剪规则，游标那一行不会被正常删掉）；
+- ``"duplicate"``：组里有重号，计数器落后于数据时会发出重号。
+
+属性：`comp_name`、`group`（调用方给的原值）、`seq`（出问题的那一号）、`expected_id`、
+`found_id`（`anchor_missing` 时为 None）、`reason`。
+
+
+
+
+### Attributes
+
+- **`comp_name`** (Any) — _No description._
+
+- **`group`** (Any) — _No description._
+
+- **`seq`** (Any) — _No description._
+
+- **`expected_id`** (Any) — _No description._
+
+- **`found_id`** (Any) — _No description._
+
+- **`reason`** (Any) — _No description._
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## `RaceCondition`
 
 ```python
 RaceCondition
 ```
 
-<small>Source: [`hetu/data/backend/base.py:62`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L62)</small>
+<small>Source: [`hetu/data/backend/base.py:79`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L79)</small>
 
 
 **Bases:** `Exception`
@@ -29,11 +95,13 @@ RaceCondition
 - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
 - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
   陈旧读（stale read）；纯读的行同样参与乐观锁校验；
+- 提交时，本事务按 id 读空过（`get(id=)` / `get_by_id`）的行已经存在：读空之后被别的
+  事务插入，或者读空读到的是落后的副本；
 - 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
-  `get`（或等值 `range`）观察到该值不存在**（negative observation，见
-  `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
-  行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
-  [`UniqueViolation`](exceptions.md#uniqueviolation)；
+  `get` / `get_by_id`（或等值 `range`）观察到该值不存在**（negative observation，
+  见 `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中
+  对方的行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突
+  则是 [`UniqueViolation`](exceptions.md#uniqueviolation)；
 - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
   返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
   过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
@@ -62,7 +130,7 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:109`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L109)</small>
+<small>Source: [`hetu/data/backend/base.py:172`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L172)</small>
 
 
 **Bases:** `IndexError`
@@ -77,8 +145,9 @@ UniqueViolation
   两行写入相同 unique 值时立即抛出（0 往返）；
 - `commit()`（`async with session` 退出、`SystemCaller` 提交、`ctx.session_commit()`）：
   由后端原子检查主键与 unique 索引（本事务删除的行不算冲突）。数据库已有同值记录、且
-  本事务从未 `get` 观察过该值不存在时抛出此异常（典型如“用户名已被占用”）；若曾观察其
-  不存在，则改抛 [`RaceCondition`](exceptions.md#racecondition) 交由重试机制处理。同时存在两类冲突时竞态优先。
+  本事务从未 `get` / `get_by_id` 观察过该值不存在时抛出此异常（典型如“用户名已被
+  占用”）；若曾观察其不存在，则改抛 [`RaceCondition`](exceptions.md#racecondition) 交由重试机制处理。同时存在两类
+  冲突时竞态优先。
 
 异常消息包含组件名、字段名、行 id 与操作（insert / update）。要在事务内对“已存在”
 分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用

@@ -251,6 +251,13 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         )
 
     @override
+    async def kv_get_many_(self, keys: Sequence[str]) -> list[bytes | None]:
+        """按 keys 的顺序批量读 KV 表，见基类"""
+        if not keys:
+            return []
+        return await self.run_(SQLiteStore.kv_get_many, list(keys))
+
+    @override
     def zrange_bylex_(
         self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
     ) -> Awaitable[list[bytes]]:
@@ -262,7 +269,7 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
     # ============ 写 ============
 
     @override
-    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes:
+    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes | list:
         """commit_v2.lua 的 Python 版（`sqlite/commit.py`），在一个写事务里原子执行，见基类"""
         now = time.time()
         cleanup_before = None

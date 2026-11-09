@@ -432,7 +432,8 @@ def define_system(
         - admin: 只有管理员连接可以调用。admin是后台管理工具用的root级权限，游戏客户端的管理功能请用gm
         - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
     retry: int
-        如果System遇到事务冲突，会重复执行直到成功。设为0关闭
+        如果System遇到事务冲突，会重新执行直到成功，首次执行之外最多重试这么多次，超过后抛
+        RuntimeError。设为0关闭重试：只执行一次，遇到冲突就失败
     depends: tuple of (str | FunctionType)
         定义要事务依赖的其他System，调用时会在同一个事务会话中执行。
         可传入System函数本身，或字符串，如("system1", system2)。
@@ -495,6 +496,7 @@ def define_system(
             获取定义时在 `depends` 中传入的System函数。
         await ctx.session_commit():
             提前显式提交当前System事务，如果遇到事务冲突，则此行下面的代码不会执行。
+            返回这次提交里提交序号列（commit_seq）发出的号：`{组件类: {行 id: 号}}`。
             注意：调用完 `session_commit`，`ctx` 将不再能够获取 `repo`/`depend` 实列
         ctx.session_discard():
             提前显式放弃当前System事务，放弃所有写入操作。

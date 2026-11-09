@@ -181,6 +181,7 @@ async def test_commit_observer(mod_local_config):
 
         async def dry_run(session, _commit_fn):
             seen.append(session.idmap.get_dirty_rows())
+            return {}
 
         token = commit_observer.set(dry_run)
         try:
@@ -217,7 +218,7 @@ async def test_commit_observer(mod_local_config):
 
         async def record(session, commit_fn):
             committed.append(session)
-            await commit_fn(session.idmap)
+            return await commit_fn(session.idmap)
 
         started = asyncio.Event()
         go = asyncio.Event()

@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from .base import index_value_bytes_, index_value_bytes_list_
+
 if TYPE_CHECKING:
+    from ..component import BaseComponent
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -51,13 +54,17 @@ class RangeObservation:
     # （排序键见 BackendClient.index_sort_keys_）。截断读的 bounds 会收窄，它不变：事务里
     # 的 range 按它挑出落在区间里的本事务的行；同一查询读了几次，后端按它归组去重
     query: tuple[bytes, bytes]
-    # 等值点查的值，否则 None
+    # 等值点查的值，否则 None。复合索引是 (分组值…, 值) 元组（见 unique_key_of_query_）：只在
+    # 本字段是点查时才有，组内区间查询仍是 None
     point: object | None = None
     # 取行时已读不到（ZRANGE 与取行之间被删）的 id
     missing: list[int] = field(default_factory=list)
     # 只保护返回的行、不校验区间（get 命中：约定是"返回一行匹配的"，那一行由 VER 管）。
     # 读取一致性照样核对
     rows_only: bool = False
+    # 读的那个 zset（复合索引每组一个，见 RedisModelClient.index_zset_key_），commit 时的区间
+    # 校验查它。由后端的 range_read_ 填上
+    key: str = ""
 
 
 @dataclass(slots=True)
@@ -191,6 +198,35 @@ def _id_positions(ids: np.ndarray, wanted: Collection[int]) -> list[int] | np.nd
     return [i for i, row_id in enumerate(ids.tolist()) if row_id in wanted_set]
 
 
+def _norm(value: object) -> object:
+    """np 标量归一成 python 原生值（同 `IdentityMap._norm_value`）"""
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def unique_key_of_row_(
+    comp_cls: type[BaseComponent], index_name: str, row: np.record | np.void
+) -> object:
+    """
+    一行在 unique 索引上的值，negative observation（`mark_absent`）与本事务写入值的比较都用它：
+    单列索引是规范化后的值，复合索引是 (分组值…, 值) 元组。查询侧用 `unique_key_of_query_`，
+    两边得到同一种形式
+    """
+    value = _norm(row[index_name])
+    groups = comp_cls.index_groups_[index_name]
+    if not groups:
+        return value
+    return (*(_norm(row[col]) for col in groups), value)
+
+
+def unique_key_of_query_(value: object, group_values: tuple) -> object:
+    """
+    查询侧的 `unique_key_of_row_`：value 是本字段的点查值，group_values 是 `resolve_group_`
+    规范化后的分组值（单列索引为 ()）
+    """
+    value = _norm(value)
+    return (*group_values, value) if group_values else value
+
+
 def changed_fields(new: np.record, old: np.record) -> list[str]:
     """
     同一 dtype 的两行之间值有变化的字段名。先按字节比较，字节相同就算没变，所以没动过
@@ -244,6 +280,9 @@ class IdentityMap:
         # “它不存在”的过期快照做的决策，应判为 RaceCondition 而非 UniqueViolation
         # （见 get_absent_unique_fields）。
         self._absent: dict[TableReference, set[tuple[str, object]]] = {}
+        # 按 id 读（get(id=) / get_by_id）读空过的 id：commit 时确认它们仍然不存在（见
+        # absent_ids_to_check）。按 unique 列读空的不在这里，由区间观察的 CNT 校验
+        self._absent_ids: dict[TableReference, set[int]] = {}
 
         # 本事务 range 读的观察，commit 时校验区间没变（防幻读），见 RangeObservation；
         # _range_keys 给完全相同的观察去重
@@ -534,6 +573,35 @@ class IdentityMap:
             return False
         return (index_name, self._norm_value(value)) in absent
 
+    def mark_absent_id(self, table_ref: TableReference, row_id: int) -> None:
+        """
+        登记一次按 id 读（`get(id=)` / `get_by_id`）读空：除了读空记录（同
+        `mark_absent(table_ref, "id", row_id)`），commit 时还要确认这个 id 仍然不存在（见
+        `absent_ids_to_check`）。
+        """
+        self.mark_absent(table_ref, "id", row_id)
+        self._absent_ids.setdefault(table_ref, set()).add(int(row_id))
+
+    def absent_ids_to_check(self) -> dict[TableReference, list[int]]:
+        """
+        commit 时要确认仍然不存在的 id：按 id 读空过、本事务又没有 insert 它的。insert 的主键
+        检查就是这一条（撞车时同样判竞态，见 `get_absent_unique_fields`），不重复发。
+
+        本事务之后又读到了这一行的（比如 range 读到了别的事务刚插入的它）照样要查：前后两次
+        读对不上，commit 时判竞态。
+
+        Returns
+        -------
+        {TableReference: [row_id, ...]}，按 id 排序；没有要查的表不出现。
+        """
+        ret: dict[TableReference, list[int]] = {}
+        for table_ref, row_ids in self._absent_ids.items():
+            states = self._row_states.get(table_ref, {})
+            ids = sorted(i for i in row_ids if states.get(i) != RowState.INSERT)
+            if ids:
+                ret[table_ref] = ids
+        return ret
+
     def get_absent_unique_fields(self) -> dict[TableReference, dict[int, set[str]]]:
         """
         对每个待 INSERT / UPDATE 的行，返回其 unique 列（含 id）中本事务曾观察"该值不存在"
@@ -555,16 +623,18 @@ class IdentityMap:
                 if state == RowState.INSERT or state == RowState.UPDATE
             ]
             # 只查 absent 里出现过的 unique 列，通常 0~2 个
-            candidates = table_ref.comp_cls.uniques_ & {field for field, _ in absent}
+            comp_cls = table_ref.comp_cls
+            candidates = comp_cls.uniques_ & {field for field, _ in absent}
             if not dirty_ids or not candidates:
                 continue
             cache = self._row_cache[table_ref]
             rows_absent: dict[int, set[str]] = {}
             for row in cache[np.isin(cache["id"], dirty_ids)]:
+                # 复合索引的键是 (分组值…, 值)：只按本字段比的话，别的组读空也会算进来
                 fields = {
                     field
                     for field in candidates
-                    if (field, self._norm_value(row[field])) in absent
+                    if (field, unique_key_of_row_(comp_cls, field, row)) in absent
                 }
                 if fields:
                     rows_absent[int(row["id"])] = fields
@@ -605,10 +675,11 @@ class IdentityMap:
         不变的：
 
         - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
-        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
-          数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
-          保证提交时除本事务删掉的行外没有这个值，再排除"删掉了这个值的行"就等价于读空。
-          删掉过这样的行，说明本事务先看到"没有"、后又读到"有"，读集本身矛盾，要校验区间。
+        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉或改走
+          任何数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
+          保证提交时除本事务删掉、改走的行外没有这个值（提交脚本豁免本次要 ZREM 的 member），
+          再排除"删掉、改走了这个值的行"就等价于读空。删掉或改走过这样的行，说明本事务先看到
+          "没有"、后又读到"有"，读集本身矛盾，要校验区间。
         """
         ret: dict[TableReference, list[RangeObservation]] = {}
         for table_ref, observations in self._ranges.items():
@@ -646,6 +717,19 @@ class IdentityMap:
         """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
         return len(self._row_cache.get(table_ref, ())) > 0
 
+    def row_state(self, table_ref: TableReference, row_id: int) -> RowState | None:
+        """这一行在缓存里的状态，不在缓存里为 None。只查状态字典，不扫缓存数组（同 `get`
+        返回的状态，但缓存里行多时快得多）"""
+        states = self._row_states.get(table_ref)
+        return None if states is None else states.get(row_id)
+
+    def has_any(self, table_ref: TableReference, row_ids: Collection[int]) -> bool:
+        """这些 id 里有没有已经在缓存里的（读到的、本事务写入的、删掉的都算）"""
+        states = self._row_states.get(table_ref)
+        if not states:
+            return False
+        return any(row_id in states for row_id in row_ids)
+
     def lookup(
         self, table_ref: TableReference, row_ids: list[int]
     ) -> tuple[np.recarray | None, dict[int, int], list[int]]:
@@ -673,16 +757,27 @@ class IdentityMap:
         return rows, index_of, miss_ids
 
     def match(
-        self, table_ref: TableReference, index_name: str, value: object
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        value: object,
+        group: tuple = (),
     ) -> np.recarray | None:
         """
         缓存里 `index_name == value` 的行（排除已删除的，拷贝），没有时返回 None。同 `filter`
-        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。
+        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。复合索引的 group 是
+        `resolve_group_` 规范化后的分组值，各分组列也要相等（分组列只有整数和字符串，numpy 的
+        `==` 与索引编码的相等一致，结尾的 `\\x00` 也忽略）。
         """
         cache = self._row_cache.get(table_ref)
         if cache is None or len(cache) == 0:
             return None
         mask = cache[index_name] == value
+        if group:
+            for col, group_value in zip(
+                table_ref.comp_cls.index_groups_[index_name], group
+            ):
+                mask &= cache[col] == group_value
         if not mask.any():
             return None
         if deleted := self._deleted.get(table_ref):
@@ -730,6 +825,9 @@ class IdentityMap:
             local.forget(row_ids)
         states = self._row_states[table_ref]
         clean_rows = self._row_clean[table_ref]
+        # 提交序号列：本事务 insert 的行还没有号（是 0），它在这个索引上的位置要到提交时才定，
+        # 不放进结果。按 0 放的话会排在组的最前面，desc 取"最新 N 条"会把它当成最老的一行
+        place_inserts = index_name != table_ref.comp_cls.commit_seq_
         updated: list[int] = []
         for row_id in row_ids:
             state = states.get(row_id)
@@ -738,16 +836,26 @@ class IdentityMap:
             elif state == RowState.INSERT or state == RowState.UPDATE:
                 if row_id in clean_rows:
                     updated.append(row_id)
-                else:
+                elif place_inserts:
                     local.place(row_id)  # 本事务 insert 的
             # 没有状态的：本事务 insert 了又删掉，当它没插过
         if updated:
             # 改了这一列的两边都放；没改的两边都不放：它在数据库结果里的位置不变，取行时
             # 拿到的就是缓存里的当前值
             rows = self._current_rows(table_ref, updated)
-            for row_id, value in zip(rows["id"].tolist(), rows[index_name]):
+            comp_cls = table_ref.comp_cls
+            if not comp_cls.index_groups_[index_name]:
+                for row_id, value in zip(rows["id"].tolist(), rows[index_name]):
+                    clean = clean_rows[row_id]
+                    if clean[index_name] != value:
+                        local.place(row_id)
+                        local.move(row_id, clean)
+                return
+            # 复合索引：分组列、本字段改了哪个都算，按值段（与 commit 写索引时同一个编码）比
+            values = index_value_bytes_list_(comp_cls, index_name, rows)
+            for row_id, value in zip(rows["id"].tolist(), values):
                 clean = clean_rows[row_id]
-                if clean[index_name] != value:
+                if index_value_bytes_(comp_cls, index_name, clean) != value:
                     local.place(row_id)
                     local.move(row_id, clean)
 
@@ -777,26 +885,37 @@ class IdentityMap:
         self, table_ref: TableReference, index_name: str
     ) -> tuple[set[object], set[object]]:
         """
-        本事务在该列上写入的值（insert 的值，update 改成的新值），以及删除的行的原值。
+        本事务在该列上写入的值（insert 的值，update 改成的新值），以及腾出的原值（删掉的行、
+        update 改走了这一列的行的数据库态）。复合索引的值是 (分组值…, 值) 元组（见
+        `unique_key_of_row_`）。
         """
         written: set[object] = set()
         deleted: set[object] = set()
         states = self._row_states.get(table_ref)
         if not states:
             return written, deleted
+        comp_cls = table_ref.comp_cls
         clean_rows = self._row_clean[table_ref]
         for row in self._row_cache[table_ref]:
             row_id = int(row["id"])
             state = states.get(row_id)
             clean = clean_rows.get(row_id)
-            clean_value = None if clean is None else self._norm_value(clean[index_name])
+            clean_value = (
+                None
+                if clean is None
+                else unique_key_of_row_(comp_cls, index_name, clean)
+            )
             if state == RowState.DELETE:
                 if clean is not None:
                     deleted.add(clean_value)
             elif state == RowState.INSERT or state == RowState.UPDATE:
-                value = self._norm_value(row[index_name])
+                value = unique_key_of_row_(comp_cls, index_name, row)
                 if value != clean_value:
                     written.add(value)
+                    if clean is not None:
+                        # 改走了：提交脚本会豁免它原来的 member（同一事务里挪 unique 值），
+                        # 和删掉一样算腾出了原值
+                        deleted.add(clean_value)
         return written, deleted
 
     def get_clean_rows(self) -> dict[TableReference, dict[int, str]]:

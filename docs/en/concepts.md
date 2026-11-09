@@ -36,7 +36,23 @@ class ChatMessage(hetu.BaseComponent):
 A few invariants that surprise new users:
 
 - **Strings are fixed-width.** `dtype="U256"` is a 256-character UTF-32 column;
-  longer values are truncated. This is the cost of NumPy C-struct like storage.
+  longer values are silently truncated on assignment. This is the cost of
+  NumPy C-struct like storage. Query values are not truncated, so the original
+  value no longer finds the row (`get` returns None, `range` is empty), and
+  `upsert` raises `ValueError` when it would create a row whose anchor value
+  does not fit. Check the length of strings that come from clients (names,
+  order ids and the like) with `MyComp.str_max_len("name")` before storing or
+  querying them, and reject the ones that are too long.
+- **Bytes columns are fixed-width too, and drop trailing `\x00`.**
+  `dtype="S16"` is a 16-byte column: longer values are truncated as well (UTF-8
+  text may be cut in the middle of a character and then fail to decode, so
+  keep text in str columns), and shorter ones are padded with `\x00`, so
+  trailing `\x00` bytes are dropped as padding (embedded ones are kept). `b"ab\x00"` reads back as `b"ab"` and is
+  the same value as `b"ab"` for queries and uniqueness. A trailing `"\x00"` in
+  a str column behaves the same way. Do not store binary data that may end in
+  `\x00` (little-endian packed integers, msgpack, hashes, UUID bytes) as is:
+  pad fixed-length values back with `.ljust(16, b"\x00")` after reading, store
+  variable-length ones as hex or base64, and keep numbers in integer columns.
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
@@ -50,7 +66,63 @@ A few invariants that surprise new users:
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.
   `point_sub=True` declares that the index supports efficient point
   subscriptions (see [Subscriptions](#subscriptions)); it also implies
-  `index=True`.
+  `index=True`. Rows sharing a value are ordered by `id` ascending; snowflake
+  ids grow with creation time (up to clock skew between servers), so
+  `range("owner", 5, desc=True, limit=N)` returns the N most recently inserted
+  rows for that value.
+- **Composite indexes: ordered within a group.** Add `groupby="zone"` to a
+  field to get an index grouped by `zone` and ordered by that field within each
+  group; the index keeps the field's name:
+  `level = property_field(0, groupby="zone")`. Queries must give every
+  group-by column by equality, e.g. `range(level=(10, 20), zone=3)` or
+  `get(name="abc", zone=3)`; only that group's rows are read, and the phantom
+  check at commit only covers that group. With `unique=True` it is unique within
+  a group, and different groups may share a value. Group-by columns must be
+  integer, str or bytes fields; they can be updated, and the index entry moves
+  to the new group. Giving only some of the group-by columns, a range over a
+  group-by column, or a scan across groups is not supported. Give string
+  group-by columns enough width: an over-long value is truncated when it is
+  written, so values sharing the first N characters land in the same group,
+  and a group value longer than the column in a query or `upsert` raises
+  `ValueError` instead of reading another group. Prefer integer ids for
+  group-by columns where you can. Each group is stored as its own zset: with a
+  few rows or more per group this takes less memory than one big index, while
+  tiny groups (one or two rows) with long
+  string group values can take up to 1.5–3.7× as much. Older HeTu versions
+  cannot read the schema of a component that uses `groupby`, so do not run old
+  and new versions against the same database while upgrading.
+- **Commit sequence columns: numbered at commit.**
+  `seq: np.int64 = property_field(0, commit_seq=True, groupby="owner")`
+  declares a column numbered by the commit script, only after every check has
+  passed: each group (the whole table without `groupby`) is numbered from 1,
+  consecutively and in commit order, and conflicting, retried or failed
+  transactions consume no numbers. Numbers only grow; deleting a row does not
+  give its number back. Reading number k on one node means 1..k-1 (unless
+  deleted) are readable there too, which suits binlog-style syncing; see
+  "Binlog-style syncing" in [Advanced](advanced.md) for the consumer side.
+    - The column is written by the commit script only: it must be 0 on insert,
+      cannot be updated, and a row that already has a number cannot change its
+      group-by columns. It must be `np.int64` with default 0, cannot be
+      `unique` (numbering already keeps it unique within the group), there is
+      at most one per component, and it cannot be another index's group-by
+      column.
+    - Inside the transaction it stays 0 after insert, and those rows do not
+      show up on this index (they do by id and on other indexes); rows read
+      back after commit, and pushed by subscriptions, carry the real number. A
+      stored 0 (or a negative value) means "no number", e.g. existing rows when
+      the column is added to a table that already has data.
+    - Numbers can be reused: a failover that lost the last commits, a primary
+      restarted from AOF / RDB after a crash, or restoring the whole database
+      from a backup rolls back both data and numbers; a volatile table is
+      cleared at every maintenance and starts over from 1; after importing only
+      rows, or deleting a counter by hand, run `hetu upgrade` once to
+      recalibrate.
+    - Don't mix old and new versions. Older servers, `LocalApp`, and headless
+      clients that connect by component name fail on a schema that uses
+      `commit_seq` and refuse to start; but **an older headless client that
+      connects with a component class does not fail**: it keeps writing rows
+      without a number (0), which consumers never see. Upgrade headless clients
+      before turning `commit_seq` on.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the
@@ -159,9 +231,10 @@ helper that takes `ctx` and call it directly.
 
 HeTu uses optimistic concurrency. Every Session keeps an `IdentityMap` of the
 rows it read or wrote. On commit, the engine checks each row's version against
-Redis, as well as every range the Session read with `range` (a row added into
-such a range counts as a change). If anything changed underneath, the commit
-aborts with `RaceCondition`
+Redis, every range the Session read with `range` (a row added into such a range
+counts as a change), and that every row the Session looked up by id and found
+missing (`get(id=)`, `get_by_id`) is still missing. If anything changed
+underneath, the commit aborts with `RaceCondition`
 and the engine **automatically re-runs the `System` from the top**, up to
 `retry=` times (default 9999).
 
@@ -270,6 +343,17 @@ PUBLISH, which is replicated to every replica). Rows leaving a value need no
 notification — the subscriber already watches that row. Declare it only on
 indexes that are actually point-subscribed.
 
+A `range` on a composite (`groupby`) index always stays within one group and
+must carry the group values (the `group` parameter in the client SDK). Each
+group of a composite index is stored as its own zset, and a subscription
+listens to that group only: it wakes up when rows enter or leave the group, or
+when a row in the group changes the indexed field, and writes to other groups
+never wake it. These notifications are produced by each replica as it applies
+the writes, so the commit sends no extra PUBLISH: composite indexes do not need
+`point_sub` (it is ignored with a warning), and even an index whose field
+changes very often — such as scores ranked per season — is cheap to subscribe
+to.
+
 ### When to use a table subscription
 
 `select` and `range` subscribe to one Redis channel **per row** on the server;
@@ -364,6 +448,8 @@ changes `hidden` columns is not pushed at all, since the client could not see
 the difference. Clients cannot subscribe by a `hidden` column either: even
 without its values, a query condition such as a `range` on `role` equal to
 `"werewolf"` would reveal it, so a `hidden` field cannot declare `point_sub`.
+The same goes for a composite index whose group-by column is `hidden`: clients
+cannot subscribe to it by group.
 Like row-level permissions, `hidden` only applies to subscriptions: `Systems`
 read and write it as usual, and data returned through `ResponseToClient` is not
 filtered; classes generated by `hetu build` leave the column out. Changing

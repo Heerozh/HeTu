@@ -8,6 +8,7 @@
 using Cysharp.Threading.Tasks;
 #endif
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using JetBrains.Annotations;
 using UnityEngine;
@@ -283,6 +284,12 @@ namespace HeTu
         ///     订阅组件的行数据。查找`index`属性值==`value`的第一行数据，然后按该行RowID订阅。
         ///     如果没有查询到行，会返回`null`。按RowID订阅的快速模式，不处理索引值的变化。
         ///     如果想要订阅不存在的行，请用`WatchRange`订阅索引。
+        ///     `index`是复合索引（服务端`property_field(groupby=...)`）时，用`group`给出全部分组列
+        ///     的值，例如`WatchRow&lt;Item&gt;("name", "abc",
+        ///     group: new Dictionary&lt;string, object&gt; { ["zone"] = 3 })`；值不合法时抛
+        ///     `ArgumentException`，见 <see cref="HeTuClientBase.WatchRowSync{T}" />。
+        ///     需要支持复合索引的服务器。
+        ///     For a composite (groupby) index pass all group column values in `group`.
         /// </summary>
         /// <returns>
         ///     返回`null`如果没查询到行，否则返回`RowSubscription`对象。
@@ -331,7 +338,8 @@ namespace HeTu
 #else
         public async UniTask<RowSubscription<T>> WatchRow<T>(
 #endif
-            string index, object value, string componentName = null)
+            string index, object value, string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
@@ -353,7 +361,7 @@ namespace HeTu
                     tcs.TrySetException(ex);
                 else
                     tcs.TrySetResult(rowSub);
-            }, componentName);
+            }, componentName, group);
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
@@ -374,6 +382,7 @@ namespace HeTu
         /// <param name="componentName">组件名。</param>
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
+        /// <param name="group">复合索引的分组值 {分组列: 值}，单列索引不给，见 WatchRow&lt;T&gt;。</param>
         /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null" />。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
@@ -381,14 +390,23 @@ namespace HeTu
 #else
         public async UniTask<RowSubscription<DictComponent>> WatchRow(
 #endif
-            string componentName, string index, object value)
+            string componentName, string index, object value,
+            IReadOnlyDictionary<string, object> group = null)
         {
-            return await WatchRow<DictComponent>(index, value, componentName);
+            return await WatchRow<DictComponent>(index, value, componentName, group);
         }
 
         /// <summary>
         ///     订阅组件的索引数据。`index`是开启了索引的属性名，`left`和`right`为索引范围，
         ///     `limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
+        ///     `index`是复合索引（服务端`property_field(groupby=...)`）时，用`group`给出全部分组列
+        ///     的值，例如 level 按 zone 分组时，订阅 zone=3 里 level 在 [10, 20] 的行：
+        ///     `WatchRange&lt;Item&gt;("level", 10, 20, 100,
+        ///     group: new Dictionary&lt;string, object&gt; { ["zone"] = 3 })`。值不合法时抛
+        ///     `ArgumentException`，见
+        ///     <see cref="HeTuClientBase.WatchRangeSync{T}" />；重连恢复也带着订阅时的 group。
+        ///     需要支持复合索引的服务器。
+        ///     For a composite (groupby) index pass all group column values in `group`.
         /// </summary>
         /// <returns>
         ///     返回`IndexSubscription`对象。
@@ -429,7 +447,8 @@ namespace HeTu
         public async UniTask<IndexSubscription<T>> WatchRange<T>(
 #endif
             string index, object left, object right, int limit,
-            bool desc = false, bool force = true, string componentName = null)
+            bool desc = false, bool force = true, string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
@@ -454,7 +473,7 @@ namespace HeTu
                         tcs.TrySetException(ex);
                     else
                         tcs.TrySetResult(idxSub);
-                }, desc, force, componentName
+                }, desc, force, componentName, group
             );
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
@@ -479,6 +498,7 @@ namespace HeTu
         /// <param name="limit">返回条数上限。</param>
         /// <param name="desc">是否降序。</param>
         /// <param name="force">未命中时是否保持订阅。</param>
+        /// <param name="group">复合索引的分组值 {分组列: 值}，单列索引不给，见 WatchRange&lt;T&gt;。</param>
         /// <returns>范围订阅对象。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
@@ -487,10 +507,11 @@ namespace HeTu
         public async UniTask<IndexSubscription<DictComponent>> WatchRange(
 #endif
             string componentName, string index, object left, object right, int limit,
-            bool desc = false, bool force = true)
+            bool desc = false, bool force = true,
+            IReadOnlyDictionary<string, object> group = null)
         {
             return await WatchRange<DictComponent>(index, left, right, limit, desc, force,
-                componentName);
+                componentName, group);
         }
 
         /// <summary>

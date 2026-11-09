@@ -12,7 +12,8 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
   hash 里没有这个字段。
 - lex zset（索引）：全局一张 `__hetu_zset(key, member)`，member 与 Redis 字节相同；SQLite 的 BLOB 比较是
   memcmp 再比长度，与 zset 的 lex 比较一致。
-- 带过期的字符串（维护锁）：`__hetu_kv`。meta：`__hetu_meta`。通知：`__hetu_notify`。
+- 字符串：`__hetu_kv`，带过期的是维护锁，不过期的是提交序号列的计数器。meta：`__hetu_meta`。
+  通知：`__hetu_notify`。
 
 本类的方法只在客户端的专用线程里调用（sqlite3 连接不跨线程），由调用方保证串行。写事务用
 `write_txn()`，事务不跨调用。
@@ -21,13 +22,14 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from itertools import batched
 from pathlib import Path
 from typing import Any
 
 from ....i18n import _
+from ..base import parse_redis_int_
 
 logger = logging.getLogger("HeTu.root")
 
@@ -549,23 +551,28 @@ class SQLiteStore:
         return [int(row[0]) for row in rows]
 
     def row_field_values(
-        self, table: str, field: str
-    ) -> list[tuple[int, bytes | None]]:
-        """每一行的 id 与某个字段的原始字节（没有这个字段为 None），重建索引用"""
+        self, table: str, fields: Sequence[str]
+    ) -> list[tuple[int, tuple[bytes | None, ...]]]:
+        """
+        每一行的 id 与几个字段的原始字节（表里没有的字段为 None），重建索引用：复合索引要同时
+        读分组列和本字段
+        """
         if not self._table_exists(table):
             return []
-        try:
-            rows = self.conn.execute(
-                f"SELECT {quote(ROW_KEY)}, {quote(field)} FROM {quote(table)}"
-            ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if _is_missing_column(exc):
-                return [(row_id, None) for row_id in self.row_ids(table)]
-            raise
-        return [
-            (int(row_id), None if value is None else from_column(value))
-            for row_id, value in rows
-        ]
+        existing = set(self._columns(table))
+        present = [field for field in fields if field in existing]
+        cols = ", ".join(quote(field) for field in (ROW_KEY, *present))
+        rows = self.conn.execute(f"SELECT {cols} FROM {quote(table)}").fetchall()
+        result = []
+        for row_id, *values in rows:
+            by_field = dict(zip(present, values))
+            raws: list[bytes | None] = []
+            for field in fields:
+                # 列在、值是 NULL 也按缺字段
+                value = by_field.get(field)
+                raws.append(None if value is None else from_column(value))
+            result.append((int(row_id), tuple(raws)))
+        return result
 
     def row_tables_with_prefix(self, prefix: str) -> list[str]:
         """名字以 prefix 开头（大小写精确匹配）的行表"""
@@ -687,6 +694,55 @@ class SQLiteStore:
                 f"UPDATE {quote(ZSET_TABLE)} SET key = ? WHERE key = ?", (target, key)
             )
 
+    # ============ 不过期的字符串（提交序号列的计数器） ============
+    # 和维护锁共用 KV 表，expire_at 为 NULL；key 都在组件表的 cluster_prefix 下（见
+    # RedisModelClient.seq_counter_key_），值是十进制的字节串，同 Redis 的 INCRBY。
+
+    def kv_get_int(self, key: str) -> int | None:
+        """
+        计数器的值：key 不存在为 0；不是 Redis 认的整数返回 None（同 INCRBY 的 not an integer）。
+        规则同 Redis 的 string2ll：可选的负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里；
+        Python 的 int() 会放过 " 5"、"+5"、"05"、"1_0"，两个后端就对不上了
+        """
+        raw = self.kv_get(key)
+        if raw is None:
+            return 0
+        return parse_redis_int_(raw)
+
+    def kv_set(self, key: str, value: bytes) -> None:
+        """`SET key value`（不过期）。只能在写事务里调用"""
+        self.conn.execute(
+            f"INSERT INTO {quote(KV_TABLE)} (key, value, expire_at) VALUES (?, ?, NULL) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, expire_at = NULL",
+            (key, value),
+        )
+
+    def kv_items_with_prefix(self, prefix: str) -> list[tuple[str, bytes]]:
+        """key 以 prefix 开头、没过期的 (key, value)，按 key 排序"""
+        rows = self.conn.execute(
+            f"SELECT key, value FROM {quote(KV_TABLE)} WHERE substr(key, 1, ?) = ? "
+            "AND (expire_at IS NULL OR expire_at > ?) ORDER BY key",
+            (len(prefix), prefix, time.time()),
+        ).fetchall()
+        return [(str(row[0]), bytes(row[1])) for row in rows]
+
+    def kv_delete_prefix(self, prefix: str) -> int:
+        """删掉 key 以 prefix 开头的所有字符串，返回删掉的个数。只能在写事务里调用"""
+        cur = self.conn.execute(
+            f"DELETE FROM {quote(KV_TABLE)} WHERE substr(key, 1, ?) = ?",
+            (len(prefix), prefix),
+        )
+        return cur.rowcount
+
+    def kv_rename_prefix(self, old: str, new: str) -> None:
+        """key 的前缀 old 换成 new，目标 key 已存在的先删掉（同 RESTORE REPLACE）。只能在写事务里调用"""
+        for key, _value in self.kv_items_with_prefix(old):
+            target = new + key[len(old) :]
+            self.conn.execute(f"DELETE FROM {quote(KV_TABLE)} WHERE key = ?", (target,))
+            self.conn.execute(
+                f"UPDATE {quote(KV_TABLE)} SET key = ? WHERE key = ?", (target, key)
+            )
+
     # ============ 带过期的字符串（维护锁） ============
 
     def kv_set_nx(self, key: str, value: bytes, ttl: float | None) -> bool:
@@ -711,6 +767,21 @@ class SQLiteStore:
         if row is None or (row[1] is not None and row[1] <= time.time()):
             return None
         return bytes(row[0])
+
+    def kv_get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """按 keys 的顺序批量读，不存在或已过期的为 None，同 MGET"""
+        found: dict[str, bytes] = {}
+        now = time.time()
+        for chunk in batched(keys, IN_CHUNK):
+            marks = ",".join("?" * len(chunk))
+            for key, value, expire_at in self.conn.execute(
+                f"SELECT key, value, expire_at FROM {quote(KV_TABLE)} "
+                f"WHERE key IN ({marks})",
+                chunk,
+            ):
+                if expire_at is None or expire_at > now:
+                    found[key] = bytes(value)
+        return [found.get(key) for key in keys]
 
     def kv_expire_if(self, key: str, value: bytes, ttl: float) -> bool:
         """值还是 value（且没过期）才把过期时间刷成 ttl 秒后，返回刷没刷（租约续期用的 CAS）"""

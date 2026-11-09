@@ -73,7 +73,9 @@ async def _counter_value(tbl_mgr, test_app) -> int:
     return 100 if row is None else int(row.value)
 
 
-async def _insert_due_calls(fc_tbl, ctx, n, *, value=1, timeout=10, ago=5.0):
+async def _insert_due_calls(
+    fc_tbl, ctx, n, *, value=1, timeout=10, ago=5.0, recurring=False
+):
     """插入 n 条已到期的 add_rls_comp_value(value) 调用（按插入顺序依次到期），等副本同步"""
     from hetu.system.future import _build_future_row
 
@@ -88,6 +90,7 @@ async def _insert_due_calls(fc_tbl, ctx, n, *, value=1, timeout=10, ago=5.0):
                 "add_rls_comp_value",
                 (value,),
                 timeout=timeout,
+                recurring=recurring,
             )
             await repo.insert(row)
             rows.append(row)
@@ -172,7 +175,12 @@ async def test_next_due_reads_scheduled_from_index(
 async def test_run_due_calls_wake_time(monkeypatch, test_app, tbl_mgr, new_ctx):
     """一轮扫描：执行所有表里到期的调用；返回距下次该扫的秒数——处理过调用就马上再扫（0），
     没有到期的就睡到最早那条，最多 1 秒"""
-    from hetu.system.future import FutureCalls, _build_future_row, run_due_calls
+    from hetu.system.future import (
+        MAX_IDLE_SLEEP,
+        FutureCalls,
+        _build_future_row,
+        run_due_calls,
+    )
 
     tables = [
         tbl_mgr.get_table(FutureCalls),
@@ -180,8 +188,12 @@ async def test_run_due_calls_wake_time(monkeypatch, test_app, tbl_mgr, new_ctx):
     ]
     callers = _task_callers(tbl_mgr)
 
-    delay = await run_due_calls(tables, callers)
-    assert 0.9 <= delay <= 1.0
+    # 没有到期的：睡满 MAX_IDLE_SLEEP。冻结时钟，扫描本身的耗时不算进去：第一轮扫描含 servant 上
+    # 异步 cluster 客户端的冷启动（CLUSTER SLOTS、COMMAND），CI 上并行加覆盖率时实测到过 264ms
+    with monkeypatch.context() as m:
+        started = time.time()
+        m.setattr(time, "time", lambda: started)
+        assert await run_due_calls(tables, callers) == pytest.approx(MAX_IDLE_SLEEP)
 
     await _insert_due_calls(tables[1], new_ctx(), 2)
     assert await run_due_calls(tables, callers) == 0
@@ -1161,3 +1173,252 @@ async def test_pop_upcoming_call_error_before_row_read(
     with pytest.raises(ConnectionError) as exc_info:
         await pop_upcoming_call(fc_tbl)
     assert not getattr(exc_info.value, "__notes__", None)
+
+
+# ============ 目标 System 持续事务冲突：不能占住循环 ============
+
+RACE_VALUE = 7  # add_rls_comp_value(RACE_VALUE) 由 _race_on 让它撞竞态
+RACE_REASON = "Range changed Fleet.owner"
+
+
+def _race_on(monkeypatch, *, times=None):
+    """让 add_rls_comp_value(RACE_VALUE) 撞竞态（最多 times 次，None 表示一直撞），别的参数
+    照常执行。返回列表，每撞一次加一项"""
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system import SystemClusters
+
+    system = SystemClusters().get_system("add_rls_comp_value")
+    assert system
+    orig = system.func
+    races = []
+
+    async def racing(ctx, *args):
+        if args == (RACE_VALUE,) and (times is None or len(races) < times):
+            races.append(args)
+            raise RaceCondition(f"{RACE_REASON}（模拟）")
+        return await orig(ctx, *args)
+
+    monkeypatch.setattr(system, "func", racing)
+    return races
+
+
+async def _pop_colliding_call(fc_tbl, ctx, **kwargs):
+    """插入一条会撞竞态的到期调用并取出（租约写入后等副本同步）"""
+    from hetu.system.future import pop_upcoming_call
+
+    (row,) = await _insert_due_calls(fc_tbl, ctx, 1, value=RACE_VALUE, **kwargs)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call is not None and call.id == row.id
+    await fc_tbl.backend.wait_for_synced()
+    return call
+
+
+async def _synced_future_row(fc_tbl, row_id):
+    await fc_tbl.backend.wait_for_synced()
+    return await _get_future_row(fc_tbl, row_id)
+
+
+@pytest.mark.timeout(30)
+async def test_future_call_task_not_stalled_by_colliding_call(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """一条调用持续撞车（比如读的区间一直有人写）：重试一小段就放弃，这个 worker 后面到期的
+    调用要照常执行。原来要重试到 System 的 retry 上限（默认 9999 次，17 分钟以上），循环一直
+    停着；循环任务还会被下一个 worker 取走，挨个卡住所有 worker"""
+    from hetu.system import future
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0.05)
+    races = _race_on(monkeypatch)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1, value=RACE_VALUE, recurring=True)
+
+    inserted = []
+
+    async def next_call_done():
+        # 撞车的那条已经在循环里重试了，再插入后到期的调用
+        if races and not inserted:
+            inserted.extend(await _insert_due_calls(fc_tbl, new_ctx(), 1, value=1))
+        return await _counter_value(tbl_mgr, test_app) >= 101
+
+    assert await _run_future_task_until(tbl_mgr, next_call_done, timeout=6)
+
+
+@pytest.mark.parametrize("recurring", [False, True])
+async def test_gave_up_call_shortens_lease(
+    monkeypatch, test_app, tbl_mgr, new_ctx, recurring
+):
+    """放弃这一轮后行还在，租约从 timeout 缩到 RETRY_COOLDOWN：一次性调用不用等满 timeout
+    （默认 60 秒），长周期的循环任务不用等到下一个周期。事务没提交、call lock 没留下，冲突
+    过去后重投照常执行"""
+    from hetu.system import future
+    from hetu.system.future import exec_future_call, pop_upcoming_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    races = _race_on(monkeypatch, times=1)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    caller = _task_callers(tbl_mgr)["server1"]
+    call = await _pop_colliding_call(
+        fc_tbl, new_ctx(), timeout=600, recurring=recurring
+    )
+
+    before = time.time()
+    assert await exec_future_call(call, caller, fc_tbl)
+    after = time.time()
+    kept = await _synced_future_row(fc_tbl, call.id)
+    assert kept is not None and len(races) == 1
+    assert before <= kept.scheduled - future.RETRY_COOLDOWN <= after
+    assert kept.created == call.created
+    assert kept.recurring == recurring
+
+    # 到重投时间：取出、执行成功
+    frozen = float(kept.scheduled)
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    again = await pop_upcoming_call(fc_tbl)
+    assert again is not None and again.id == call.id
+    assert await exec_future_call(again, caller, fc_tbl)
+    assert await _counter_value(tbl_mgr, test_app) == 100 + RACE_VALUE
+    done = await _synced_future_row(fc_tbl, call.id)
+    assert (done is not None) == recurring
+
+
+async def test_gave_up_call_keeps_lease_shorter_than_cooldown(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """租约本来就比冷却时间短（最短周期 5 秒的循环任务）：放弃时不写库，等它到期"""
+    from hetu.system import future
+    from hetu.system.future import exec_future_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    _race_on(monkeypatch)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    call = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=5, recurring=True)
+    leased = await _get_future_row(fc_tbl, call.id)
+
+    assert await exec_future_call(call, _task_callers(tbl_mgr)["server1"], fc_tbl)
+    kept = await _synced_future_row(fc_tbl, call.id)
+    assert kept is not None and leased is not None
+    assert kept.scheduled == leased.scheduled
+    assert kept._version == leased._version
+
+
+async def test_gave_up_call_leaves_lease_taken_by_other_worker(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """放弃时这条已被别的 worker 重投取走（scheduled 变了），租约是人家的：不能改短，否则它
+    还在执行时又被第三个 worker 取走"""
+    from hetu.system import future
+    from hetu.system.future import exec_future_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    _race_on(monkeypatch)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    call = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=600)
+
+    other_lease = time.time() + 300
+    async with fc_tbl.session() as session:
+        repo = session.using(fc_tbl.comp_cls)
+        row = await repo.get(id=call.id)
+        assert row is not None
+        row.scheduled = other_lease
+        await repo.update(row)
+    await fc_tbl.backend.wait_for_synced()
+
+    assert await exec_future_call(call, _task_callers(tbl_mgr)["server1"], fc_tbl)
+    kept = await _synced_future_row(fc_tbl, call.id)
+    assert kept is not None and kept.scheduled == other_lease
+
+
+async def test_gave_up_call_ignores_race_on_lease(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """改短租约撞竞态（这条刚被别人改了）：不用重试，租约到期照样重投，也别把 RaceCondition
+    抛给任务循环（那会记一条错误、退避 1 秒）"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system import future
+    from hetu.system.future import exec_future_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    _race_on(monkeypatch)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    call = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=600)
+    leased = await _get_future_row(fc_tbl, call.id)
+    assert leased is not None
+
+    raced = []
+
+    async def race_on_commit(_idmap):
+        raced.append(1)
+        raise RaceCondition("RACE: Version mismatch（模拟）")
+
+    caller = _task_callers(tbl_mgr)["server1"]
+    with patch.object(fc_tbl.backend.master, "commit", new=race_on_commit):
+        assert await exec_future_call(call, caller, fc_tbl)
+    assert len(raced) == 1
+    kept = await _synced_future_row(fc_tbl, call.id)
+    assert kept is not None and kept.scheduled == leased.scheduled
+
+
+async def test_gave_up_call_logs_reason_rate_limited(
+    monkeypatch, test_app, tbl_mgr, new_ctx, caplog
+):
+    """放弃不是错误，打警告：带上冲突原因，告诉作者是哪里撞车；同一个 System 限频，别刷屏"""
+    from hetu.system import future
+    from hetu.system.future import exec_future_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    monkeypatch.setattr(future, "_retry_give_up_logged", {})
+    _race_on(monkeypatch)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    caller = _task_callers(tbl_mgr)["server1"]
+    first = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=600)
+    second = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=600)
+
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        assert await exec_future_call(first, caller, fc_tbl)
+        assert await exec_future_call(second, caller, fc_tbl)
+
+    logged = [r for r in caplog.records if RACE_REASON in r.getMessage()]
+    assert len(logged) == 1
+    assert logged[0].levelno == logging.WARNING
+    assert "add_rls_comp_value" in logged[0].getMessage()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_timeout_zero_call_retries_past_budget(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """timeout=0 的行取出时就删了，放弃等于丢掉，所以不设时间预算，和原来一样重试直到成功。
+    它不会被重投，一条最多占住一个 worker 的循环"""
+    from hetu.system import future
+    from hetu.system.future import exec_future_call
+
+    monkeypatch.setattr(future, "RETRY_BUDGET", 0)
+    races = _race_on(monkeypatch, times=3)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    call = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=0)
+
+    assert await exec_future_call(call, _task_callers(tbl_mgr)["server1"], fc_tbl)
+    assert len(races) == 3
+    assert await _counter_value(tbl_mgr, test_app) == 100 + RACE_VALUE
+
+
+async def test_timeout_zero_call_stops_at_system_retry(
+    monkeypatch, test_app, tbl_mgr, new_ctx, caplog
+):
+    """timeout=0 的调用重试到 System 的 retry 上限还不成功：记错误日志，调用丢失"""
+    from hetu.system import SystemClusters
+    from hetu.system.future import FutureCalls, exec_future_call
+
+    races = _race_on(monkeypatch)
+    system = SystemClusters().get_system("add_rls_comp_value")
+    monkeypatch.setattr(system, "max_retry", 2)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    call = await _pop_colliding_call(fc_tbl, new_ctx(), timeout=0)
+
+    with caplog.at_level(logging.ERROR, logger="HeTu"):
+        assert await exec_future_call(call, _task_callers(tbl_mgr)["server1"], fc_tbl)
+    assert len(races) == 3
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert await _synced_future_row(fc_tbl, call.id) is None

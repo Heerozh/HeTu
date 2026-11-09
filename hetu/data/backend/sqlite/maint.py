@@ -5,18 +5,25 @@
 @email: heeroz@gmail.com
 """
 
-import hashlib
 import logging
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, final, override
+from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
 
 from ....i18n import _
 from ...component import BaseComponent
-from ..base import RowFormat, TableMaintenance
+from ..base import (
+    RowFormat,
+    TableMaintenance,
+    member_row_id_,
+    member_value_,
+    schema_version_,
+)
+from ..redis_model import CommitSeqScan
 from ..table import TableReference
 from .store import SQLiteStore
 
@@ -92,17 +99,19 @@ class SQLiteTableMaintenance(TableMaintenance):
         left: Any,
         right: Any = None,
         limit: int = 10,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         idx_key, b_left, b_right, empty = self.client.zrange_args_(
-            ref, index_name, left, right, False
+            ref, index_name, left, right, False, group
         )
         if empty:
             return []
         members = self._run(
             SQLiteStore.zrange_bylex, idx_key, b_left, b_right, False, 0, limit
         )
-        return [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        return [member_row_id_(vk) for vk in members]
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -152,7 +161,7 @@ class SQLiteTableMaintenance(TableMaintenance):
             table_ref.instance_name,
             table_ref.comp_name,
             json_,
-            hashlib.md5(json_.encode("utf-8")).hexdigest(),
+            schema_version_(json_),
             table_ref.cluster_id,
         )
 
@@ -178,21 +187,34 @@ class SQLiteTableMaintenance(TableMaintenance):
 
     @override
     def do_rename_table_(self, from_: TableReference, to_: TableReference):
-        """重命名组件表：行表改名、索引 key 改前缀、meta 换成 to_ 的定义"""
+        """
+        重命名组件表：行表改名、索引 key 改前缀、meta 换成 to_ 的定义。版本号照搬（同 Redis 后端）：
+        改名不动数据，索引还是原来的格式。
+
+        提交序号列的计数器只在组件名不变（换簇）时跟着搬，规则同 Redis 后端：默认迁移脚本先把
+        原表改名成临时表、拷完再删掉临时表，计数器跟着搬就会被一起删掉；留在原名下，新表接着用
+        """
         from_table = self.client.cluster_prefix(from_)
         to_table = self.client.cluster_prefix(to_)
         from_meta = (from_.instance_name, from_.comp_name)
-        to_meta = self._meta_of(to_)
+        to_instance, to_comp, to_json, _version, to_cluster = self._meta_of(to_)
+        move_counters = from_.comp_name == to_.comp_name
 
         def _rename(store: SQLiteStore) -> int:
             with store.write_txn():
+                old = store.meta_get(*from_meta)
+                assert old is not None
                 count = store.count_rows(from_table) + len(
                     store.zkeys_with_prefix(from_table + ":")
                 )
                 store.rename_row_table(from_table, to_table)
                 store.zrename_prefix(from_table + ":", to_table + ":")
+                if move_counters:
+                    seq_head = ":seq:"
+                    count += len(store.kv_items_with_prefix(from_table + seq_head))
+                    store.kv_rename_prefix(from_table + seq_head, to_table + seq_head)
                 store.meta_delete(*from_meta)
-                store.meta_set(*to_meta)
+                store.meta_set(to_instance, to_comp, to_json, old[1], to_cluster)
                 return count
 
         count = self._run(_rename)
@@ -203,9 +225,12 @@ class SQLiteTableMaintenance(TableMaintenance):
         )
 
     @override
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义，不动表数据"""
-        meta = self._meta_of(table_ref)
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据，见基类"""
+        instance, comp, json_, schema_version, cluster_id = self._meta_of(table_ref)
+        meta = (instance, comp, json_, version or schema_version, cluster_id)
 
         def _update(store: SQLiteStore):
             with store.write_txn():
@@ -216,8 +241,9 @@ class SQLiteTableMaintenance(TableMaintenance):
     @override
     def do_drop_table_(self, table_ref: TableReference) -> int:
         """
-        清空组件表的全部数据（所有簇的行表、索引）和 meta。返回删掉的键数：行数 + 索引 key 数 +
-        meta，对应 Redis 删掉的 key 数。名字以本组件名开头的副本组件不碰
+        清空组件表的全部数据（所有簇的行表、索引、提交序号列的计数器）和 meta。返回删掉的键数：
+        行数 + 索引 key 数 + 计数器数 + meta，对应 Redis 删掉的 key 数。名字以本组件名开头的副本
+        组件不碰
         """
         prefix = self.client.all_clusters_prefix(table_ref)
         instance, comp = table_ref.instance_name, table_ref.comp_name
@@ -229,6 +255,7 @@ class SQLiteTableMaintenance(TableMaintenance):
                     count += store.count_rows(table)
                     store.drop_row_table(table)
                 count += store.zdelete_prefix(prefix)
+                count += store.kv_delete_prefix(prefix)
                 count += store.meta_delete(instance, comp)
                 return count
 
@@ -237,59 +264,98 @@ class SQLiteTableMaintenance(TableMaintenance):
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """
-        按行数据重建组件表的索引，返回行数。member 的算法与 Redis 后端、与 commit 写索引时相同
-        （`rebuild_member_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途失败
-        （unique 冲突）旧索引原样保留。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        按行数据重建组件表的索引，返回行数。member 与 zset key 的算法与 Redis 后端、与 commit 写
+        索引时相同（`rebuild_entry_`）；先全部算好、unique 检查通过后才在一个事务里整体替换：中途
+        失败（unique 冲突）旧索引原样保留。复合索引每组一个 zset，替换时这个索引名下的旧 key 全部
+        删掉（单列的 key 与复合的组 key），不留另一种格式或空了的组。表里一行都没有时，索引里
+        剩下的都是残留，直接删掉。
+
+        提交序号列：组内有重复的号、有号到了上限时报错（见 `CommitSeqScan`）；计数器在替换索引的
+        同一个事务里校准到每组最大的号，只升不降。
         """
         comp_cls = table_ref.comp_cls
         table = self.client.cluster_prefix(table_ref)
         row_count = len(self._run(SQLiteStore.row_ids, table))
-        new_indexes: dict[str, list[bytes]] = {}
+        # {索引 key: {zset key: members}}
+        new_indexes: dict[str, dict[str, list[bytes]]] = {}
         # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
         struct = comp_cls.new_row(id_=0)
+        # 提交序号列：建的时候统计每组最大的号，替换索引的同一个事务里校准计数器（只升不降）
+        scan = (
+            CommitSeqScan(comp_cls, table_ref.comp_name)
+            if comp_cls.commit_seq_ and row_count
+            else None
+        )
         for idx_name in comp_cls.indexes_:
-            members: list[bytes] = []
+            idx_key = self.client.index_key(table_ref, idx_name)
+            by_key: dict[str, list[bytes]] = {}
             if row_count:
+                # 复合索引要读分组列和本字段
+                columns = (*comp_cls.index_groups_[idx_name], idx_name)
                 is_unique = idx_name in comp_cls.uniques_
-                is_bytes = idx_name in comp_cls.bytes_fields_
-                seen: set[bytes | None] = set()
-                for row_id, value in self._run(
-                    SQLiteStore.row_field_values, table, idx_name
+                seen: set[bytes] = set()
+                for row_id, raws in self._run(
+                    SQLiteStore.row_field_values, table, columns
                 ):
+                    for col, raw in zip(columns, raws):
+                        if raw is None:
+                            raise RuntimeError(
+                                _(
+                                    "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
+                                    "无法重建索引"
+                                ).format(
+                                    comp_name=table_ref.comp_name,
+                                    row_id=row_id,
+                                    idx_name=col,
+                                )
+                            )
+                    zset_key, member = self.client.rebuild_entry_(
+                        comp_cls,
+                        idx_key,
+                        idx_name,
+                        struct,
+                        dict(zip(columns, cast(tuple[bytes, ...], raws))),
+                        row_id,
+                    )
                     if is_unique:
+                        # 按值段（复合索引带组前缀）查重，同组同值才算冲突
+                        value = member_value_(member)
                         if value in seen:
                             raise RuntimeError(
                                 _(
-                                    "组件{comp_name}的unique索引`{idx_name}`在重建时"
-                                    "发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                    "Unique标记导致。"
+                                    "组件{comp_name}的unique索引`{idx_name}`（列 {columns}）"
+                                    "在重建时发现违反unique约束，可能是迁移时缩短了值类型、"
+                                    "新增了Unique标记、或去掉了groupby（组内唯一变成了全局"
+                                    "唯一）导致。"
                                 ).format(
-                                    comp_name=table_ref.comp_name, idx_name=idx_name
+                                    comp_name=table_ref.comp_name,
+                                    idx_name=idx_name,
+                                    columns=columns,
                                 )
                             )
                         seen.add(value)
-                    if value is None:
-                        raise RuntimeError(
-                            _(
-                                "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
-                                "无法重建索引"
-                            ).format(
-                                comp_name=table_ref.comp_name,
-                                row_id=row_id,
-                                idx_name=idx_name,
-                            )
-                        )
-                    members.append(
-                        self.client.rebuild_member_(
-                            struct, idx_name, value, is_bytes, str(row_id).encode()
-                        )
-                    )
-            new_indexes[self.client.index_key(table_ref, idx_name)] = members
+                    if scan is not None and idx_name == scan.field:
+                        scan.add(struct, member)
+                    by_key.setdefault(zset_key, []).append(member)
+            new_indexes[idx_key] = by_key
+        # 组内重复、到了上限：报错，旧索引、计数器都不动
+        counters = []
+        if scan is not None:
+            scan.raise_for_problems()
+            counters = scan.counters(table)
 
         def _replace(store: SQLiteStore):
             with store.write_txn():
-                for idx_key, idx_members in new_indexes.items():
-                    store.zreplace(idx_key, idx_members)
+                for key, seq in counters:
+                    current = store.kv_get_int(key)
+                    if current is None or current < seq:
+                        store.kv_set(key, b"%d" % seq)
+                for idx_key, by_key in new_indexes.items():
+                    # 前缀带 ":"：不会删到名字以本索引名开头的别的索引（level 与 level2）
+                    store.zreplace(idx_key, ())
+                    store.zdelete_prefix(idx_key + ":")
+                    for zset_key, members in by_key.items():
+                        store.zreplace(zset_key, members)
 
         self._run(_replace)
         return row_count

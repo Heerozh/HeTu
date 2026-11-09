@@ -1,6 +1,6 @@
 """
 索引查询的比较语义在各后端一致。期望的行为以 Redis 后端为准：索引值编码成可排序的字节
-（`to_sortable_bytes`）后按字节比较，同一个值内按 id 的十进制字符串排序。SQLite 后端用同一套
+（`to_sortable_bytes`）后按字节比较，同一个值内按 id 的数值排序。SQLite 后端用同一套
 编码模拟 Redis 的 zset，比较规则相同。
 整数列的区间按数学含义处理（`normalize_int_bounds_`）：越界的边界到头、小数边界向区间内取整。
 """
@@ -163,22 +163,39 @@ async def test_str_index_byte_order(item_ref, mod_auto_backend):
     assert await _names(backend, item_ref, "Z", "a", limit=-1) == ["Z", "_", "a"]
 
 
-async def test_same_value_rows_ordered_by_id_string(item_ref, mod_auto_backend):
+async def test_same_value_rows_ordered_by_id(item_ref, mod_auto_backend):
     """
-    同一个索引值内的行按 id 的十进制字符串排序（索引的 member 是 值\\x00id）。雪花 id 位数
-    相同时与按数值排一致，只有位数不同的显式 id 才看得出来。
+    同一个索引值内的行按 id 的数值排序，位数不同、负数（按 key 的未来调用）也一样：索引
+    member 末尾的 id 段是定宽、保序的编码。雪花 id 约 2033-07 从 18 位进到 19 位，按十进制串
+    排的话那之后"取这个值下最新 N 行"会取到旧行。事务里读己之写的合并也按同一个顺序
     """
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
+    ids = [-(2**63), -100, -9, 9, 10, 100, 10**18 - 1, 10**18, 2**63 - 2]
     await _insert_rows(
         backend,
         comp,
-        *[_item(comp, time=i, name=f"n{i}", owner=1, id_=i) for i in (9, 10, 100)],
+        *[
+            _item(comp, time=i, name=f"n{i}", owner=1, id_=row_id)
+            for i, row_id in enumerate(ids)
+        ],
     )
 
-    assert await _ids(backend, item_ref, "owner", 1, limit=-1) == [10, 100, 9]
+    assert await _ids(backend, item_ref, "owner", 1, limit=-1) == ids
     desc = await _ids(backend, item_ref, "owner", 1, limit=-1, desc=True)
-    assert desc == [9, 100, 10]
+    assert desc == ids[::-1]
+    # 跨过 18 → 19 位：最新的两行是 19 位的那两个
+    assert await _ids(backend, item_ref, "owner", 1, limit=2, desc=True) == [
+        2**63 - 2,
+        10**18,
+    ]
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(_item(comp, time=99, name="new", owner=1, id_=10**18 + 1))
+        rows = await repo.range("owner", 1, limit=3, desc=True)
+        assert [int(i) for i in rows.id] == [2**63 - 2, 10**18 + 1, 10**18]
+        session.discard()
 
 
 async def test_int_index_bounds_beyond_dtype_range(nums, mod_auto_backend):
@@ -381,6 +398,32 @@ def test_sortable_bytes_nan_sign_ignored():
         assert to_sortable_bytes(positive) == committed
         array = np.array([negative, positive], dtype=dtype)
         assert to_sortable_bytes_list(array) == [committed, committed]
+
+
+def test_sortable_bytes_trailing_nul_is_padding():
+    """
+    S / U 列定宽、结尾用 \\x00 补齐：存进列里的值结尾的 \\x00 就没了（中间的还在）。查询值是
+    `dtype.type(...)` 造的标量，结尾的 \\x00 还在，编码时也得去掉、与存的值编码一致。否则带
+    \\x00 的值查不到写进去的行：get 读空，upsert 去插入撞上已有的那行，判竞态一直重试
+    """
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    cases = {
+        "S8": ([b"", b"ab", b"a\x00b"], b"\x00"),
+        "U8": (["", "ab", "a\x00b"], "\x00"),
+    }
+    for typ, (values, nul) in cases.items():
+        dtype = np.dtype(typ)
+        for value in values:
+            expect = to_sortable_bytes(dtype.type(value))
+            stored = np.array([value + nul], dtype=dtype)
+            assert stored[0] == value, (typ, value)
+            assert to_sortable_bytes(stored[0]) == expect, (typ, value)
+            assert to_sortable_bytes_list(stored) == [expect], (typ, value)
+            for query in (value + nul, value + nul * 3):
+                assert to_sortable_bytes(dtype.type(query)) == expect, (typ, query)
 
 
 async def test_range_index_reads_values_without_rows(

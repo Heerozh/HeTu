@@ -21,7 +21,7 @@ from ..data.backend import RaceCondition, RowFormat
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from ..i18n import _
 from . import lock
-from .caller import SystemCaller
+from .caller import RetryBudgetExceeded, SystemCaller
 from .context import SystemContext
 from .definer import SystemClusters, define_system
 from .lock import SystemLock, clean_expired_call_locks
@@ -66,8 +66,8 @@ def _call_lock_uuid(call: np.record) -> str:
 
     雪花 id 不会复用，就是 id。按 key 的调用（负 id）同一个 key cancel 后再 ensure 是同一个 id，
     再加上建行时间（毫秒，十六进制）区分是哪一条：只用 id 的话，锁的保留期内新的这条会被当成
-    已经执行过，不执行就删掉。最长 20 + 1 + 11 = 32 个字符，正好放进 SystemLock.uuid（<U32），
-    够用到 2527 年。
+    已经执行过，不执行就删掉。最长 20 + 1 + 11 = 32 个字符（毫秒数到 2527 年才进到 12 位十六
+    进制），放得进 SystemLock.uuid（<U64）。
 
     Call-lock uuid of a one-shot future call. Snowflake ids are never reused, so it is
     just the id; keyed calls (negative ids) reuse the id after cancel + ensure, so the
@@ -192,6 +192,10 @@ async def create_future_call(
     * 不会早于at执行（按执行它的Worker的时钟），System里读到的ctx.timestamp>=at。各Worker
       睡到最早一条到期才醒，到点即触发；新建的调用最迟约1秒后被发现，at离创建不到1秒的可能
       晚触发最多约1秒
+    * 各Worker逐条执行未来调用，事务持续冲突的调用不会一直占着：原地重试约2秒还冲突就放弃
+      这一轮，继续执行下一条，这条最迟约5秒后重投（timeout更短的按timeout）。一直冲突就一直
+      跑不成，要缩小System读写的范围。timeout=0的调用放弃就丢了，所以没有这个限制，会重试到
+      System的retry上限，这期间占着这个Worker的循环
 
     Parameters
     ----------
@@ -357,6 +361,15 @@ DRAIN_PER_TABLE = 64
 CONTENDED_RETRY_DELAY = 0.05
 # 每隔多久清一次过期的 call lock（保留期见 lock.CALL_LOCK_RETENTION）
 CALL_LOCK_CLEAN_INTERVAL = 60.0
+# 目标 System 事务冲突时最多原地重试这么多秒，之后放弃这一轮。循环是逐条执行的，重试时这个
+# worker 后面到期的调用全等着。必须比最短的 timeout（5 秒）短：租约到期时还在重试的话，这条
+# 会被下一个 worker 再取走，一条调用就能挨个占住所有 worker，并且和自己撞车
+RETRY_BUDGET = 2.0
+# 放弃之后最多过这么多秒重投。比重试的时间长，一直撞车的调用才只占循环的一小部分时间
+RETRY_COOLDOWN = 5.0
+# 同一个 System 放弃时的日志至少隔这么多秒才再打一次
+RETRY_GIVE_UP_LOG_INTERVAL = 60.0
+_retry_give_up_logged: dict[str, float] = {}
 
 
 async def next_due(tbl: Table, horizon: float) -> float | None:
@@ -438,6 +451,49 @@ async def pop_upcoming_call(tbl: Table) -> np.record | None:
     return None
 
 
+def _log_retry_give_up(call: np.record, err: RetryBudgetExceeded) -> None:
+    """放弃这一轮不是错误，这条之后会重投。但一直撞车就一直跑不成，要告诉作者撞在哪"""
+    system = str(call.system)
+    now = time.monotonic()
+    last = _retry_give_up_logged.get(system)
+    if last is not None and now - last < RETRY_GIVE_UP_LOG_INTERVAL:
+        return
+    _retry_give_up_logged[system] = now
+    logger.warning(
+        _(
+            "⚠️ [⚙️Future] 未来调用 {system}{args} 事务冲突重试了 {count} 次仍未成功，先放弃"
+            "这一轮，稍后重投。最后一次冲突：{reason}。一直冲突就一直跑不成，请缩小它读写的"
+            "范围，不依赖区间的 range 可以传 phantom_check=False"
+        ).format(
+            system=system,
+            args=call.args,
+            count=err.race_count,
+            reason=err.__cause__,
+        )
+    )
+
+
+async def _retry_call_soon(call: np.record, tbl: Table) -> None:
+    """
+    放弃这一轮的调用不用等满 timeout：把取出时写的租约提前到 RETRY_COOLDOWN 秒后。租约本来就
+    更短时不写库。改不成也没事（撞竞态说明这条刚被别人改了），租约到期照样重投。
+    """
+    retry_at = time.time() + RETRY_COOLDOWN
+    if retry_at >= call.scheduled:
+        return
+    try:
+        async with tbl.session() as session:
+            repo = session.using(tbl.comp_cls)
+            current = await repo.get(id=call.id)
+            # scheduled 没变说明租约还是自己的：被别的 worker 重投取走、cancel 后重新 ensure 都
+            # 会改掉它，那时不能动
+            if current is not None and current.scheduled == call.scheduled:
+                current.scheduled = retry_at
+                await repo.update(current)
+    except RaceCondition:
+        pass
+
+
 async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 准备System
     sys = SYSTEM_CLUSTERS.get_system(call.system)
@@ -451,17 +507,25 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     args = ast.literal_eval(call.args)
     # 循环任务和立即删除的任务都不需要lock
     req_call_lock = not call.recurring and call.timeout != 0
+    # timeout=0 的行取出时就删了，放弃等于丢掉，所以不设预算，重试到 System 的 retry 上限。
+    # 重试时一样占着这个 worker 的循环，但它不会被重投，一条最多占住一个 worker
+    retry_budget = RETRY_BUDGET if call.timeout != 0 else None
     # 执行
     ok = False
     res = None
     # 未来调用不走Endpoint，请求时间戳要自己打，否则System读到的ctx.timestamp恒为0
     caller.context.timestamp = time.time()
     try:
-        if req_call_lock:
-            res = await caller.call_(sys, *args, uuid=_call_lock_uuid(call))
-        else:
-            res = await caller.call_(sys, *args)
+        res = await caller.call_(
+            sys,
+            *args,
+            uuid=_call_lock_uuid(call) if req_call_lock else "",
+            retry_budget=retry_budget,
+        )
         ok = True
+    except RetryBudgetExceeded as e:
+        _log_retry_give_up(call, e)
+        await _retry_call_soon(call, tbl)
     except Exception as e:
         err_msg = _(
             "❌ [⚙️Future] 未来调用System异常，调用：{system}{args}，异常：{exc}"

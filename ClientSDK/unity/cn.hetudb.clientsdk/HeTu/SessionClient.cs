@@ -8,6 +8,7 @@
 using Cysharp.Threading.Tasks;
 #endif
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace HeTu
@@ -298,12 +299,19 @@ namespace HeTu
         ///     above ~100 ms), stale data may remain until the row changes again.
         ///     Make strongly consistent decisions in a server System.
         /// </remarks>
+        /// <param name="group">
+        ///     复合索引的分组值 {分组列: 值}（单列索引、id 不给），见
+        ///     <c>HeTuClient.WatchRow</c>。不合法时当场抛 <see cref="ArgumentException" />。
+        ///     解析出行之后，重连按行 id 恢复。
+        ///     Group values of a composite (groupby) index; see HeTuClient.WatchRow.
+        /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<RowSubscription<T>> WatchRow<T>(
 #else
         public UniTask<RowSubscription<T>> WatchRow<T>(
 #endif
-            string index, object value, string componentName = null)
+            string index, object value, string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             var tcs = NewCompletionSource<RowSubscription<T>>();
@@ -312,7 +320,8 @@ namespace HeTu
                 value,
                 componentName,
                 sub => tcs.TrySetResult(sub),
-                ex => tcs.TrySetException(ex));
+                ex => tcs.TrySetException(ex),
+                group);
             return AwaitFrom(tcs);
         }
 
@@ -328,13 +337,19 @@ namespace HeTu
         ///     above ~100 ms), stale data may remain until the row changes again.
         ///     Make strongly consistent decisions in a server System.
         /// </remarks>
+        /// <param name="group">
+        ///     复合索引的分组值 {分组列: 值}（单列索引不给），见 <c>HeTuClient.WatchRange</c>。
+        ///     不合法时当场抛 <see cref="ArgumentException" />。重连恢复带着订阅时的 group。
+        ///     Group values of a composite (groupby) index; see HeTuClient.WatchRange.
+        /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<IndexSubscription<T>> WatchRange<T>(
 #else
         public UniTask<IndexSubscription<T>> WatchRange<T>(
 #endif
             string index, object left, object right, int limit,
-            bool desc = false, bool force = true, string componentName = null)
+            bool desc = false, bool force = true, string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
             var tcs = NewCompletionSource<IndexSubscription<T>>();
@@ -347,7 +362,8 @@ namespace HeTu
                 sub => tcs.TrySetResult(sub),
                 ex => tcs.TrySetException(ex),
                 desc,
-                force);
+                force,
+                group);
             return AwaitFrom(tcs);
         }
 
@@ -552,10 +568,11 @@ namespace HeTu
             Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName = null,
             ManagedRowCore<T> reusable = null,
-            System.Diagnostics.StackTrace creationTrace = null)
+            System.Diagnostics.StackTrace creationTrace = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent =>
             _client.WatchRowCoreSync(index, value, onResponse, componentName, reusable,
-                creationTrace);
+                creationTrace, group);
 
         public void WatchRange<T>(
             string index,
@@ -567,10 +584,11 @@ namespace HeTu
             bool force = true,
             string componentName = null,
             ManagedIndexCore<T> reusable = null,
-            System.Diagnostics.StackTrace creationTrace = null)
+            System.Diagnostics.StackTrace creationTrace = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent =>
             _client.WatchRangeCoreSync(index, left, right, limit, onResponse,
-                desc, force, componentName, reusable, creationTrace);
+                desc, force, componentName, reusable, creationTrace, group);
 
         public void WatchTable<T>(
             Action<ManagedIndexCore<T>, bool, Exception> onResponse,

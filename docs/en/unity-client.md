@@ -242,6 +242,92 @@ names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
 names.OnDelete += (sub, id) => RemoveNameTag(id);
 ```
 
+### Watching a group of a composite index
+
+For a composite index declared on the server with `property_field(groupby=...)`
+(see [Concepts](concepts.md)), pass the values of every group-by column in the
+last parameter, `group`, to watch just that group. Both `WatchRow` and
+`WatchRange` take it:
+
+```csharp
+// level grouped by zone: rows of zone 3 with level in [10, 20], ordered by level
+var zone3 = await HeTuClient.Instance.WatchRange<Monster>(
+    "level", 10, 20, 100,
+    group: new Dictionary<string, object> { ["zone"] = 3 });
+
+// a composite index unique within a group: one row by (guild, name)
+var member = await HeTuClient.Instance.WatchRow<GuildMember>(
+    "name", "Ann", group: new Dictionary<string, object> { ["guild"] = guildId });
+```
+
+- **Value types**: group values must be integers, bools, integral floats,
+  `string` or `byte[]`. An integer column also accepts a numeric string such as
+  `"3"`, the same as single-column index queries.
+- **Thrown on the spot**: an invalid value, or a `group` on `id`, throws
+  `ArgumentException` and nothing is sent.
+- **Connection closed**: a misspelled group-by column, or a value of the wrong
+  type for its column (e.g. a non-numeric string for an integer column, or a
+  number for a string column), cannot be seen by
+  the client; the server closes the connection with 4002, which is terminal for
+  the session (it does not reconnect).
+- **The dictionary is copied**: changing it after the call does not affect the
+  subscription, and a reconnect restores with the `group` given at subscribe
+  time. `WatchRow` still restores by the row's `id` once the row is resolved.
+- **What wakes it up**: only writes in its own group; writes in other groups
+  never wake it. The server does not need `point_sub` for this.
+- **Server version**: subscriptions with `group` need a server that supports
+  composite indexes (later than v2025.11.1). Older servers do not understand
+  `group` and close the connection with 4002. Subscriptions without `group`
+  send exactly the same frames as before.
+
+### Consuming a commit sequence column on the client
+
+A commit sequence column declared on the server with
+`property_field(commit_seq=True, groupby=...)` (see [Concepts](concepts.md)) is
+numbered from 1 per group at commit. A client can watch that group and consume
+it by number:
+
+```csharp
+// rows of my owner group numbered after the cursor, a window of 100 rows
+var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
+    "seq", cursor + 1, long.MaxValue, 100,
+    group: new Dictionary<string, object> { ["owner"] = myId });
+```
+
+- **Advance the cursor only over consecutive numbers**: when one push carries
+  several rows, sort them by `seq` and handle them one number after another
+  from the cursor plus one, moving the cursor as you go. Stop at a missing
+  number and buffer the rows after it: behind a read/write splitting proxy that
+  routes per command, or on native cluster with several replicas, the server
+  may miss a row in the middle when it reads the batch back, and a later push
+  fills it in. Don't jump the cursor to the largest number in the batch; the
+  missed row would never be handled.
+- **Re-subscribe when the window is full**: a subscription only pushes rows in
+  its window (`limit` rows). Once you reach the end of the window, subscribe
+  again from the new cursor and unsubscribe the old one.
+- **Every row of the group must be visible to this client**, e.g. an `OWNER`
+  component with `groupby="owner"`. A row hidden by RLS still takes a slot in
+  the window but is never pushed, so the client stops in front of it forever;
+  if that can't be guaranteed, consume on the server instead (see
+  "Binlog-style syncing" in [Advanced](advanced.md)).
+- **A missing number that never fills in**: the client cannot tell whether a
+  missing number is permanent (e.g. the row was deleted). Either make sure the
+  server never deletes rows in the middle, or, when it still hasn't filled in
+  after a while, call a server `System` that confirms and skips the gap.
+- **Getting the number of a row you just inserted**: a row inserted in a
+  `System` only gets its number at commit, so the row the `System` returns
+  still has 0. The direct way is to have the `System` commit early and send the
+  number back: `seqs = await ctx.session_commit()`, then
+  `return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})` (see
+  "Binlog-style syncing" in [Advanced](advanced.md)); the cost is that code
+  after the commit runs outside the transaction. If you don't want to commit
+  early, watch the group and call with `CallSystemAwaitPush`: by the time it
+  returns, the push has arrived; find the pushed row by the id the `System`
+  returned to get its number. This needs the new row to fall inside the
+  subscription's window, e.g. watch the latest rows with `desc: true`, or make
+  sure the window isn't full; otherwise the new row is not pushed and
+  `CallSystemAwaitPush` still returns, without the number.
+
 ## Typed components vs `DictComponent`
 
 The server can generate matching C# classes from your `Component` definitions

@@ -9,13 +9,56 @@ weight: 30
 
 
 
+## `SeqReadResult`
+
+```python
+SeqReadResult(rows: RowsT, blocked: tuple[int, int] | None)
+```
+
+<small>Source: [`hetu/data/backend/base.py:201`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L201)</small>
+
+
+**Bases:** `tuple`, `Generic`
+
+
+
+Result of `BackendClient.seq_read`: the rows read and what blocked the read.
+
+提交序号列增量读（`seq_read`）的结果，可以直接解包：``rows, blocked = ...``。
+
+- `rows`：号大于 `after` 的行，按号升序，格式按 `row_format`；
+- `blocked`：``(号, 行 id)`` 或 None。索引里有、这次却没取到行的第一个 member，它挡住了后面的
+  行；None 表示没被挡住。取行落到落后的副本、读完索引之后行被删了都会挡住，下一次通常就好了；
+  同一个 ``(号, 行 id)`` 一直挡着，多半是索引残留（索引里有、行没有）。
+
+
+
+
+### Attributes
+
+- **`rows`** (RowsT) — _No description._
+
+- **`blocked`** (tuple[int, int] | None) — _No description._
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## `SessionRepository`
 
 ```python
 SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:52`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L52)</small>
+<small>Source: [`hetu/data/backend/repo.py:77`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L77)</small>
 
 
 
@@ -47,7 +90,7 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:83`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L83)</small>
+<small>Source: [`hetu/data/backend/repo.py:122`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L122)</small>
 
 内部方法，在远程数据库中检查Unique索引冲突。
 
@@ -66,7 +109,7 @@ remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:123`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L123)</small>
+<small>Source: [`hetu/data/backend/repo.py:177`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L177)</small>
 
 检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
@@ -108,13 +151,27 @@ is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 get_by_id(row_id: numpy.int64 | int) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:184`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L184)</small>
+<small>Source: [`hetu/data/backend/repo.py:241`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L241)</small>
 
-从数据库获取单行数据，并放入`Session`缓存。
-本指令如果命中缓存，不会去数据库查询。
+按主键 id 读一行，读到的放入`Session`缓存，和 `get(id=row_id)` 完全一样。
+命中缓存（含本事务新 insert 的行）时不去数据库查询。
+
+读空会登记"本事务观察到该 id 不存在"：同一事务内再读这个 id（`get_by_id` 或
+`get(id=)`）直接返回 None，不再查询数据库。commit 时确认这个 id 仍然不存在：读空之后
+被别的事务插入了，或者读空读到的是落后的副本，判为 [`RaceCondition`](exceptions.md#racecondition) 重试；本事务
+insert 这个 id 撞车时同样判竞态，而不是 [`UniqueViolation`](exceptions.md#uniqueviolation)。
+
+
+**Parameters**
+
+- **`row_id`** (Any) — 行的主键 id。
 
 
 
+
+**Returns**
+
+读空（含本事务删掉的行）返回 None，否则返回 np.record (c-struct) 格式的行。
 
 
 
@@ -128,17 +185,21 @@ get_by_id(row_id: numpy.int64 | int) -> numpy.record | None
 get(
     index_name: str | None = None,
     query_value: numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool | None = None,
+    _group: collections.abc.Mapping[str, Any] | None = None,
     **kwargs: numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool,
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:205`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L205)</small>
+<small>Source: [`hetu/data/backend/repo.py:366`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L366)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
 主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
-None（不再查询数据库），commit 时若该值已被并发写入则判为 [`RaceCondition`](exceptions.md#racecondition) 重试。
+None（不再查询数据库），commit 时若该值已被并发写入（或读空读到的是落后的副本）则判为
+[`RaceCondition`](exceptions.md#racecondition) 重试。
 结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
+例外是提交序号列（`commit_seq`）：本事务 insert 的行还没有号（是 0），按这一列查不到它们，
+按 id、按别的索引能查到。
 
 非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
 副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回的
@@ -151,7 +212,12 @@ None（不再查询数据库），commit 时若该值已被并发写入则判为
 
 - **`query_value`** (Any) — 辅助参数，如果不便使用kwargs参数时使用。
 
-- **`kwargs`** (Any) — 查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须有索引。
+- **`_group`** (Any) — 辅助参数，复合索引（groupby）的分组值 {分组列: 值}，配合 `index_name` 使用。
+
+- **`kwargs`** (Any) — 查询字段和值，例如 `id=1234567890`。只能查询一个有索引的字段；复合索引要同时给出
+全部分组列，例如 `get(name="abc", zone=3)`（组内查询）。值按字面比较：字符串开头的
+`(` / `[` 不是区间标记（只有 `range` 才解释），`get(name="[GM]Bob")` 查的就是
+"[GM]Bob"。
 
 
 
@@ -186,11 +252,12 @@ range(
     limit: int = 10,
     desc: bool = False,
     phantom_check: bool = True,
-    **kwargs: tuple[numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool, numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool],
+    _group: collections.abc.Mapping[str, Any] | None = None,
+    **kwargs: tuple[numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool, numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool] | numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | int | float | str | bytes | bool,
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:311`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L311)</small>
+<small>Source: [`hetu/data/backend/repo.py:498`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L498)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -198,7 +265,8 @@ range(
 结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
 会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
 结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）命中本事务从库里
-读过、这一列没改过的行时，直接返回、不去数据库。
+读过、这一列没改过的行时，直接返回、不去数据库。例外是提交序号列（`commit_seq`）的
+索引：本事务 insert 的行还没有号（是 0），它的位置要到提交时才定，不在结果里。
 
 读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
 区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -218,8 +286,14 @@ range(
 
 - **`_right`** (Any) — 辅助参数，如果不便使用kwargs参数时使用。
 
+- **`_group`** (Any) — 辅助参数，复合索引（groupby）的分组值 {分组列: 值}，配合 `index_name` 使用。
+
 - **`kwargs`** (Any) — 查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
-默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
+复合索引（groupby）要同时用等值给出全部分组列，例如 `range(level=(1, 10), zone=3)`，
+结果只含这一组的行；区间之外的 kwarg 都是分组值。
+默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。所以字符串
+边界本身以 `(` / `[` 开头时（比如玩家名 "[GM]Bob"），要在前面再加一个 `[`；只查
+一个值请用 `get`，它按字面比较。
 区间里没有值（比如两端都是开区间、值又相同）时返回空；下界大于上界报
 `ValueError`。
 不限下界或上界时传 `-inf` / `inf`（`float("inf")` 或 `np.inf`），比如
@@ -254,6 +328,7 @@ range(
 **Notes**
 
 如何复合条件查询？
+"某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`）。其他组合条件，
 请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
     items = await session.using(Item).range(level=(10, 20), limit=100)
@@ -269,7 +344,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:602`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L602)</small>
+<small>Source: [`hetu/data/backend/repo.py:862`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L862)</small>
 
 向Session中添加一行待插入数据。
 
@@ -280,6 +355,8 @@ insert(row: numpy.record) -> None
 
 本事务删掉的库里的行，不能再用同一个 id insert（`upsert` 锚定这个 id 新建也一样），
 抛 `ValueError`：要改这行请直接 `update`。
+
+提交序号列（`commit_seq`）由提交脚本发号，insert 时它必须是 0，否则抛 `ValueError`。
 
 
 **Parameters**
@@ -301,12 +378,16 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:653`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L653)</small>
+<small>Source: [`hetu/data/backend/repo.py:927`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L927)</small>
 
 向Session中添加一行待更新数据。
 
 只在本地 IdentityMap 检查 unique（同事务内重复 → 立即抛 [`UniqueViolation`](exceptions.md#uniqueviolation)）；
 与数据库既有数据的冲突由 `commit()` 判定，规则同 `insert`。
+
+提交序号列（`commit_seq`）不能改；库里已经有号的行也不能改它的分组列（搬到别的组会和那
+一组的号重复），都抛 `ValueError`。本事务 insert、还没提交的行，以及库里号 ≤ 0（没有号的
+历史行）可以改分组列。
 
 
 **Parameters**
@@ -330,7 +411,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:689`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L689)</small>
+<small>Source: [`hetu/data/backend/repo.py:1004`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L1004)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -339,6 +420,11 @@ upsert(
 **Parameters**
 
 - **`kwargs`** (Any) — 查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
+组内唯一的复合索引（`unique=True, groupby=...`）要同时给出全部分组列，例如
+`upsert(name="abc", zone=3)`，新建的行会写入这些分组值。
+值和 `get` 一样按字面比较，开头的 `(` / `[` 不是区间标记。
+字符串锚定值超过列宽时没有行能匹配，要新建行时抛 ValueError（存进去会被截断，之后
+拿这个值查不到它）。
 
 
 
@@ -365,7 +451,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:718`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L718)</small>
+<small>Source: [`hetu/data/backend/repo.py:1042`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L1042)</small>
 
 向Session中添加一行待删除数据。
 
@@ -593,7 +679,7 @@ System调用时的上下文，继承自 `Context` 并添加事务相关属性。
 #### `session_commit`
 
 ```python
-session_commit() -> None
+session_commit() -> dict[type[BaseComponent], dict[int, int]]
 ```
 
 <small>Source: [`hetu/system/context.py:39`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L39)</small>
@@ -607,14 +693,46 @@ session_commit() -> None
 
 **Returns**
 
+The numbers this commit handed out to commit sequence columns
+(``commit_seq``): ``{component class: {row id: number}}``, keyed like
+`ctx.repo` (the master class when the System references a duplicate).
+Only rows this commit inserted into components with a commit sequence
+column are included; empty dict if there are none. The automatic commit
+after the System returns gives no numbers, so call this to get them.
+
+这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类
+同 `ctx.repo` 的键（System 引用的是副本组件时也是主组件类）。只含这次 insert 的、
+带提交序号列的组件的行，没有这样的行时是空 dict。System 返回之后的自动提交不返回号，
+要拿号就调用它。
+
+
+
+
+**Examples**
+
+
+```python
+>>> @hetu.define_system(
+...     namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+... )
+... async def submit(ctx: hetu.SystemContext, kind: int):
+...     row = ChangeLog.new_row()
+...     row.owner, row.kind = ctx.caller, kind
+...     await ctx.repo[ChangeLog].insert(row)
+...     seqs = await ctx.session_commit()  # 行里的 seq 仍是 0，号看返回值
+...     return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+
+
+
+
+**Notes**
+
 如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition，UniqueViolation。
 异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试；
 UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` 观察其不存在），不重试。
 其他任何异常会记录日志并断开客户端连接。
-
-
-
-
 
 
 
@@ -624,7 +742,7 @@ UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` �
 session_discard() -> None
 ```
 
-<small>Source: [`hetu/system/context.py:57`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L57)</small>
+<small>Source: [`hetu/system/context.py:87`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L87)</small>
 
 提前显式结束事务，放弃所有写入操作。
 注意：调用完 `session_discard`，`ctx` 将不再能够读写 `repo` 。且后续不再属于事务，
@@ -692,7 +810,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:528`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L528)</small>
+<small>Source: [`hetu/data/backend/base.py:942`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L942)</small>
 
 从数据库直接获取单行数据。
 
@@ -734,13 +852,16 @@ servant_range(
     limit: int = 10,
     desc: bool = False,
     row_format=<RowFormat.STRUCT: 1>,
+    *,
+    group: collections.abc.Mapping[str, Any] | None = None,
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:648`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L648)</small>
+<small>Source: [`hetu/data/backend/base.py:1072`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1072)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
+复合索引（groupby）要用 `group` 给出全部分组列的值，结果只含这一组的行。
 
 
 **Parameters**
@@ -758,6 +879,8 @@ servant_range(
 - **`desc`** (Any) — 是否降序排列
 
 - **`row_format`** (Any) — 返回数据解码格式，见 "Returns"
+
+- **`group`** (Any) — 复合索引的分组值 {分组列: 值}，必须正好给出全部分组列；单列索引不能给。
 
 
 
@@ -784,12 +907,155 @@ servant_range(
 **Notes**
 
 如何复合条件查询？
-请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
+"某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`），查询时给出
+`group`。其他组合条件，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
     items = client.range(ref, "owner", player_id, limit=100)
     few_items = items[items.amount < 10]
 
 由于python numpy支持SIMD，比直接在数据库复合查询快。
+
+
+
+#### `servant_seq_head`
+
+```python
+servant_seq_head(group: collections.abc.Mapping[str, Any] | None = None) -> int
+```
+
+<small>Source: [`hetu/data/backend/base.py:1264`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1264)</small>
+
+Read the latest number issued by one commit_seq group.
+
+读提交序号列（`commit_seq`）一个组最近发出的号，也就是这一组发到了第几号。还没发过号是 0，
+易失表维护清空之后也是 0。非事务读，走副本，可能落后。
+
+计数器和索引是两个 key，读计数器不和任何一次读在同一个快照里：只能用来发现有新号、监控
+积压、报警，**不能**拿来把游标推过没见到行的号。库外消费方的写法见 `seq_read`。
+
+
+**Parameters**
+
+- **`group`** (Any) — 分组值 {分组列: 值}，规则同 `range` 的 `group`：带 groupby 的必须正好给出全部分组列，
+不带 groupby 的不给。
+
+
+
+
+**Returns**
+
+这一组最近发出的号，没发过号是 0。
+
+
+
+
+
+
+**Notes**
+
+Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
+
+
+
+#### `servant_seq_head_many`
+
+```python
+servant_seq_head_many(
+    groups: collections.abc.Sequence[collections.abc.Mapping[str, typing.Any] | None],
+) -> list[int | None]
+```
+
+<small>Source: [`hetu/data/backend/base.py:1304`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1304)</small>
+
+Read the latest numbers issued by many commit_seq groups in one round trip.
+
+批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
+一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。
+
+逐组返回：计数器被写坏了的组是 None，不抛异常，别的组照常返回，一组坏了不会拖住所有组。
+要看是哪个 key、什么值，对这一组调 `seq_head`。
+
+
+**Parameters**
+
+- **`groups`** (Any) — 每一项是一个组的分组值，规则同 `seq_head` 的 `group`。
+
+
+
+
+**Returns**
+
+每个组最近发出的号，没发过号是 0，计数器被写坏了是 None，顺序同 `groups`。
+
+
+
+
+
+
+
+
+#### `servant_seq_read`
+
+```python
+servant_seq_read(
+    after: int,
+    limit: int = 100,
+    *,
+    group: collections.abc.Mapping[str, Any] | None = None,
+    after_id: int | None = None,
+    row_format=<RowFormat.STRUCT: 1>,
+) -> hetu.data.backend.base.SeqReadResult[typing.Any]
+```
+
+<small>Source: [`hetu/data/backend/base.py:1381`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1381)</small>
+
+Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
+
+给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
+不需要 master。
+
+先一条 ZRANGE 读这一组在 `after` 之后的 member（它落到的那个节点上的原子快照），再取行。
+号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行已经不在了，所以：
+
+- 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
+  (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
+- 缺口只按这一条 ZRANGE 确认。取行不一定和它落在同一个节点上（读写分离代理、原生 cluster
+  都按命令分流），读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：
+  停在它前面，它记为 `blocked`，下次再读。所以落到哪个节点只影响进度，不会漏行；有只读节点
+  断了复制、还在回答读请求时，可能一直被它挡住，直到它恢复或者被摘掉；
+- 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
+
+注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
+小于所有消费方**已经落盘的**游标的行，删之前先核对，见文档"binlog 式同步"一节。
+
+
+**Parameters**
+
+- **`after`** (Any) — 游标，也就是最后处理过的那一号；从头读给 0。0 <= after < 2^53。
+
+- **`limit`** (Any) — 最多返回的行数，正整数。一次读太多会长时间占住副本，一般几百到几千行。
+
+- **`group`** (Any) — 分组值 {分组列: 值}，规则同 `range` 的 `group`。
+
+- **`after_id`** (Any) — 游标那一号的行的雪花 id（锚点）。给了就核对序列：游标那一号换了一行、游标那一行没了而
+后面有号、组里有重号，都抛 [`CommitSeqDiverged`](exceptions.md#commitseqdiverged)。给的时候 `after` 必须 >= 1。不给就不核对，
+也就发现不了号被复用。
+
+- **`row_format`** (Any) — 返回数据解码格式，同 `range`，但不支持 `RowFormat.ID_LIST`。
+
+
+
+
+**Returns**
+
+``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
+``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：ZRANGE 落到的那个
+节点上 `after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+
+
+
+
+
 
 
 
@@ -799,7 +1065,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:812`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L812)</small>
+<small>Source: [`hetu/data/backend/base.py:1446`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1446)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
@@ -908,7 +1174,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:323`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L323)</small>
+<small>Source: [`hetu/system/future.py:327`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L327)</small>
 
 
 
@@ -1033,6 +1299,10 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 * 不会早于at执行（按执行它的Worker的时钟），System里读到的ctx.timestamp>=at。各Worker
   睡到最早一条到期才醒，到点即触发；新建的调用最迟约1秒后被发现，at离创建不到1秒的可能
   晚触发最多约1秒
+* 各Worker逐条执行未来调用，事务持续冲突的调用不会一直占着：原地重试约2秒还冲突就放弃
+  这一轮，继续执行下一条，这条最迟约5秒后重投（timeout更短的按timeout）。一直冲突就一直
+  跑不成，要缩小System读写的范围。timeout=0的调用放弃就丢了，所以没有这个限制，会重试到
+  System的retry上限，这期间占着这个Worker的循环
 
 
 
@@ -1053,7 +1323,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:248`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L248)</small>
+<small>Source: [`hetu/system/future.py:252`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L252)</small>
 
 
 

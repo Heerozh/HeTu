@@ -91,7 +91,7 @@ LocalApp(
 ) -> None
 ```
 
-<small>Source: [`hetu/local.py:193`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L193)</small>
+<small>Source: [`hetu/local.py:199`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L199)</small>
 
 
 
@@ -138,7 +138,7 @@ In-process app runtime; open it with `open_local_app(config)`.
 verify_table(tbl: Table) -> None
 ```
 
-<small>Source: [`hetu/local.py:247`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L247)</small>
+<small>Source: [`hetu/local.py:253`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L253)</small>
 
 第一次用到这张表时核对表结构与簇（结果缓存），不一致抛 [`TableNotReady`](local.md#tablenotready)。
 
@@ -160,7 +160,7 @@ verify_table(tbl: Table) -> None
 verify_components(comps: Iterable[__annotationlib_name_1__]) -> None
 ```
 
-<small>Source: [`hetu/local.py:260`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L260)</small>
+<small>Source: [`hetu/local.py:266`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L266)</small>
 
 校验一组组件的表（System 调用前对 full_components 调用）
 
@@ -179,7 +179,7 @@ verify_components(comps: Iterable[__annotationlib_name_1__]) -> None
 resolve_identity(system: str, caller: int | None, group: str | None) -> tuple[int, str]
 ```
 
-<small>Source: [`hetu/local.py:271`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L271)</small>
+<small>Source: [`hetu/local.py:277`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L277)</small>
 
 没给全身份时的默认值，见模块函数 `resolve_identity`（严格规则）。
 
@@ -202,7 +202,7 @@ new_context(
 ) -> hetu.system.context.SystemContext
 ```
 
-<small>Source: [`hetu/local.py:277`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L277)</small>
+<small>Source: [`hetu/local.py:283`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L283)</small>
 
 建一个直接跑 System 用的上下文：没有连接（connection_id=0、request=None）。
 
@@ -231,7 +231,7 @@ call_system(
 ) -> Any
 ```
 
-<small>Source: [`hetu/local.py:298`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L298)</small>
+<small>Source: [`hetu/local.py:304`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L304)</small>
 
 绕过 Endpoint 层、以 `caller` / `group` 身份直接跑一个 System，默认返回 client SDK
 实际收到的 payload。
@@ -272,7 +272,7 @@ receives. Pass `raw=True` for the System's untouched return value.
 to_client_payload(rtn: Any) -> Any
 ```
 
-<small>Source: [`hetu/local.py:350`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L350)</small>
+<small>Source: [`hetu/local.py:356`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L356)</small>
 
 把 System 返回值按 server `receiver.rpc()` 的 framing + 真实 msgpack 往返，
 返回 client SDK 实际收到的 payload。不可序列化的 payload 会在此抛 `TypeError`。
@@ -292,12 +292,13 @@ to_client_payload(rtn: Any) -> Any
 get(comp: Any, **query: Any) -> np.record | None
 ```
 
-<small>Source: [`hetu/local.py:375`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L375)</small>
+<small>Source: [`hetu/local.py:381`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L381)</small>
 
 按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
 
 `comp` 可传 Component 类或其名字字符串；`query` 只允许一个带索引的字段，
-如 `get("Player", owner=1234)`。已知行必然存在时，改用 `must_get` 可免去判空。
+如 `get("Player", owner=1234)`；复合索引（groupby）要同时给出全部分组列，如
+`get("Rank", level=5, zone=3)`。已知行必然存在时，改用 `must_get` 可免去判空。
 
 
 
@@ -314,7 +315,7 @@ get(comp: Any, **query: Any) -> np.record | None
 must_get(comp: Any, **query: Any) -> np.record
 ```
 
-<small>Source: [`hetu/local.py:385`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L385)</small>
+<small>Source: [`hetu/local.py:392`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L392)</small>
 
 同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
 
@@ -341,13 +342,15 @@ range(
 ) -> np.recarray
 ```
 
-<small>Source: [`hetu/local.py:394`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L394)</small>
+<small>Source: [`hetu/local.py:401`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L401)</small>
 
 按索引区间读多行。默认闭区间 `[left, right]`。
 
 签名与 `repo.range` 对齐，两种形态都支持：位置参数
 `range(comp, "value", 1.0, 2.0)`，或 kwarg 区间 `range(comp, value=(1.0, 2.0))`。
-`comp` 可传 Component 类或其名字字符串；索引字段必须带 index/unique。
+复合索引（groupby）要同时给出全部分组列：`range(comp, level=(1, 10), zone=3)`，或位置
+参数加 `_group={"zone": 3}`。`comp` 可传 Component 类或其名字字符串；索引字段必须带
+index/unique。
 `limit` 默认 10（与 `repo.range` 一致，注意超出会静默截断），负数表示不限制；
 `desc=True` 降序。返回 `numpy.recarray`（c-struct array），无数据时为空数组。
 
@@ -366,7 +369,7 @@ range(
 insert(comp: Any, **fields: Any) -> int
 ```
 
-<small>Source: [`hetu/local.py:418`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L418)</small>
+<small>Source: [`hetu/local.py:427`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L427)</small>
 
 插入一行并返回其 `id`，省去手写 `new_row()` + `repo.insert(row)` 的样板。
 
@@ -391,7 +394,7 @@ insert(comp: Any, **fields: Any) -> int
 upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
 ```
 
-<small>Source: [`hetu/local.py:445`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L445)</small>
+<small>Source: [`hetu/local.py:454`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L454)</small>
 
 以 `async with` 语法 upsert 一行，镜像 `repo.upsert`：按 unique 字段锚定
 查询，块内修改字段，退出块时自动 update/insert 并 commit。
@@ -401,7 +404,8 @@ upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
     async with app.upsert(RLSComp, owner=1001) as row:
         row.value = 50
 
-`anchor` 只能给一个 **unique** 字段（如 `owner=...`/`id=...`）。直接落库。
+`anchor` 只能给一个 **unique** 字段（如 `owner=...`/`id=...`）；组内唯一的复合
+索引要同时给出全部分组列（如 `name="x", zone=3`）。直接落库。
 
 
 
@@ -418,7 +422,7 @@ upsert(comp: Any, **anchor: Any) -> AsyncIterator[np.record]
 aclose() -> None
 ```
 
-<small>Source: [`hetu/local.py:466`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L466)</small>
+<small>Source: [`hetu/local.py:476`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L476)</small>
 
 释放发号租约（写精确水位），再关闭全部后端连接。
 
@@ -486,7 +490,7 @@ open_local_app(
 ) -> hetu.local.LocalApp
 ```
 
-<small>Source: [`hetu/local.py:518`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L518)</small>
+<small>Source: [`hetu/local.py:528`](https://github.com/Heerozh/HeTu/blob/main/hetu/local.py#L528)</small>
 
 
 

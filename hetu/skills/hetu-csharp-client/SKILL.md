@@ -81,6 +81,16 @@ var sub = await client.WatchRange<Hp>("owner", 0, long.MaxValue, 100);
 sub.AddTo(gameObject);
 ```
 
+A composite index (server `property_field(groupby="zone")`) is watched one group at a time:
+pass every group-by column in `group:`. Bad value types (or a `group` on `id`) throw
+`ArgumentException` before sending; a misspelled column makes the server close with 4002
+(terminal), and old servers don't understand `group` at all.
+
+```csharp
+var zone3 = await client.WatchRange<Monster>("level", 10, 20, 100,
+    group: new Dictionary<string, object> { ["zone"] = 3 });
+```
+
 ### THE BUG: `ObserveAdd()` / `ObserveRemove()` are membership, NOT field updates
 
 `ObserveAdd()` fires **once per row** — it replays the current rows on subscribe, then fires
@@ -139,8 +149,8 @@ hp.AddTo(gameObject);
 | `.StateChanged` / `.State` | session-state events (reconnect UI) · `HeTuSessionState` |
 | `.CallSystem(name, args…)` → `JsonObject` | RPC a System/Endpoint |
 | `.CallSystemAwaitPush(name, args…)` → `JsonObject` | same, but returns after the subscription pushes the call caused have arrived (read watched rows right after, e.g. re-enable a button); ~100 ms slower |
-| `.WatchRow<T>(index, value)` → `RowSubscription<T>` | one row; `.Subject`, `.Data` |
-| `.WatchRange<T>(index, left, right, limit, force:)` → `IndexSubscription<T>` | a set; `.Rows`, `.ObserveAdd/Remove/Row` |
+| `.WatchRow<T>(index, value, group:)` → `RowSubscription<T>` | one row; `.Subject`, `.Data` |
+| `.WatchRange<T>(index, left, right, limit, force:, group:)` → `IndexSubscription<T>` | a set; `.Rows`, `.ObserveAdd/Remove/Row`; `group` = composite-index group values |
 | `.Close()` | end session (call before re-`Connect`) |
 
 In-repo reference code: `Login.cs` (Connect + login bootstrap), `ReconnectOverlay.cs` /

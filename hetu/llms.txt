@@ -29,7 +29,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Concepts
 
-- [Concepts](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/concepts.md): HeTu 的 ECS 心智模型——Component（NumPy structured array 表）、System（事务函数）、`unique` / `index`、权限级别 EVERYBODY / USER / OWNER / RLS / GM / ADMIN、co-location cluster 规则、Subscription（RowSubscription / IndexSubscription）推送链路与一致性保证（尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据直到该行下次变更，强一致判断放在 System 里）、optimistic concurrency 与 `RaceCondition` 自动重试
+- [Concepts](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/concepts.md): HeTu 的 ECS 心智模型——Component（NumPy structured array 表）、System（事务函数）、`unique` / `index`、复合索引（`groupby`：按组有序、组内唯一、按组订阅）、提交序号列（`commit_seq`：提交时才按组从 1 连续发号）、权限级别 EVERYBODY / USER / OWNER / RLS / GM / ADMIN、co-location cluster 规则、Subscription（RowSubscription / IndexSubscription）推送链路与一致性保证（尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据直到该行下次变更，强一致判断放在 System 里）、optimistic concurrency 与 `RaceCondition` 自动重试
 
 ## Client SDK
 
@@ -37,7 +37,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Advanced
 
-- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns、`hetu.headless`（非服务器进程直接读写组件表）
+- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、binlog 式同步（`commit_seq` 消费方写法；库外 / headless 消费方用 `servant_seq_read` 确认缺口、`servant_seq_head` 读发到第几号、裁剪只删落盘游标之前的行）、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns、`hetu.headless`（非服务器进程直接读写组件表）
 
 ## Operations & Deployment
 
@@ -50,7 +50,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [Components](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/components.md): `BaseComponent` / `Permission`
 - [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
-- [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition` / `UniqueViolation`
+- [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition` / `UniqueViolation` / `CommitSeqDiverged`（提交序号列的序列和库外消费方记下的对不上：号被复用、游标那一行没了、组内重号）
 - [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Sanic / System 直接读写组件表，写入走与 System 相同的提交路径
 - [Local](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/local.md): `hetu.local.open_local_app` / `LocalApp` —— 进程内直连后端跑 System、读写组件表，`hetu call` / `hetu shell` 与测试用 `Sandbox` 共用同一套 API
 

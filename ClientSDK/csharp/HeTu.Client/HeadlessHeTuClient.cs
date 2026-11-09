@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -148,22 +149,27 @@ namespace HeTu
             return tcs.Task;
         }
 
-        /// <summary>范围订阅，见 HeTuClientBase.WatchRangeSync。</summary>
+        /// <summary>范围订阅，见 HeTuClientBase.WatchRangeSync。
+        /// group 是复合索引的分组值 {分组列: 值}（单列索引不给），不合法时在调用方线程上当场抛
+        /// <see cref="ArgumentException" />。</summary>
         /// <remarks>
         ///     推送是尽力而为的最终一致：约 99% 的情况收到最新数据，服务端 Redis 压力过大时
         ///     可能残留旧数据直到该行下次变更。Best-effort, eventually consistent (~99%).
         /// </remarks>
         public Task<IndexSubscription<T>> WatchRange<T>(string index, object left, object right,
-            int limit, bool desc = false, bool force = true, string componentName = null)
+            int limit, bool desc = false, bool force = true, string componentName = null,
+            IReadOnlyDictionary<string, object> group = null)
             where T : IBaseComponent
         {
+            // 在调用方线程上检查、拷贝：投到泵线程之后，调用方可能马上就改字典
+            var groupCopy = CopyGroup(index, group);
             var tcs = new TaskCompletionSource<IndexSubscription<T>>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pump.Post(() => WatchRangeSync<T>(index, left, right, limit, (sub, cancel, ex) =>
             {
                 if (cancel) tcs.TrySetCanceled();
                 else if (ex != null) tcs.TrySetException(ex);
                 else tcs.TrySetResult(sub);
-            }, desc, force, componentName));
+            }, desc, force, componentName, groupCopy));
             return tcs.Task;
         }
 
@@ -185,21 +191,26 @@ namespace HeTu
             return tcs.Task;
         }
 
-        /// <summary>单行订阅，见 HeTuClientBase.WatchRowSync。</summary>
+        /// <summary>单行订阅，见 HeTuClientBase.WatchRowSync。
+        /// group 是复合索引的分组值 {分组列: 值}（单列索引、id 不给），不合法时在调用方线程上当场
+        /// 抛 <see cref="ArgumentException" />。</summary>
         /// <remarks>
         ///     推送是尽力而为的最终一致：约 99% 的情况收到最新数据，服务端 Redis 压力过大时
         ///     可能残留旧数据直到该行下次变更。Best-effort, eventually consistent (~99%).
         /// </remarks>
         public Task<RowSubscription<T>> WatchRow<T>(string index, object value,
-            string componentName = null) where T : IBaseComponent
+            string componentName = null, IReadOnlyDictionary<string, object> group = null)
+            where T : IBaseComponent
         {
+            // 在调用方线程上检查、拷贝：投到泵线程之后，调用方可能马上就改字典
+            var groupCopy = CopyGroup(index, group);
             var tcs = new TaskCompletionSource<RowSubscription<T>>(TaskCreationOptions.RunContinuationsAsynchronously);
             _pump.Post(() => WatchRowSync<T>(index, value, (sub, cancel, ex) =>
             {
                 if (cancel) tcs.TrySetCanceled();
                 else if (ex != null) tcs.TrySetException(ex);
                 else tcs.TrySetResult(sub);
-            }, componentName));
+            }, componentName, groupCopy));
             return tcs.Task;
         }
     }

@@ -13,7 +13,12 @@ import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, Table, TableReference
-from hetu.data.backend.base import sortable_token, to_sortable_bytes
+from hetu.data.backend.base import (
+    index_member_,
+    row_id_token_,
+    sortable_token,
+    to_sortable_bytes,
+)
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
 from hetu.data.backend.redis_model import FIRST_VERSION_SPAN, RedisModelClient
@@ -121,27 +126,27 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + ["0", b"\xc0^\xd3\xd7\x00\x00\x00\x00\x00" + str(row.id).encode()]
+        + ["0", b"\xc0^\xd3\xd7\x00\x00\x00\x00\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:name"]
-        + ["0", b"10\x00" + str(row.id).encode()]
+        + ["0", b"10\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + row_id_token_(row.id)]
     )
 
     # 插入 item row2
@@ -187,27 +192,27 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + ["0", b"?\xa1,(\xff\xff\xff\xff\x00" + str(row.id).encode()]
+        + ["0", b"?\xa1,(\xff\xff\xff\xff\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:name"]
-        + ["0", b"11\x00" + str(row.id).encode()]
+        + ["0", b"11\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x01\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x01\x00" + row_id_token_(row.id)]
     )
 
     # 插入 rls row1
@@ -237,11 +242,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + row_id_token_(row.id)]
     )
 
     # 插入 rls row2
@@ -271,11 +276,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0c\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0c\x00" + row_id_token_(row.id)]
     )
 
     # update 1, change time
@@ -304,11 +309,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     # update的index变更
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:time"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x14\x00" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x14\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x17\x00" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x17\x00" + row_id_token_(row.id)]
     )
 
     # update 2, change name
@@ -331,11 +336,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
         + ["name", "23"]
     )
     pushes.append(
-        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21\x00" + str(row.id).encode()]
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:name"]
-        + ["0", b"23\x00" + str(row.id).encode()]
+        + ["0", b"23\x00" + row_id_token_(row.id)]
     )
 
     # delete
@@ -352,26 +357,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypa
     pushes.append(["DEL", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:id"]
-        + [b_rowid + b"\x00" + str(row.id).encode()]
+        + [b_rowid + b"\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:model"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + row_id_token_(row.id)]
     )
     pushes.append(
-        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"22\x00" + str(row.id).encode()]
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"22\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:owner"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:time"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + row_id_token_(row.id)]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:used"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + row_id_token_(row.id)]
     )
 
     # commit
@@ -664,7 +669,7 @@ async def test_range_check_payload(item_ref, mod_auto_backend):
 
     def member(field: str, row) -> bytes:
         value = to_sortable_bytes(dtypes[field].type(row[field]))
-        return value + b"\x00" + str(int(row.id)).encode()
+        return index_member_(value, row.id)
 
     owner_key = client.index_key(item_ref, "owner").encode()
     time_key = client.index_key(item_ref, "time").encode()
@@ -1101,6 +1106,30 @@ def test_sortable_token():
     token = sortable_token(long)
     assert token.startswith("h") and len(token) == 33
     assert token != sortable_token(to_sortable_bytes(np.str_("好" * 11 + "!")))
+
+
+def test_row_id_token():
+    """
+    索引 member 末尾的 id 段：定宽 16 位 hex，整个 int64 都保序（字节序 == 数值序），不含
+    0x00 / 0xff，切得回来；就是 int64 的 to_sortable_bytes 的 hex
+    """
+    from hetu.data.backend.base import (
+        ROW_ID_TOKEN_LEN,
+        member_row_id_,
+        member_value_,
+    )
+
+    ids = [-(2**63), -(10**18), -1, 0, 1, 9, 10, 10**17, 10**18 - 1, 10**18]
+    ids += [2**63 - 1]
+    tokens = [row_id_token_(i) for i in ids]
+    assert all(len(t) == ROW_ID_TOKEN_LEN for t in tokens)
+    assert sorted(tokens) == tokens
+    assert all(b"\x00" not in t and b"\xff" not in t for t in tokens)
+    assert row_id_token_(np.int64(10)) == to_sortable_bytes(np.int64(10)).hex().encode()
+    for i in ids:
+        member = index_member_(b"v\x00\xff", i)
+        assert member_row_id_(member) == i
+        assert member_value_(member) == b"v\x00\xff"
 
 
 async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):

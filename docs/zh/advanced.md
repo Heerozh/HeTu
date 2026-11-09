@@ -102,6 +102,7 @@ async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
 - **`recurring=True`** 将条目变为周期性作业。每次运行会在 `timeout` 秒后重新调度自身。要求 `timeout > 0`。
 - **目标 `System` 必须声明 `call_lock=True`**——当 `timeout>0` 且不是 `recurring` 时。调度器使用调用的行 ID 作为 UUID 来去重重试；没有 `call_lock`，引擎会拒绝注册未来调用。
 - **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。调用只会晚、不会早于 `at` 执行：目标 `System` 里读到的 `ctx.timestamp` 不小于 `at`，在里面校验“到点没有”（如读条结束）是安全的。
+- **事务持续冲突的调用不会占住调度。** 每个工作器逐条执行未来调用。目标 `System` 遇到 `RaceCondition` 时原地重试约 2 秒，还冲突就放弃这一轮、继续执行下一条，并打一条限频的警告说明冲突原因；这条最迟约 5 秒后重投（`timeout` 更短的按 `timeout`），所以一次性调用仍然保证成功。一直冲突的调用就一直跑不成，要缩小它读写的范围，比如不依赖区间的 `range` 传 `phantom_check=False`。`timeout=0` 的调用放弃就丢了，所以没有这个限制：它会重试到 `System` 的 `retry=` 上限，这期间占着这个工作器的循环，后面到期的调用都要等。
 - **执行 `ctx` 没有用户身份。** 调度器作为内部流量运行——`ctx.caller` 是 `0`，`ctx.address` 是 `localhost`。如果工作需要用户 ID，请在 `args` 中显式传递。
 - **权限警告。** 如果目标 `System` 的 `permission=USER`（或任何非 `ADMIN`/`None` 的值），`create_future_call` 会发出警告，因为同一个 `System` 现在也可能由客户端直接调用。最佳实践是未来调用目标使用 `permission=None`。
 
@@ -160,7 +161,7 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
 - 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
-`uuid=` 是 `ctx.systems.call(...)` 的关键字参数。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
+`uuid=` 是 `ctx.systems.call(...)` 的关键字参数，最长 64 个字符（`str(uuid.uuid4())` 是 36 个），超过会报 `ValueError`。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
 
 ## `on_disconnect` 钩子
 
@@ -255,6 +256,8 @@ async def long_running(ctx: hetu.SystemContext, ...):
 - **在此调用之后，`ctx.repo` 和 `ctx.depend` 无法使用。** 主体后续的所有操作都运行在事务*外部*。无法“重新打开”会话。
 - **`session_commit` 之后的操作不会在 `RaceCondition` 时重试。** 只有提交前的主体部分参与 HeTu 的乐观重试。如果提交后的工作失败，你需要自行恢复。
 
+`session_commit()` 返回这次提交里提交序号列（`commit_seq`）发出的号，见本页「binlog 式同步」。
+
 `session_discard()` 格式相同，但会丢弃所有内容。当 `System` 提前确定正确的答案是“什么也不做”并且希望完全跳过提交时，使用它。
 
 ## 查不到就插入：两种写法
@@ -297,38 +300,46 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 用 `get` 判断也一样：非 unique 列的 `get` 读空后再插入，提交时同样会校验。`get` 命中时只保证返回的
 这一行没被改过，之后再插入的同值行不算冲突。
 
-两个注意点：
+几个注意点：
 
 - **读全。** 截断读（返回了 `limit` 行）只保护看到的前 `limit` 行，没读到的行会被当成不存在。
   判断"有没有"时用 `limit=-1`。本事务删掉、改走的行不在结果里，也不占 `limit` 的名额，返回行数小于
   `limit` 就是读全了。
 - **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
   整个背包付费。
+- **`range` 的字符串边界开头的 `(` / `[` 是开 / 闭区间标记。** 拿玩家给的字符串（比如名字
+  "[GM]Bob"）做 `range` 时，要在前面再加一个 `[`，否则查的是另一个值。只查一个值就用 `get` /
+  `upsert`，它们按字面比较。
 
-### 热路径：unique 锚定 + `upsert`
+### 热路径：组内唯一 + `upsert`
 
-给组合键建一个 unique 字段，用 `upsert` 锚定它，事务只碰一行：
+给组合键建一个组内唯一的复合索引（`unique=True, groupby=...`），`upsert` 同时给出本字段和分组列来锚定
+它，事务只碰一行：
 
 ```python
 @hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
 class Item(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
-    template: np.int32 = hetu.property_field(0)
+    # 每个玩家的每种道具只有一行：按 owner 分组、组内唯一
+    template: np.int32 = hetu.property_field(0, unique=True, groupby="owner")
     qty: np.int32 = hetu.property_field(0)
-    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
 
 
 @hetu.define_system(
     namespace="game", components=(Item,), permission=hetu.Permission.USER
 )
 async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
-    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
-        item.owner, item.template = ctx.caller, tpl
-        item.qty += n
+    async with ctx.repo[Item].upsert(template=tpl, owner=ctx.caller) as item:
+        item.qty += n  # 新建的行已经写好了 template 和 owner
 ```
 
-两个事务同时走到插入分支时，后提交的那个撞上 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
-代价是多一个 unique 索引；道具换主人时要同步改 `slot`；给已有数据加这个字段时要先回填。
+两个事务同时走到插入分支时，后提交的那个撞上组内 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
+代价是多一个复合索引；给已有组件加这个索引要跑 `hetu upgrade` 重建索引，已有数据里有组内重复会报错。
+以前的写法是拼一个字符串 `f"{owner}:{template}"` 当 unique 键，现在不需要了：复合索引不用多存一列，
+道具换主人时也不用同步改键。
+
+同一个事务里在行之间挪 unique 值（换槽位后补位、借一个中间值互换两行）可以正常提交：提交时只要被占的
+值这次会从原来的行上移走，就不算冲突。
 
 ### 关掉区间校验
 
@@ -336,6 +347,200 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 事务判竞态、白白重试。这种 `range` 传 `phantom_check=False`：返回的行照样参与版本校验，只是不管区间里
 新增的行。`replay.log` 里的 `[RaceCondition]` 行带着冲突原因（如 `Range changed Item.owner`），可以据此
 找出冲突多的区间。
+
+## binlog 式同步：提交序号列
+
+写入方往一张日志表里追加行，消费方记下"消费到了第几号"、按号往后读。号要是在提交之前发（事务外的计数器、
+或者事务里先读改写一行计数器），要么多进程下 2 号先提交、1 号后提交，消费方只能停下来等；要么拿了号的事务
+冲突重试、失败，号永远空着；读改写计数器行还会让同一组的写入全部撞车重试。用提交序号列，号在提交时才发：
+
+```python
+@hetu.define_component(namespace="ssw", permission=hetu.Permission.OWNER)
+class ChangeLog(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0)
+    # 每个 owner 各自从 1 连续编号；不写 groupby 就是整张表一个序列
+    seq: np.int64 = hetu.property_field(0, commit_seq=True, groupby="owner")
+    kind: np.int16 = hetu.property_field(0)
+```
+
+写入方照常 insert，`seq` 留 0，不用管号。号在提交时才发，事务里看不到。要知道自己的行拿到了几号（比如回给客户端），
+就在 System 里提前提交：`ctx.session_commit()` 返回这次发出的号，`{组件类: {行 id: 号}}`：
+
+```python
+@hetu.define_system(
+    namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+)
+async def submit(ctx: hetu.SystemContext, kind: int):
+    row = ChangeLog.new_row()
+    row.owner, row.kind = ctx.caller, kind
+    await ctx.repo[ChangeLog].insert(row)
+    seqs = await ctx.session_commit()  # 撞 RaceCondition 时整个 System 重跑，失败的那次不占号
+    return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+- 键同 `ctx.repo`：System 引用的是副本组件时也是主组件类。只含这次 insert 的、带提交序号列的组件的行，没有这样的行时
+  是空 dict。
+- 号只在返回值里：提交之后，手里那个行对象的 `seq` 仍是 0。
+- System 返回之后的自动提交不返回号，要拿号就提前提交（提交之后的代码不在事务里、不参与重试，见「提前
+  `session_commit`」）。
+- headless 等直接用 session 的写入方，显式调用 `await session.commit()`，返回值的形状相同，键是取 repo 时给的组件类
+  （`session.using(...)` / `s[...]`）。headless 按组件名声明的组件，键是 `client.table("ChangeLog").comp_cls`，不是
+  字符串。
+- `hetu call --dry-run` 不提交、不发号，返回值里本该拿号的行都是 0（提交序号列里 0 就是"没有号"）。
+
+消费方在服务端这样写（一个游标只给一个消费方用）：
+
+```python
+@hetu.define_component(namespace="ssw")
+class LogCursor(hetu.BaseComponent):  # 消费方自己的游标：每个 owner 消费到了第几号
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    last: np.int64 = hetu.property_field(0)
+
+
+@hetu.define_system(namespace="ssw", components=(ChangeLog, LogCursor))
+async def consume(ctx: hetu.SystemContext, owner: int):
+    async with ctx.repo[LogCursor].upsert(owner=owner) as cursor:
+        log = ctx.repo[ChangeLog]
+        rows = await log.range(
+            seq=(cursor.last + 1, np.inf), owner=owner, limit=100, phantom_check=False
+        )
+        expected = cursor.last + 1
+        for row in rows:
+            if expected < row.seq:  # 中间缺了号：一次闭区间读确认整段
+                for missing in await log.range(
+                    seq=(expected, row.seq - 1), owner=owner, limit=-1
+                ):
+                    handle(missing)  # 这次读漏了它：取行落到了进度不同的副本
+            handle(row)
+            expected = row.seq + 1
+        cursor.last = expected - 1
+```
+
+- **`phantom_check=False`**：没读满 `limit` 时，读到的区间一直开到 `inf`，从读到提交之间同组每来一条新日志，
+  消费方都要判竞态重试。消费方不依赖"区间里没有别的行"，可以关掉；读到的行照样有版本校验。一个游标对应一个
+  逻辑上的消费方，同一个消费方可以有多个实例共用这个游标：游标行的版本校验保证它们不会同时推进它、重复处理。
+- **缺号时先确认再跳过**：正常情况下号是连续的。缺号有两种：读写分离代理按命令分流、原生 cluster 下有多个副本
+  时，一次读的取行可能落到复制进度不同的副本上，漏掉中间的行（临时的）；中间的行被删了（永久的，极少数情况下
+  Redis 上提交脚本写到一半出运行时错误也会留下这种缺号）。缺号时用一次闭区间 `range` 把这一段读一遍：读到的
+  补上处理；这次读开着区间校验（默认），提交时会在 master 上确认这一段确实没有行。区间的上界比一个已经提交的号
+  小，新写入的行进不来，不会因为别的写入白白判竞态；号又是按提交顺序发的，这一段以后也不会再有行，可以跳过。
+  副本落后导致读空、而 master 上其实有，提交时判竞态重试。每段缺口只读一次，代价不随缺口长度增长：头部裁掉一大
+  段之后，新消费方从 0 开始也只多读一次。不要直接越过缺号：`phantom_check=False` 时读不到的行会被静默跳过。
+- **代价**：读进事务的每一行，提交时都要在 master 上做一次版本校验，每消费一行 master 多约 1µs。能在客户端用
+  订阅消费的，优先客户端消费，不占 master。
+- **`handle` 里的外部副作用**（发奖励、调别的服务）会随事务重试重复执行，要自己做成幂等。
+- **裁剪**：只删所有消费方都已经越过的头部。删中间的行会留下洞：服务端消费方能按上面的写法确认后跳过，客户端
+  消费方会停在洞前面。库外消费方游标所在的那一行也要留着，见下一小节的注意。
+- **易失表**：每次维护后号从 1 重来，消费方的游标要跟着清。
+- **库外消费方**（游标存在库外，比如用 headless 读命令表、把日志同步到外部系统）：不在事务里，用
+  `servant_seq_read`，写法见下一小节。
+- **客户端消费**：订阅 `WatchRange("seq", cursor + 1, inf, limit, group: …)`，见[Unity 客户端 SDK](unity-client.md)。
+
+### 库外消费方：`servant_seq_read`
+
+游标存在库外的消费方（比如用 headless 读命令表、游标存在自己快照文件里的进程，见本页「非服务器进程读写表」）不在
+事务里，拿不到上面那种提交时的确认。`Table` 上有三个给它用的非事务读，都走副本、不读 master：
+
+- `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`：这一组最近发出的号，也就是发到了第几号，没发过号
+  是 0；批量版一次往返，逐组返回，计数器被写坏了的组是 None（见下文）。它只用来发现有新号、监控积压、报警：它和读行
+  不在同一个快照里，**不能**拿来把游标推过没见到行的号。
+- `servant_seq_read(after, limit, group=..., after_id=...)`：读游标之后的行，返回 `(rows, blocked)`。先用一条命令
+  读这一组的索引，再取行。号按提交顺序发，一个节点上读到了 n 号，比它小、却没读到的号就是已经不在了，跳过；缺口只按
+  读索引的那一条命令确认。取行不一定和它落在同一个节点上，索引里有、取行时却读不到的行**不跳过**，停在它前面，它记为
+  `blocked`，下次再读。`after_id` 是游标那一行的雪花 id，给了就核对：游标那一号换了一行（号被复用）、游标那一行没了
+  而后面有号、组里有重号，都抛 `CommitSeqDiverged`。
+
+```python
+import time
+
+from hetu.data.backend import CommitSeqDiverged
+
+tbl = client.table(ChangeLog)
+cursors = load_snapshot()             # {owner: (seq, row_id)}，和消费方自己的状态存在同一个快照里
+stopped: set[int] = set()             # 序列对不上、已经停下的组
+behind_since: dict[int, float] = {}   # 计数器开始小于游标的时刻
+
+
+async def poll(owner: int) -> None:
+    seq, row_id = cursors.get(owner, (0, None))
+    rows, blocked = await tbl.servant_seq_read(
+        seq, limit=1000, group={"owner": owner}, after_id=row_id
+    )
+    for row in rows:
+        handle(row)  # 中间没出现的号都已确认不存在
+    if len(rows):
+        cursors[owner] = (int(rows[-1].seq), int(rows[-1].id))
+    watch_blocked(owner, blocked)  # 同一个 (号, id) 挡了很久才报警，见下文
+
+
+async def poll_all(owners: list[int]) -> None:
+    heads = await tbl.servant_seq_head_many([{"owner": o} for o in owners])
+    now = time.monotonic()
+    for owner, head in zip(owners, heads):
+        if owner in stopped:
+            continue
+        seq = cursors.get(owner, (0, None))[0]
+        if head is not None and head < seq:  # 这个副本落后、在全量同步、换簇了，或者数据回退了
+            if now - behind_since.setdefault(owner, now) > 30:
+                await alarm_behind(owner, head, seq)  # 报警前先 client.check_schema()，见"换簇"
+            continue
+        behind_since.pop(owner, None)
+        if head is None:  # 计数器被写坏了：报警，照常读，读行不靠计数器（见下文）
+            await alarm_counter(owner)
+        elif head == seq:
+            continue  # 没有新号
+        try:
+            await poll(owner)
+        except CommitSeqDiverged as exc:
+            stopped.add(owner)  # 只停这一组，别的组照常消费
+            await alarm_diverged(owner, exc)
+```
+
+**注意：裁剪只删号严格小于所有消费方落盘游标的行，删之前先核对。**
+
+- `servant_seq_read` 遇到"这一号没有行、后面有更大的号"，就认定这一号已经不在了，直接跳过，不报错。它分不清是处理
+  过了才删的，还是还没处理就被删了。
+- 消费方从快照文件恢复。如果裁剪按消费方运行时的进度来删，而快照比这个进度旧：崩溃重启后，快照到运行时进度之间
+  的命令已经被删了，会被当成缺口跳过，消费方的状态就悄悄对不上了。所以裁剪的依据必须是**已经落盘的**游标。
+- 裁剪方（服务端的 System 或运维脚本）读不到消费方本地的快照：消费方每次快照落盘成功之后，把快照里的
+  `(号, 行 id)` 写回库里的一张游标表（headless session 里 upsert，一次快照一次提交），裁剪方按这张表取最小值。
+- 只删号**严格小于**最小游标的行，留下每个消费方的游标那一行。它不会被正常删掉，所以它没了一定是异常，
+  `servant_seq_read` 会抛 `CommitSeqDiverged`。
+- 删之前先核对：最小游标那一号还是游标表里记的那一行（System 里用 `range(seq=(s, s), ...)`，headless 里用
+  `servant_range(..., row_format=RowFormat.ID_LIST)`），对不上就不删、报警。数据回退之后，复用了号的新行都不大于旧的
+  游标，不核对就删的话，这些从没被消费过的行会被裁掉，回退也发现不了。
+- 给了 `after_id` 时不能"消费完就删"，至少留下最后处理的那一行；要消费完就删，就不能传 `after_id`，也就发现不了
+  号被复用。游戏逻辑里不要删还没消费的命令，要撤销就另写一条"撤销"命令。
+
+| 情况 | 说明 | 处理 |
+|---|---|---|
+| 游标那一号还是那一行 | 正常 | 接着往后读（`servant_seq_read` 自动处理） |
+| 游标那一号换了一行、组里有重号、游标那一行没了而后面有号 | 序列对不上了：数据回退（故障切换丢了最后几次提交、AOF / RDB 重启、整库恢复、易失表清空），或者计数器落后于数据（手工删了计数器、内存淘汰、只导入了行） | 抛 `CommitSeqDiverged`，`reason` 说明是哪一种：停下这一组，报警 |
+| 什么都没读到 | 没有新命令；或者这个副本落后；或者数据回退到了游标之前、号还没被复用 | 等。计数器持续小于游标才报警（见下） |
+
+- **计数器持续小于游标**：一个时间窗（比如 30 秒，要大于副本延迟）里每次读到的计数器都小于游标才报警。报警要写明
+  可能的原因：副本严重落后或在全量同步、换簇了、数据回退了。
+- **被挡住**：`blocked` 不为 None 只说明这一轮被它挡住了，取行落到落后的副本、读完索引后行被删都会这样，下一轮
+  通常就好了。同一个 `(号, id)` 挡了很久才报警：`servant_get` 一直读不到这一行，是索引残留（比如维护脚本只删了行），
+  停服跑 `hetu upgrade` 重建索引；读得到，多半是有只读节点断了复制、还在回答读请求（读写分离代理、原生 cluster 都会
+  把读发给它），要修好这个副本，或者把它摘掉。在那之前消费方会一直停在这一行前面，不会跳过它。
+- **追上没有**：看 `rows` 为空且 `blocked` 为 None，不看游标是否等于计数器。最新的几行在消费之前就被删了的话，游标
+  会停在最后见到的那一行，直到更新的一行出现；这期间计数器减游标大于 0，但没有可消费的东西。
+- **快照**：游标（号和雪花 id）要和消费方自己的状态存在同一个快照里。崩溃后从快照恢复，会重放快照之后的命令：
+  `handle` 要么幂等，要么状态和游标一起恢复。
+- **换簇**：计数器和数据跟着换簇搬走，没重连的消费方会读到计数器全是 0、什么都读不到。报警前先
+  `client.check_schema()`，遇到 `ClusterChanged` 就重连，游标照常用。
+- **组很多时**：每组每轮算一次 key（约 3µs），10 万组每轮约 0.3 秒 CPU，副本上每轮也要查 10 万个 key。组多就
+  降低轮询频率，或者只轮询活跃的组；组的清单要消费方自己维护（比如从游戏逻辑的房间表来）。`limit` 越大，一次读
+  占住副本的时间越长，一般几百到几千行。
+- **计数器被写坏**（值不是非负整数，一般是手工改坏的）：`servant_seq_head_many` 里这一组是 None，别的组照常返回；
+  `servant_seq_head` 抛 RuntimeError，带上 key 和值。这一组的提交会失败，读行不受影响，所以示例里报警之后照常读
+  这一组。组里还有行时，`hetu upgrade` 重建索引会把它校准到组里最大的号；组里没有行时（比如行消费完就删了）
+  upgrade 不动它，要手工改成不小于所有消费方游标的值（比如游标表里最大的那个），不能直接删：删了会从 1 重新发号，
+  号被复用。Redis 上它被写成了别的类型时读成 0（这时提交本身也会报 WRONGTYPE）。
+- **提交中途出错留下的行**：Redis 上提交脚本写到一半出运行时错误，可能留下"有行、没有索引项"的行，按缺口跳过。之后
+  重建索引会把它放回原来的号上，已经越过它的消费方不会再处理它。
+- **服务端消费方**的游标和日志在同一个事务里，会一起回退，不用这样核对。
 
 ## 用于范围查询的 NumPy 模式
 
@@ -383,7 +588,7 @@ mine = rows[rows.owner == ctx.caller]
 critical = rows[(rows.hp < 30) & (rows.shield == 0)]
 ```
 
-这是**复合查询**的推荐模式：使用一个索引列从数据库拉取一个小窗口，然后在内存中用 NumPy 进行细化。要求后端评估复合谓词会更慢，因为数据库解释查询而 NumPy 使用 SIMD。
+条件是"某一组里按某字段取区间"（某个 zone 里 10～20 级、某个玩家最新的 N 条）时，直接声明复合索引（`property_field(groupby=...)`，见[概念](concepts.md)），数据库只读这一组。其他组合条件，推荐的模式是：使用一个索引列从数据库拉取一个小窗口，然后在内存中用 NumPy 进行细化。要求后端评估复合谓词会更慢，因为数据库解释查询而 NumPy 使用 SIMD。
 
 ```python
 # 使用真实索引拉取一个小窗口，然后在内存中过滤。
@@ -619,12 +824,12 @@ client = await hetu.headless.connect(
 服务器建表时会把组件的 schema 和 `cluster_id` 写进表 meta。`connect()` 只读 meta，不本地重算簇：
 
 - 表不存在 → `TableNotFound`。建表 / 迁移权归服务器，先 `hetu start` 一次再连。
-- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
+- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index、groupby、commit_seq——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）；meta 里有本版本不认识的列属性（更新版本的 HeTu 加的）也算不一致，headless 客户端要和服务器一起升级。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
 - 传**组件名**：直接用 meta 里的 schema 生成类，进程里零共享代码；需要类时取 `client.table("BattleReport").comp_cls`，`new_row(id_=...)` 照常用。
 
 ### 读：`Table.servant_*`
 
-`client.table(comp)` 返回的就是引擎的 `Table`，非事务读沿用它的 `servant_get` / `servant_range`，外加批量的 `servant_get_many(ids)`。轮询命令队列的写法：
+`client.table(comp)` 返回的就是引擎的 `Table`，非事务读沿用它的 `servant_get` / `servant_range`，外加批量的 `servant_get_many(ids)`，以及给提交序号列用的 `servant_seq_head` / `servant_seq_head_many` / `servant_seq_read`。轮询命令队列的写法：
 
 ```python
 cmd_tbl = client.table(BattleCommand)
@@ -635,6 +840,8 @@ for row in rows:
 ```
 
 注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+
+要连号、不漏的命令表，给它加提交序号列（`commit_seq`），用 `servant_seq_read` 消费，见本页「binlog 式同步」的库外消费方一节。不要拿 `servant_range` 结果里的缺号当缺口跳过：它先查索引、再逐行取，取行落到落后的副本时读不到的行会被静默跳过。
 
 ### 写：`client.session(*comps)`
 

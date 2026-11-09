@@ -186,6 +186,57 @@ names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
 names.OnDelete += (sub, id) => RemoveNameTag(id);
 ```
 
+### 按组订阅复合索引
+
+服务端用 `property_field(groupby=...)` 声明的复合索引（见[概念](concepts.md)），订阅时用最后一个参数
+`group` 给出全部分组列的值，只订这一组。`WatchRow` 和 `WatchRange` 都有这个参数：
+
+```csharp
+// level 按 zone 分组：订 zone=3 里 level 在 [10, 20] 的行，按 level 排序
+var zone3 = await HeTuClient.Instance.WatchRange<Monster>(
+    "level", 10, 20, 100,
+    group: new Dictionary<string, object> { ["zone"] = 3 });
+
+// 组内唯一的复合索引：按 (公会, 名字) 订一行
+var member = await HeTuClient.Instance.WatchRow<GuildMember>(
+    "name", "Ann", group: new Dictionary<string, object> { ["guild"] = guildId });
+```
+
+- **值的类型**：分组值只能是整数、bool、刚好是整数的浮点、`string`、`byte[]`。整数分组列也收数字字符串（如 `"3"`），和单列索引的查询值一样。
+- **当场抛异常的情况**：值类型不合法，或者在 `id` 上带了 `group`，都当场抛 `ArgumentException`，请求不会发出去。
+- **断开连接的情况**：分组列名写错、值和列类型不符（比如整数列给了不是数字的字符串、字符串列给了数字），客户端看不出来，服务器会以 4002 断开连接。会话随之进入终态，不会重连。
+- **字典会被拷贝**：调用之后再改这个字典，不影响这次订阅；断线重连时按订阅时的 `group` 恢复。`WatchRow` 解析出行之后，照旧按行 `id` 恢复。
+- **唤醒范围**：订阅只会被本组的写入叫醒，别的组的写入不会叫醒它；服务端不需要为此声明 `point_sub`。
+- **服务器版本**：带 `group` 的订阅需要支持复合索引的服务器（v2025.11.1 之后的版本）。旧服务器不认识 `group`，会以 4002 断开连接。不带 `group` 的订阅发出的报文和以前完全一样。
+
+### 在客户端消费提交序号列
+
+服务端用 `property_field(commit_seq=True, groupby=...)` 声明的提交序号列（见[概念](concepts.md)），号在提交时
+按组从 1 连续发。客户端可以订阅这一组、按号往后消费：
+
+```csharp
+// 订 owner 这一组里号大于游标的日志，窗口 100 行
+var log = await HeTuClient.Instance.WatchRange<ChangeLog>(
+    "seq", cursor + 1, long.MaxValue, 100,
+    group: new Dictionary<string, object> { ["owner"] = myId });
+```
+
+- **游标只沿连续的号推进**：同一批推送里有多行时，按 `seq` 排好，从游标加一开始一个号接一个号地处理，处理到哪就把
+  游标推到哪。遇到缺号就停下，后面的行先缓存起来：读写分离代理按命令分流、原生 cluster 下有多个副本时，服务器读回
+  这一批时可能漏掉中间某一行，下一批推送会补上。不要直接把游标推到这一批里最大的号，那样漏掉的那一行就永远不会被
+  处理了。
+- **窗口满了要换订阅**：订阅只推窗口（`limit` 行）里的行。处理到窗口末尾后，用新的游标重新订阅，并退订旧的。
+- **组里的每一行都要对这个客户端可见**：比如 `OWNER` 组件加 `groupby="owner"`。RLS 看不到的行照样占着窗口的名额、
+  又不推送，客户端会永远停在它前面；做不到全部可见的，改在服务端消费（见[高级功能](advanced.md)的「binlog 式同步」）。
+- **缺号一直不补**：客户端没法确认缺号是不是永久的（比如中间的行被删了），只能保证服务端不删中间的行，或者等一会儿
+  还没补上时，调一个服务端 `System` 来确认、跳过缺口。
+- **拿到刚插入那一行的号**：`System` 里 insert 的行，号要到提交之后才有，`System` 返回的行里是 0。最直接的做法是让
+  `System` 提前提交、把号回给客户端：`seqs = await ctx.session_commit()`，再
+  `return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})`（见[高级功能](advanced.md)的「binlog 式同步」），
+  代价是提交之后的代码不在事务里。不想提前提交的话，订阅这一组，再用 `CallSystemAwaitPush` 调用，返回时推送已经到了，
+  按 `System` 返回的行 id 找到推送来的那一行，就能拿到号。前提是新行落在订阅的窗口里：比如用 `desc: true` 订最新的
+  几行，或者确认窗口还没满；窗口满了的话新行不会推送，`CallSystemAwaitPush` 照样返回，但拿不到号。
+
 ## 类型化组件 vs `DictComponent`
 
 服务器可以通过 `hetu build` 从你的 `Component` 定义生成匹配的 C# 类。结果实现了

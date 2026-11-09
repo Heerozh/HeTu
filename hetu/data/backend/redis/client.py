@@ -493,6 +493,32 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         return rows
 
     @override
+    async def kv_get_many_(self, keys: Sequence[str]) -> list[bytes | None]:
+        """
+        按块 MGET，见基类。同一张表、同一个簇的计数器 key 都在 {CLU<id>} 下，属于同一个 slot，
+        cluster 下一条 MGET 就能读完，分块只是为了限制单条命令的耗时。
+
+        - 只有一块时直接一条 MGET，不建 pipeline；
+        - pipeline 里用 execute_command：redis-py 的 cluster pipeline 禁用 `pipe.mget`；
+        - 不用 `mget_nonatomic`：它按 read_from_replicas 选节点，servant 没设这个参数，会读到 master
+        """
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        if not keys:
+            return []
+        aio = self.aio
+        chunks = list(itertools.batched(keys, self.RANGE_PIPELINE_CHUNK))
+        if len(chunks) == 1:
+            return cast(
+                list[bytes | None], await aio.execute_command("MGET", *chunks[0])
+            )
+        async with aio.pipeline(transaction=False) as pipe:
+            for chunk in chunks:
+                pipe.execute_command("MGET", *chunk)
+            results = await pipe.execute()
+        return [value for values in results for value in values]
+
+    @override
     def zrange_bylex_(
         self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
     ) -> Awaitable[list[bytes]]:
@@ -507,7 +533,9 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         )
 
     @override
-    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
+    def commit_script_(
+        self, keys: list[str], args: list[bytes]
+    ) -> Awaitable[bytes | list]:
         """
         执行 commit_v2.lua（`configure_master` 里加载），见基类。不包一层 async：直接交出
         lua_commit 的 awaitable，commit 路径上少一层协程

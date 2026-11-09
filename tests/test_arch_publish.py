@@ -9,7 +9,8 @@ PUBLISH 很贵，而且贵在最不该贵的地方（数据见 benchmark/redis_p
 所以 commit 只允许发两种通知（docs/superpowers/specs/2026-09-24-publish-opt-in-design.md）：
 - 表频道：只给声明了 `table_sub` 的组件，一个事务一张表一条，消息是 msgpack 的 row_id 列表；
 - 值频道：只给声明了 `point_sub` 的索引，只发"进入"（insert、字段改成该值），一个事务每个
-  (索引, 值) 一条，消息为空串（订阅者收到就重跑 range，不看内容）。
+  (索引, 值) 一条，消息为空串（订阅者收到就重跑 range，不看内容）。复合索引（groupby）不发：
+  每组一个 zset，按组订阅订这一组 key 的 keyspace 通知。
 
 本文件用源码扫描守住调用点，用运行时计数守住"没声明就不发、声明了也只发这么多"、
 用订阅抓包守住"消息里不夹带东西"。

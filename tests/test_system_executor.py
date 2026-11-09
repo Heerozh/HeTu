@@ -232,6 +232,29 @@ async def test_execute_system_call_lock(mod_test_app, executor: EndpointExecutor
     assert ok
 
 
+async def test_call_lock_uuid_length(mod_test_app, executor: EndpointExecutor):
+    """
+    uuid 存在定宽的 SystemLock.uuid 里，放不下的存进去会被截断，之后拿原值查不到这把锁，同一个
+    uuid 会再执行一遍。所以超过列宽的在入口就报 ValueError、不执行 System；`str(uuid4())`
+    （36 个字符）和正好放满的照常去重
+    """
+    import uuid as uuidlib
+
+    from hetu.system.lock import SystemLock
+
+    ok, _ = await executor.execute("login", 1102)
+    assert ok
+    systems = executor.context.systems
+    max_len = SystemLock.str_max_len("uuid")
+    for i, uuid in enumerate((str(uuidlib.uuid4()), "u" * max_len)):
+        assert await systems.call("add_rls_comp_value", 1, uuid=uuid) == 100 + i + 1
+        assert await systems.call("add_rls_comp_value", 1, uuid=uuid) is None
+    with pytest.raises(ValueError, match="uuid"):
+        await systems.call("add_rls_comp_value", 10, uuid="u" * (max_len + 1))
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 2)
+    assert ok
+
+
 async def test_clean_expired_call_locks(monkeypatch, mod_test_app, tbl_mgr, executor):
     time_time = time.time
 
@@ -270,7 +293,8 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, tbl_mgr, exec
 
 
 def _stuck_on(monkeypatch, row_ids) -> None:
-    """让每次提交都抛 InconsistentRangeRead（id 依次取自 row_ids），create_row 最多重试 8 次"""
+    """让每次提交都抛 InconsistentRangeRead（id 依次取自 row_ids），create_row 执行到
+    row_ids 用完为止"""
     from hetu.data.backend import InconsistentRangeRead
     from hetu.data.backend.session import Session
     from hetu.system import SystemClusters
@@ -283,7 +307,7 @@ def _stuck_on(monkeypatch, row_ids) -> None:
     monkeypatch.setattr(Session, "commit", commit)
     system = SystemClusters().get_system("create_row")
     assert system
-    monkeypatch.setattr(system, "max_retry", 8)
+    monkeypatch.setattr(system, "max_retry", len(row_ids) - 1)
 
 
 @pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
@@ -324,3 +348,75 @@ async def test_race_on_different_rows_no_stuck_log(
         await caller.call("create_row", 1, 2, "a")
 
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def _raced_system(monkeypatch, races: int, max_retry: int | None = None):
+    """把 create_row 换成前 races 次撞竞态、之后返回 "done" 的函数；返回已执行次数的列表"""
+    from hetu.data.backend import RaceCondition
+    from hetu.system import SystemClusters
+
+    system = SystemClusters().get_system("create_row")
+    assert system
+    attempts = []
+
+    async def race_then_done(_ctx, *_args):
+        attempts.append(1)
+        if len(attempts) <= races:
+            raise RaceCondition("Range changed Fleet.owner（模拟）")
+        return "done"
+
+    monkeypatch.setattr(system, "func", race_then_done)
+    if max_retry is not None:
+        monkeypatch.setattr(system, "max_retry", max_retry)
+    return attempts
+
+
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+@pytest.mark.parametrize("max_retry", [0, 2])
+async def test_retry_counts_retries_after_first_run(
+    mod_test_app, tbl_mgr, new_ctx, monkeypatch, max_retry
+):
+    """retry=N 是首次执行之外最多再重试 N 次。retry=0 关闭重试：System 照常执行一次，
+    而不是一次都不执行就报超过重试次数"""
+    from hetu.system.caller import SystemCaller
+
+    caller = SystemCaller("pytest", tbl_mgr, new_ctx())
+
+    attempts = _raced_system(monkeypatch, max_retry, max_retry)
+    assert await caller.call("create_row") == "done"
+    assert len(attempts) == max_retry + 1
+
+    attempts = _raced_system(monkeypatch, max_retry + 1, max_retry)
+    with pytest.raises(RuntimeError):
+        await caller.call("create_row")
+    assert len(attempts) == max_retry + 1
+
+
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_retry_budget(mod_test_app, tbl_mgr, new_ctx, monkeypatch):
+    """call_ 的 retry_budget：超过这么多秒后再撞竞态就放弃，抛 RetryBudgetExceeded，不再
+    重试到 max_retry。预算没用完时照常重试；max_retry 先到则还是普通的 RuntimeError"""
+    from hetu.data.backend import RaceCondition
+    from hetu.system import SystemClusters
+    from hetu.system.caller import RetryBudgetExceeded, SystemCaller
+
+    caller = SystemCaller("pytest", tbl_mgr, new_ctx())
+    system = SystemClusters().get_system("create_row")
+    assert system
+
+    attempts = _raced_system(monkeypatch, 3)
+    with pytest.raises(RetryBudgetExceeded) as exc_info:
+        await caller.call_(system, retry_budget=0)
+    assert len(attempts) == 1
+    assert exc_info.value.race_count == 1
+    assert isinstance(exc_info.value.__cause__, RaceCondition)
+
+    attempts = _raced_system(monkeypatch, 2)
+    assert await caller.call_(system, retry_budget=60) == "done"
+    assert len(attempts) == 3
+
+    attempts = _raced_system(monkeypatch, 3, max_retry=1)
+    with pytest.raises(RuntimeError) as exc_info:
+        await caller.call_(system, retry_budget=60)
+    assert len(attempts) == 2
+    assert not isinstance(exc_info.value, RetryBudgetExceeded)

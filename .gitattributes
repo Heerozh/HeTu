@@ -6,5 +6,8 @@
 # Github语言统计忽略特定目录
 ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket/** linguist-vendored
 
+# 生成的 API 文档（scripts/gen_api_docs.py）：PR 里默认折叠 diff
+docs/api/** linguist-generated=true
+
 # Shell 脚本必须 LF —— Windows 上 git autocrlf 不要碰
 *.sh text eol=lf

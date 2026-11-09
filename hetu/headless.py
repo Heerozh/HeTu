@@ -122,13 +122,40 @@ class ClusterChanged(HeadlessError):
         )
 
 
+# 列属性里必须一致的键，以及本版本认识的全部键（schema json 里每列的属性见 make_json）
+_COMPARED_PROPERTY_KEYS = (
+    "dtype",
+    "unique",
+    "index",
+    "point_sub",
+    "hidden",
+    "groupby",
+    "commit_seq",
+)
+_KNOWN_PROPERTY_KEYS = frozenset((*_COMPARED_PROPERTY_KEYS, "default"))
+# 组件级本版本认识的全部键（见 make_json）
+_KNOWN_COMPONENT_KEYS = frozenset(
+    (
+        "namespace",
+        "name",
+        "permission",
+        "rls_compare",
+        "volatile",
+        "readonly",
+        "backend",
+        "table_sub",
+        "properties",
+    )
+)
+
+
 def _schema_diff(
     local: type[BaseComponent], meta_json: str
 ) -> tuple[list[str], list[str]]:
     """比对本地组件类与服务器 meta 的定义，返回 ``(必须一致的差异, 只告警的差异)``。
 
     比数据布局：``namespace`` 和 ``properties`` 的列名 / dtype / unique /
-    index；以及通知声明 ``table_sub`` / 各列 ``point_sub`` / ``hidden``——headless 写入走
+    index / groupby / commit_seq，不认识的组件键、列属性键（更新版本的 HeTu 加的）也算不一致；以及通知声明 ``table_sub`` / 各列 ``point_sub`` / ``hidden``——headless 写入走
     同一条 commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新（整表订阅组件的
     commit 不为只改了 hidden 列的行发表频道，RLS 判定用的列除外，所以这时 ``rls_compare``
     也要一致）。``default`` 差异只告警；``permission / volatile / readonly / backend`` 与
@@ -148,6 +175,9 @@ def _schema_diff(
     )
     if local_ts != remote_ts:
         errors.append(f"table_sub: {remote_ts} -> {local_ts}")
+    # 组件级不认识的键同样判为不一致（理由同下面的列属性）
+    for key in sorted((set(local_d) | set(remote_d)) - _KNOWN_COMPONENT_KEYS):
+        errors.append(f"{key}: unknown component property")
     local_p = local_d["properties"]
     remote_p = remote_d["properties"]
     for col in sorted(set(local_p) | set(remote_p)):
@@ -157,11 +187,20 @@ def _schema_diff(
         if col not in local_p:
             errors.append(f"- col {col} ({remote_p[col]['dtype']})")
             continue
-        for key in ("dtype", "unique", "index", "point_sub", "hidden"):
+        # groupby（复合索引的分组列）对不上的话，headless 的 commit 按本地定义维护索引，
+        # 会把服务器上的索引写坏；commit_seq 对不上的话，会把 0 原样写进去，或者给服务器上的
+        # 普通列发号
+        for key in _COMPARED_PROPERTY_KEYS:
             local_v = local_p[col].get(key, False)
             remote_v = remote_p[col].get(key, False)
             if local_v != remote_v:
                 errors.append(f"~ col {col}.{key}: {remote_v} -> {local_v}")
+        # 不认识的列属性键（更新版本的 HeTu 加的）一律判为不一致：不知道它管什么，放行的话，
+        # 旧客户端会按自己的定义写入
+        for key in sorted(
+            (set(local_p[col]) | set(remote_p[col])) - _KNOWN_PROPERTY_KEYS
+        ):
+            errors.append(f"~ col {col}.{key}: unknown property")
         if local_p[col]["default"] != remote_p[col]["default"]:
             warns.append(
                 f"~ col {col}.default: {remote_p[col]['default']!r} -> "
@@ -220,7 +259,9 @@ class HeadlessClient:
     """无服务器进程的表直读写客户端，用 `connect()` 创建。
 
     - `table(comp)` → 现有 `Table`：非事务读走 `servant_get` / `servant_range` /
-      `servant_get_many`（`direct_set` 不保证通知一致，请勿使用）。
+      `servant_get_many`；提交序号列（`commit_seq`）的命令表用 `servant_seq_read` 按号
+      消费、确认缺口，`servant_seq_head` / `servant_seq_head_many` 读发到第几号
+      （`direct_set` 不保证通知一致，请勿使用）。
     - `session(*comps)` → `HeadlessSession`：``s[Comp]`` 即现有 `SessionRepository`，
       退出 ``async with`` 即 commit，提交路径与 System 完全相同。
     - 不发雪花号：`insert` 的行 id 必须非零，`upsert` 只在锚定 ``id=<显式值>`` 时允许新建。

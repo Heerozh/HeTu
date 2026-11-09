@@ -37,15 +37,32 @@ import importlib
 import logging
 import math
 import random
+import re
 import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Collection, Coroutine, Iterable, Iterator
+from collections.abc import (
+    Callable,
+    Collection,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NamedTuple,
+    final,
+    overload,
+)
 
 import numpy as np
 
@@ -68,11 +85,13 @@ class RaceCondition(Exception):
     - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
     - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
       陈旧读（stale read）；纯读的行同样参与乐观锁校验；
+    - 提交时，本事务按 id 读空过（`get(id=)` / `get_by_id`）的行已经存在：读空之后被别的
+      事务插入，或者读空读到的是落后的副本；
     - 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
-      `get`（或等值 `range`）观察到该值不存在**（negative observation，见
-      `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
-      行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
-      `UniqueViolation`；
+      `get` / `get_by_id`（或等值 `range`）观察到该值不存在**（negative observation，
+      见 `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中
+      对方的行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突
+      则是 `UniqueViolation`；
     - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
       返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
       过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
@@ -106,6 +125,50 @@ class InconsistentRangeRead(RaceCondition):
         )
 
 
+class CommitSeqDiverged(Exception):
+    """
+    The commit_seq sequence no longer matches what the consumer recorded.
+
+    提交序号列的序列和库外消费方记下的对不上了，由 `BackendClient.seq_read` 抛出。重试不会好，
+    所以不继承 RaceCondition：这一组要停下来、报警，由人来处理，别的组照常消费。
+
+    `reason` 是下面三种之一：
+
+    - ``"reused"``：游标那一号现在是另一行，号被复用了。可能是数据回退（故障切换丢了最后几次提交、
+      AOF / RDB 重启、整库从备份恢复、易失表清空），也可能是计数器落后于数据之后又发了一遍（手工删了
+      计数器、内存淘汰、只导入了行、改了组件名或字段名之后重新校准）；
+    - ``"anchor_missing"``：游标那一行没了，后面却有号。数据回退了，或者游标那一行被误删了（按文档的
+      裁剪规则，游标那一行不会被正常删掉）；
+    - ``"duplicate"``：组里有重号，计数器落后于数据时会发出重号。
+
+    属性：`comp_name`、`group`（调用方给的原值）、`seq`（出问题的那一号）、`expected_id`、
+    `found_id`（`anchor_missing` 时为 None）、`reason`。
+    """
+
+    def __init__(
+        self,
+        comp_name: str,
+        group: Mapping[str, Any] | None,
+        seq: int,
+        expected_id: int,
+        found_id: int | None,
+        reason: str,
+    ):
+        super().__init__(comp_name, group, seq, expected_id, found_id, reason)
+        self.comp_name = comp_name
+        self.group = group
+        self.seq = seq
+        self.expected_id = expected_id
+        self.found_id = found_id
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return (
+            f"COMMIT_SEQ: {self.reason} {self.comp_name} group={self.group!r} "
+            f"seq={self.seq} expected_id={self.expected_id} found_id={self.found_id}"
+        )
+
+
 class UniqueViolation(IndexError):
     """
     唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。
@@ -116,8 +179,9 @@ class UniqueViolation(IndexError):
       两行写入相同 unique 值时立即抛出（0 往返）；
     - `commit()`（`async with session` 退出、`SystemCaller` 提交、`ctx.session_commit()`）：
       由后端原子检查主键与 unique 索引（本事务删除的行不算冲突）。数据库已有同值记录、且
-      本事务从未 `get` 观察过该值不存在时抛出此异常（典型如“用户名已被占用”）；若曾观察其
-      不存在，则改抛 `RaceCondition` 交由重试机制处理。同时存在两类冲突时竞态优先。
+      本事务从未 `get` / `get_by_id` 观察过该值不存在时抛出此异常（典型如“用户名已被
+      占用”）；若曾观察其不存在，则改抛 `RaceCondition` 交由重试机制处理。同时存在两类
+      冲突时竞态优先。
 
     异常消息包含组件名、字段名、行 id 与操作（insert / update）。要在事务内对“已存在”
     分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用
@@ -132,6 +196,22 @@ class RowFormat(Enum):
     STRUCT = 1  # 默认值：按Component定义严格转换的np.record（c-struct like）类型
     TYPED_DICT = 2  # 先转换成STRUCT，再转换成dict的类型。
     ID_LIST = 3  # 只返回list of row id，只能用于range查询
+
+
+class SeqReadResult[RowsT](NamedTuple):
+    """
+    Result of `BackendClient.seq_read`: the rows read and what blocked the read.
+
+    提交序号列增量读（`seq_read`）的结果，可以直接解包：``rows, blocked = ...``。
+
+    - `rows`：号大于 `after` 的行，按号升序，格式按 `row_format`；
+    - `blocked`：``(号, 行 id)`` 或 None。索引里有、这次却没取到行的第一个 member，它挡住了后面的
+      行；None 表示没被挡住。取行落到落后的副本、读完索引之后行被删了都会挡住，下一次通常就好了；
+      同一个 ``(号, 行 id)`` 一直挡着，多半是索引残留（索引里有、行没有）。
+    """
+
+    rows: RowsT
+    blocked: tuple[int, int] | None
 
 
 def to_sortable_bytes(value: np.generic) -> bytes:
@@ -248,6 +328,313 @@ def sortable_token(sortable: bytes) -> str:
     return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
 
 
+# 索引 member 是 值段 + 0x00 + id 段。id 段是 id + 2^63 的 16 位小写 hex，也就是 int64 的
+# `to_sortable_bytes` 的 hex：定宽，整个 int64 范围都保序（含按 key 的未来调用用的负 id），
+# 同一个值下的行就按 id 的数值排；只有 0-9a-f，不含 0x00 / 0xff，"最后一个 0x00 是终止符"、
+# 区间两端的 \x00 / \x00\xff 照旧成立。以前是不补零的十进制，雪花 id 从 18 位进到 19 位
+# （2033-07）之后同值的行会乱序，"取某个值下最新 N 行"会取错
+ROW_ID_TOKEN_LEN = 16
+_ROW_ID_OFFSET = 1 << 63
+
+
+def row_id_token_(row_id: int | np.integer) -> bytes:
+    """内部方法：行 id → 索引 member 末尾的 id 段（见 `ROW_ID_TOKEN_LEN`）"""
+    # 先转 int：np.int64 加 2^63 会溢出
+    return b"%016x" % (int(row_id) + _ROW_ID_OFFSET)
+
+
+def index_member_(value: bytes, row_id: int | np.integer) -> bytes:
+    """内部方法：值段 + 行 id → 索引 member"""
+    return value + b"\x00" + row_id_token_(row_id)
+
+
+def member_row_id_(member: bytes) -> int:
+    """内部方法：索引 member → 行 id。id 段定宽，取最后 `ROW_ID_TOKEN_LEN` 个字节"""
+    return int(member[-ROW_ID_TOKEN_LEN:], 16) - _ROW_ID_OFFSET
+
+
+def member_value_(member: bytes) -> bytes:
+    """内部方法：索引 member 去掉 0x00 + id 段，剩下的值段（复合索引带组前缀）"""
+    return member[: -ROW_ID_TOKEN_LEN - 1]
+
+
+# 迁移脚本搬完了数据、重建索引却失败时（unique 冲突、提交序号列组内重复……）写进 meta 的版本号。
+# 这时数据已经是新定义的、索引没建成、提交序号列的计数器也没校准：版本号故意和任何定义都对不上，
+# 服务器拒绝启动；修好数据后再跑 hetu upgrade，会按当前定义直接重建
+REBUILD_PENDING_VERSION = "rebuild-pending"
+
+# 提交序号列（commit_seq）的号的上限（不含）：提交脚本里的数是 Lua 的 double，再往上不精确。
+# 提交时到了上限返回 SEQ 失败，重建时库里已有的号到了上限报错
+COMMIT_SEQ_LIMIT = 1 << 53
+
+# Redis 认的整数串（string2ll）：可选负号加不以 0 开头的数字，或者就是 "0"
+_REDIS_INT = re.compile(rb"0|-?[1-9][0-9]*")
+
+
+def parse_redis_int_(raw: bytes) -> int | None:
+    """
+    内部方法：按 Redis string2ll 的规则（INCRBY 认的整数）解析一个字符串值，不是整数返回 None。
+    可选的负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里；Python 的 int() 会放过
+    " 5"、"+5"、"05"、"1_0"，两个后端就对不上了
+    """
+    if not _REDIS_INT.fullmatch(raw):
+        return None
+    value = int(raw)
+    return value if -(1 << 63) <= value < (1 << 63) else None
+
+
+# 索引的存储格式版本，并进表的 schema 版本号（见 `schema_version_`）。member 的编码一变就加一：
+# 旧库每张表的版本号都对不上，服务器拒绝启动，`hetu upgrade` 按新格式重建索引。
+# 1：id 段是不补零的十进制；2：id 段定宽（`ROW_ID_TOKEN_LEN`）
+INDEX_FORMAT = 2
+
+
+def schema_version_(json_: str, index_format: int = INDEX_FORMAT) -> str:
+    """
+    内部方法：组件表 meta 里的 schema 版本号，由组件定义的 json 与索引格式版本一起算出。只改了
+    权限这类不动数据的定义版本号也会变，`hetu upgrade` 会把 meta 补写成新的。迁移脚本的文件名
+    也用它（`*_v旧版本_to_v新版本.py`）。索引格式 1 的版本号就是 json 的 md5，旧版 HeTu 写的
+    meta 和生成的迁移脚本都是这个
+    """
+    data = json_ if index_format == 1 else f"{json_}\nindex_format={index_format}"
+    return hashlib.md5(data.encode("utf-8")).hexdigest()
+
+
+def schema_versions_(json_: str) -> set[str]:
+    """内部方法：这份组件定义在各个索引格式下的版本号，认旧版 HeTu 生成的迁移脚本用"""
+    return {schema_version_(json_, fmt) for fmt in range(1, INDEX_FORMAT + 1)}
+
+
+def index_format_stale_(meta: TableMaintenance.TableMeta) -> bool:
+    """
+    内部方法：表的索引是不是旧格式。meta 的版本号写入时总是由同一份 meta 的 json 按当时的
+    `INDEX_FORMAT` 算出来，按当前格式重算对不上就是旧格式写的
+    """
+    return meta.version != schema_version_(meta.json)
+
+
+# 复合索引里 str / bytes 分组列编码后面跟的终止符。不能用单个 0x00：值的转义是 0x00 → 0x00 0xff，
+# 下一列的编码以 0xff 开头时（整数最大值、浮点 +inf / NaN、0xff 开头的 bytes）比较会越过
+# 终止符，把 "a\x00b" 组的行算进 "a" 组的区间。0x00 0x01 和转义的 0x00 0xff 在第二个字节就分开了
+GROUP_TERMINATOR = b"\x00\x01"
+
+
+def _group_value_error(comp_cls: type[BaseComponent], col: str, value: Any, why: str):
+    return ValueError(
+        _("{comp_name}.{col} 的分组值 {value} 不合法：{why}").format(
+            comp_name=comp_cls.name_, col=col, value=repr(value), why=why
+        )
+    )
+
+
+def overflows_column_(comp_cls: type[BaseComponent], field: str, value: Any) -> bool:
+    """
+    内部方法：str / bytes 值存进字符串列（U / S）会不会被截断。列宽按字符数（S 列是字节数），
+    结尾的 `\\x00` 是补齐、本来就存不住，不算在内。别的类型的值、别的列都返回 False
+    """
+    if comp_cls.dtype_map_[field].kind not in "US":
+        return False
+    if isinstance(value, str):
+        value = value.rstrip("\x00")
+    elif isinstance(value, bytes):
+        value = value.rstrip(b"\x00")
+    else:
+        return False
+    return len(value) > comp_cls.str_max_len(field)
+
+
+def resolve_group_value_(comp_cls: type[BaseComponent], col: str, value: Any) -> Any:
+    """
+    内部方法：一个分组值按分组列的 dtype 规范化成 python 值，不合法抛 ValueError。
+
+    不能直接 `dtype.type(value)`：整数会静默回绕或截断（`np.int8(np.int64(300))` 是 44、
+    `np.int8(1.5)` 是 1），python int 越界抛的又是 OverflowError；字符串结尾的 `\\x00` 也还在，
+    和存进库里的值对不上。所以整数要先按精确值判断范围；字符串超过列宽同样报错（存进去会被
+    截断，前 N 个字符相同的值落进同一组，按截断后的值查会拿到别的组的行），放得下的按存储
+    规则（`np.array(v, dtype)[()]`）去掉结尾的 `\\x00`。
+
+    整数列也收数字字符串，和单列索引的查询值同一套解析（`exact_number_`）：先按整数、不行再按
+    小数，所以 `"3"`、`"3.0"` 都等于 3。开闭区间的 `(` / `[` 前缀分组值用不上，带了就解析不了
+    """
+    dtype = comp_cls.dtype_map_[col]
+    kind = dtype.kind
+    if kind in "iu":
+        if isinstance(value, (bool, np.bool_, int, np.integer)):
+            number = int(value)
+        elif isinstance(value, (float, np.floating, str, bytes)):
+            try:
+                exact = exact_number_(value)
+            except ValueError:  # 含 bytes 不是 utf-8 时的 UnicodeDecodeError
+                raise _group_value_error(comp_cls, col, value, _("不是数字")) from None
+            if isinstance(exact, float):
+                if not exact.is_integer():  # 小数、±inf、NaN
+                    raise _group_value_error(comp_cls, col, value, _("不是整数"))
+                exact = int(exact)
+            number = exact
+        else:
+            raise _group_value_error(
+                comp_cls, col, value, _("整数列只收数字或数字字符串")
+            )
+        info = np.iinfo(dtype)
+        if not info.min <= number <= info.max:
+            raise _group_value_error(
+                comp_cls, col, value, _("超出 {dtype} 的范围").format(dtype=dtype)
+            )
+        return number
+    if kind == "U":
+        if not isinstance(value, str):
+            raise _group_value_error(comp_cls, col, value, _("str 列只收 str"))
+    elif kind == "S":
+        if isinstance(value, str):
+            try:
+                value = value.encode("ascii")
+            except UnicodeEncodeError:
+                raise _group_value_error(
+                    comp_cls, col, value, _("bytes 列的 str 值只能是 ASCII")
+                ) from None
+        elif not isinstance(value, bytes):
+            raise _group_value_error(comp_cls, col, value, _("bytes 列只收 bytes"))
+    if kind in "US":
+        if overflows_column_(comp_cls, col, value):
+            raise _group_value_error(
+                comp_cls,
+                col,
+                value,
+                _("超过列宽 {max_len}").format(max_len=comp_cls.str_max_len(col)),
+            )
+        return np.array(value, dtype=dtype)[()].item()
+    # define_component 已限定分组列的类型，走不到
+    raise _group_value_error(comp_cls, col, value, _("不支持的分组列类型"))
+
+
+def resolve_group_(
+    comp_cls: type[BaseComponent], index_name: str, group: Any
+) -> tuple[Any, ...]:
+    """
+    内部方法：查询 / 订阅给的分组值（{分组列: 值}）→ 按分组列声明顺序、规范化后的元组。单列索引
+    返回 ()。复合索引没给、少给、多给分组值，单列索引给了分组值，值不合法，都抛 ValueError。
+    None 与 {} 等价。索引不存在时也抛 ValueError。
+    """
+    columns = comp_cls.index_groups_.get(index_name)
+    if columns is None:
+        raise ValueError(
+            _("{comp_name} 组件没有叫 {index_name} 的索引").format(
+                comp_name=comp_cls.name_, index_name=index_name
+            )
+        )
+    if group is not None and not isinstance(group, Mapping):
+        raise ValueError(
+            _("分组值必须是 {{分组列: 值}} 的 dict，收到：{group}").format(
+                group=repr(group)
+            )
+        )
+    if not group:
+        if columns:
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 是按 {columns} 分组的索引，"
+                    "查询要同时给出这些分组列的值"
+                ).format(
+                    comp_name=comp_cls.name_,
+                    index_name=index_name,
+                    columns=", ".join(columns),
+                )
+            )
+        return ()
+    if not columns:
+        raise ValueError(
+            _("{comp_name}.{index_name} 不是复合索引，不能给分组值").format(
+                comp_name=comp_cls.name_, index_name=index_name
+            )
+        )
+    # 先查键的类型再比集合：msgpack 解出来的键可能是 int / bytes，混着排序会抛 TypeError
+    if not all(type(key) is str for key in group) or set(group) != set(columns):
+        raise ValueError(
+            _(
+                "{comp_name}.{index_name} 的分组列是 {columns}，分组值要正好给出这些列，"
+                "收到：{keys}"
+            ).format(
+                comp_name=comp_cls.name_,
+                index_name=index_name,
+                columns=", ".join(columns),
+                keys=repr(list(group)),
+            )
+        )
+    return tuple(resolve_group_value_(comp_cls, col, group[col]) for col in columns)
+
+
+def _group_part(dtype: np.dtype, value: Any) -> bytes:
+    encoded = to_sortable_bytes(dtype.type(value))
+    return encoded + GROUP_TERMINATOR if dtype.kind in "US" else encoded
+
+
+def group_prefix_(
+    comp_cls: type[BaseComponent], index_name: str, values: tuple[Any, ...]
+) -> bytes:
+    """内部方法：`resolve_group_` 之后的分组值 → 复合索引 member 的组前缀 P，单列索引是 b"" """
+    dtype_map = comp_cls.dtype_map_
+    return b"".join(
+        _group_part(dtype_map[col], value)
+        for col, value in zip(comp_cls.index_groups_[index_name], values)
+    )
+
+
+def row_group_prefix_(
+    comp_cls: type[BaseComponent], index_name: str, row: Any
+) -> bytes:
+    """
+    内部方法：一行在复合索引上的组前缀 P，单列索引是 b""。row 是 np.record，或者 commit 用的
+    {列: str / bytes}（按列 dtype 转回）
+    """
+    dtype_map = comp_cls.dtype_map_
+    return b"".join(
+        _group_part(dtype_map[col], row[col])
+        for col in comp_cls.index_groups_[index_name]
+    )
+
+
+def index_value_bytes_(
+    comp_cls: type[BaseComponent], index_name: str, row: Any
+) -> bytes:
+    """
+    内部方法：一行在索引上的值段，即 member 去掉 `\\x00 + id`：组前缀 P 加本字段的编码，单列索引
+    就是本字段的编码。row 同 `row_group_prefix_`
+    """
+    value = to_sortable_bytes(comp_cls.dtype_map_[index_name].type(row[index_name]))
+    if not comp_cls.index_groups_[index_name]:
+        return value
+    return row_group_prefix_(comp_cls, index_name, row) + value
+
+
+def index_value_bytes_list_(
+    comp_cls: type[BaseComponent], index_name: str, rows: np.ndarray
+) -> list[bytes]:
+    """`index_value_bytes_` 的批量版，结果与逐行调用相同：每列向量化编码再逐行拼接"""
+    values = to_sortable_bytes_list(rows[index_name])
+    groups = comp_cls.index_groups_[index_name]
+    if not groups:
+        return values
+    parts: list[list[bytes]] = []
+    for col in groups:
+        encoded = to_sortable_bytes_list(rows[col])
+        if comp_cls.dtype_map_[col].kind in "US":
+            encoded = [part + GROUP_TERMINATOR for part in encoded]
+        parts.append(encoded)
+    parts.append(values)
+    return [b"".join(row_parts) for row_parts in zip(*parts)]
+
+
+def group_query_key_(group: Mapping[str, Any] | None) -> tuple[tuple[str, str], ...]:
+    """
+    内部方法：订阅的 sub_id、共享键里代表分组值的部分，按原值（repr）、键按名字排序。和 left /
+    right 一样不规范化：共享键与 sub_id 用同一个口径才能保证"同键一定同 sub_id"；1 与 True、
+    3 与 3.0 分成两个订阅只是少共享些
+    """
+    if not group:
+        return ()
+    return tuple((key, repr(group[key])) for key in sorted(group))
+
+
 def peel_bound_(
     value: float | str | bytes | bool,
 ) -> tuple[float | str | bytes | bool, bool | None]:
@@ -263,6 +650,19 @@ def peel_bound_(
         if ch in ("[", b"["):
             return value[1:], True
     return value, None
+
+
+def literal_bound_(value: Any) -> Any:
+    """
+    内部方法：点查的值按字面比较时用的区间边界。str / bytes 以 `(` / `[` 开头时前面补一个 `[`：
+    `peel_bound_` 只剥掉补上的这一个，剩下的原样比较，开头的 `(` / `[` 不会被当成开 / 闭区间
+    标记。get、upsert、订阅单行这类点查用它；range 的边界照旧解释前缀
+    """
+    if isinstance(value, str) and value[:1] in ("(", "["):
+        return "[" + value
+    if isinstance(value, bytes) and value[:1] in (b"(", b"["):
+        return b"[" + value
+    return value
 
 
 def inverted_bounds_error_(lower: Any, upper: Any) -> ValueError:
@@ -357,10 +757,22 @@ class BackendClient:
     # 哪些频道的 payload 是 row_id 集合
     TABLE_CHANNEL_SUFFIX = ":table"
 
-    def index_channel(self, table_ref: TableReference, index_name: str):
+    def index_channel(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        group: Mapping[str, Any] | None = None,
+    ) -> str:
         """
-        返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
+        返回索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
         供区间订阅用；点查询请用 `index_value_channel`，免得被无关的值叫醒。
+        复合索引（groupby）每组单独存放，必须用 group 给出全部分组列，得到的是这一组的频道：
+        只有这一组的行进出、组里有行的本字段变了才会通知，别的组的写入不会。单列索引不能给 group。
+
+        Channel of an index: every insert / delete / change of the indexed field
+        notifies it. A composite (groupby) index is stored per group: pass `group`
+        with every group-by column to get the channel of that group, which only
+        writes to that group notify. Single-column indexes take no `group`.
         """
         raise NotImplementedError
 
@@ -375,11 +787,13 @@ class BackendClient:
         不发：点查询订阅本来就订着结果里每一行的行频道，由它发现（见 IndexSubscription）。
         点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
-        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
+        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。复合索引（groupby）没有值频道，
+        调用抛 `ValueError`：按组订阅请用 `index_channel(…, group=…)`，它只被这一组的写入叫醒。
 
         Channel of one index value, only for indexes declared with `point_sub` (raises
         `ValueError` otherwise). Point-query subscriptions use it instead of
-        `index_channel` so writes to other values don't wake them up.
+        `index_channel` so writes to other values don't wake them up. Composite
+        (groupby) indexes have none: use `index_channel(..., group=...)`.
         """
         raise NotImplementedError
 
@@ -600,6 +1014,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray: ...
     @overload
     async def range(
@@ -611,6 +1027,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, str]]: ...
     @overload
     async def range(
@@ -622,6 +1040,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...
     @overload
     async def range(
@@ -633,6 +1053,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]: ...
     @overload
     async def range(
@@ -644,6 +1066,8 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format: RowFormat = ...,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
     async def range(
         self,
@@ -654,10 +1078,13 @@ class BackendClient:
         limit: int = 10,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
+        *,
+        group: Mapping[str, Any] | None = None,
     ):
         """
         从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
         如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
+        复合索引（groupby）要用 `group` 给出全部分组列的值，结果只含这一组的行。
 
         Parameters
         ----------
@@ -674,6 +1101,8 @@ class BackendClient:
             是否降序排列
         row_format
             返回数据解码格式，见 "Returns"
+        group: Mapping[str, Any] | None
+            复合索引的分组值 {分组列: 值}，必须正好给出全部分组列；单列索引不能给。
 
         Returns
         -------
@@ -693,7 +1122,8 @@ class BackendClient:
         Notes
         -----
         如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
+        "某一组里按某字段排序"请声明复合索引（`property_field(groupby=...)`），查询时给出
+        `group`。其他组合条件，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
             items = client.range(ref, "owner", player_id, limit=100)
             few_items = items[items.amount < 10]
@@ -710,6 +1140,8 @@ class BackendClient:
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> None:
         """
         内部方法：校验一次 `range` 查询的参数，不合法抛 TypeError / ValueError，不访问数据库。订阅在
@@ -731,10 +1163,13 @@ class BackendClient:
         right: int | float | str | bytes | bool | None = None,
         limit: int = 10,
         desc: bool = False,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[tuple[Any, int]]:
         """
-        内部方法：只读索引，返回区间内前 `limit` 个 `(索引值, 行 id)`，区间、limit、desc 的规则同
-        `range`。不读行，一次往返；索引值按组件 dtype 还原（numpy 标量）。
+        内部方法：只读索引，返回区间内前 `limit` 个 `(索引值, 行 id)`，区间、limit、desc、group 的
+        规则同 `range`。不读行，一次往返；索引值按组件 dtype 还原（numpy 标量），复合索引只还原
+        本字段的值。
 
         只要索引上的值、不要整行时用它，比如未来调用的调度只想知道最早一条什么时候到期：先读索引
         再读行是两次往返，中间那行可能已被改走，读到的行值就不是这次区间里的值了。
@@ -749,6 +1184,8 @@ class BackendClient:
         right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[list[int], RangeObservation]:
         """
         内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
@@ -775,6 +1212,8 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[bytes, bytes]:
         """
         内部方法：一次 range 查询匹配的排序键闭区间 (lo, hi)，同 `range_read_` 观察里的
@@ -793,9 +1232,22 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    async def commit(self, idmap: IdentityMap) -> None:
+    async def commit(
+        self, idmap: IdentityMap
+    ) -> dict[type[BaseComponent], dict[int, int]]:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
+
+        Returns
+        -------
+        dict[type[BaseComponent], dict[int, int]]
+            The numbers this commit handed out to commit sequence columns:
+            ``{component class: {row id: number}}``, keyed by the component classes in
+            the idmap; empty dict if no row got one.
+
+            这次提交里提交序号列（commit_seq）发出的号：``{组件类: {行 id: 号}}``，组件类是
+            idmap 里的（即 `Session.using` 传入的）。只含这次 insert 的、带 commit_seq 列的
+            组件；没有这样的行时是空 dict。
 
         Exceptions
         --------
@@ -806,6 +1258,188 @@ class BackendClient:
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
+        """
+        raise NotImplementedError
+
+    async def seq_head(
+        self, table_ref: TableReference, group: Mapping[str, Any] | None = None
+    ) -> int:
+        """
+        Read the latest number issued by one commit_seq group.
+
+        读提交序号列（`commit_seq`）一个组最近发出的号，也就是这一组发到了第几号。还没发过号是 0，
+        易失表维护清空之后也是 0。非事务读，走副本，可能落后。
+
+        计数器和索引是两个 key，读计数器不和任何一次读在同一个快照里：只能用来发现有新号、监控
+        积压、报警，**不能**拿来把游标推过没见到行的号。库外消费方的写法见 `seq_read`。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`：带 groupby 的必须正好给出全部分组列，
+            不带 groupby 的不给。
+
+        Returns
+        -------
+        head: int
+            这一组最近发出的号，没发过号是 0。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者分组值不对。
+        RuntimeError
+            计数器的值被写坏了（不是 Redis 认的非负整数），报错里带着它的 key 和值。组里还有行时，
+            `hetu upgrade` 重建索引会把它校准回来；没有行时 upgrade 不动它，要手工改，见文档
+            "binlog 式同步"一节。
+
+        Notes
+        -----
+        Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
+        """
+        raise NotImplementedError
+
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int | None]:
+        """
+        Read the latest numbers issued by many commit_seq groups in one round trip.
+
+        批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
+        一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。
+
+        逐组返回：计数器被写坏了的组是 None，不抛异常，别的组照常返回，一组坏了不会拖住所有组。
+        要看是哪个 key、什么值，对这一组调 `seq_head`。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        groups: Sequence[Mapping[str, Any] | None]
+            每一项是一个组的分组值，规则同 `seq_head` 的 `group`。
+
+        Returns
+        -------
+        heads: list[int | None]
+            每个组最近发出的号，没发过号是 0，计数器被写坏了是 None，顺序同 `groups`。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者某一项分组值不对（在访问数据库之前检查）。
+        """
+        raise NotImplementedError
+
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> SeqReadResult[np.recarray]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> SeqReadResult[list[dict[str, str]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> SeqReadResult[list[dict[str, Any]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: RowFormat = ...,
+    ) -> SeqReadResult[np.recarray | list[dict[str, str]] | list[dict[str, Any]]]: ...
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format=RowFormat.STRUCT,
+    ) -> SeqReadResult[Any]:
+        """
+        Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
+
+        给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
+        不需要 master。
+
+        先一条 ZRANGE 读这一组在 `after` 之后的 member（它落到的那个节点上的原子快照），再取行。
+        号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行已经不在了，所以：
+
+        - 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
+          (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
+        - 缺口只按这一条 ZRANGE 确认。取行不一定和它落在同一个节点上（读写分离代理、原生 cluster
+          都按命令分流），读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：
+          停在它前面，它记为 `blocked`，下次再读。所以落到哪个节点只影响进度，不会漏行；有只读节点
+          断了复制、还在回答读请求时，可能一直被它挡住，直到它恢复或者被摘掉；
+        - 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
+
+        注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
+        小于所有消费方**已经落盘的**游标的行，删之前先核对，见文档"binlog 式同步"一节。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        after: int
+            游标，也就是最后处理过的那一号；从头读给 0。0 <= after < 2^53。
+        limit: int
+            最多返回的行数，正整数。一次读太多会长时间占住副本，一般几百到几千行。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`。
+        after_id: int | None
+            游标那一号的行的雪花 id（锚点）。给了就核对序列：游标那一号换了一行、游标那一行没了而
+            后面有号、组里有重号，都抛 `CommitSeqDiverged`。给的时候 `after` 必须 >= 1。不给就不核对，
+            也就发现不了号被复用。
+        row_format
+            返回数据解码格式，同 `range`，但不支持 `RowFormat.ID_LIST`。
+
+        Returns
+        -------
+        result: SeqReadResult
+            ``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
+            ``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：ZRANGE 落到的那个
+            节点上 `after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+
+        Raises
+        ------
+        CommitSeqDiverged
+            给了 `after_id`，而序列和它对不上；或者组里有重号。
+        ValueError
+            组件没有提交序号列、分组值不对、参数取值不对，或者 `row_format` 是 `ID_LIST`。
+        TypeError
+            整数参数的类型不对（收 int 和 `np.integer`，不收 bool）。
         """
         raise NotImplementedError
 
@@ -913,9 +1547,15 @@ class TableMaintenance:
         raise NotImplementedError
 
     def range(
-        self, ref: TableReference, index_name: str, left: Any, right: Any = None
+        self,
+        ref: TableReference,
+        index_name: str,
+        left: Any,
+        right: Any = None,
+        *,
+        group: Mapping[str, Any] | None = None,
     ) -> list[int]:
-        """按索引范围查询指定表的数据"""
+        """按索引范围查询指定表的数据。复合索引要用 group 给出全部分组列的值"""
         raise NotImplementedError
 
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -969,8 +1609,13 @@ class TableMaintenance:
         """
         raise NotImplementedError
 
-    def do_update_meta_(self, table_ref: TableReference) -> None:
-        """把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据"""
+    def do_update_meta_(
+        self, table_ref: TableReference, version: str | None = None
+    ) -> None:
+        """
+        把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据。version
+        不给时按定义算；迁移搬完数据却没能重建索引时，写 `REBUILD_PENDING_VERSION`
+        """
         raise NotImplementedError
 
     # === === ===
@@ -1006,12 +1651,13 @@ class TableMaintenance:
         if not meta:
             return "not_exists", None
         else:
-            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+            version = schema_version_(table_ref.comp_cls.json_)
             # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
             if meta.cluster_id != table_ref.cluster_id:
                 return "cluster_mismatch", meta
 
-            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+            # 如果版本不一致，组件结构可能有变化，也可能只是改权限、或者索引是旧格式写的
+            # （INDEX_FORMAT 变了），总之调用迁移代码
             if meta.version != version:
                 return "schema_mismatch", meta
 
@@ -1115,6 +1761,11 @@ class TableMaintenance:
                     ).format(comp_name=table_ref.comp_name)
                 )
                 return True
+            # 定义没变、只是索引格式（INDEX_FORMAT）变了：不搬数据，也不找迁移脚本（找不到会在
+            # 用户的 maint/migration 里给每个组件生成一份空跑的默认脚本），重建索引、补写 meta
+            if old_meta.json == table_ref.comp_cls.json_:
+                self._finish_schema_migration(table_ref)
+                return True
             from ..migration import MigrationScript
 
             migrator = MigrationScript(app_file, table_ref, old_meta)
@@ -1134,22 +1785,53 @@ class TableMaintenance:
         """
         迁移脚本只管搬数据：dtype 没变的那几级（只改了 table_sub / point_sub、索引、权限等）
         判 skip 不执行，表的 meta 还停在旧版本，check_table 会一直报 schema_mismatch。
-        这里把 meta 补写成当前定义；索引定义也变了的话（比如 point_sub 打开了 index），
-        先按当前定义重建索引。
+        这里把 meta 补写成当前定义；索引定义变了（比如 point_sub 打开了 index）、或者索引是
+        旧格式写的（`INDEX_FORMAT` 变了），先按当前定义重建索引。这一步不看
+        `--no-rebuild-index`：不重建就查不到 / 查错
         """
         from ..component import BaseComponent
 
         comp_cls = table_ref.comp_cls
         meta = self.read_meta(table_ref.instance_name, comp_cls)
         assert meta
-        if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
+        if meta.version == schema_version_(comp_cls.json_):
             return  # 迁移脚本已按当前定义重建了表
         stored = BaseComponent.load_json(meta.json)
-        if (stored.indexes_, stored.uniques_) != (comp_cls.indexes_, comp_cls.uniques_):
+        if meta.version == REBUILD_PENDING_VERSION:
+            # 上次迁移脚本搬完了数据、重建索引却失败了（见 MigrationScript.upgrade）
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 上次迁移搬完数据后重建索引失败，"
+                    "这次已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        # 分组列也要比：给已有索引加 / 去 groupby 时 indexes_、uniques_ 都不变，不重建的话
+        # 库里留着旧格式的 member。提交序号列也要比：给已有索引的字段打开 commit_seq 时上面几项
+        # 都不变，不重建的话计数器没人校准，会从 1 开始发、撞上已有的号
+        elif (
+            stored.indexes_,
+            stored.uniques_,
+            stored.index_groups_,
+            stored.commit_seq_,
+        ) != (
+            comp_cls.indexes_,
+            comp_cls.uniques_,
+            comp_cls.index_groups_,
+            comp_cls.commit_seq_,
+        ):
             self.do_rebuild_index_(table_ref)
             logger.warning(
                 _(
                     "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        elif index_format_stale_(meta):
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 索引的存储格式有变更，已按新格式"
+                    "重建Index"
                 ).format(comp_name=table_ref.comp_name)
             )
         self.do_update_meta_(table_ref)

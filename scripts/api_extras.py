@@ -7,9 +7,11 @@ are the topic-group page they belong on (matching docs/api/<group>.md).
 EXTRAS: dict[str, str] = {
     "hetu.data.backend.base.RaceCondition": "exceptions",
     "hetu.data.backend.base.UniqueViolation": "exceptions",
+    "hetu.data.backend.base.CommitSeqDiverged": "exceptions",
     "hetu.data.backend.repo.SessionRepository": "system",
     "hetu.data.backend.table.TableReference": "system",
     "hetu.data.backend.table.Table": "system",
+    "hetu.data.backend.base.SeqReadResult": "system",
     "hetu.data.backend.base.TableMaintenance": "migration",
     "hetu.system.definer.SystemClusters": "system",
     "hetu.system.future.create_future_call": "system",

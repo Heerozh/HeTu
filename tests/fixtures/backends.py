@@ -263,13 +263,56 @@ def use_redis_family_backend_only(func):
 # ============ 直接读写底层数据（造数据、核对索引用） ============
 
 
-def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
-    """索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表"""
+def raw_index_zset_keys(backend: Backend, ref, index_name: str) -> list[str]:
+    """
+    索引名下现有的所有 zset key，排好序：单列索引的那一个，复合索引的各组 key（每组一个 zset），
+    以及残留的另一种格式的 key
+    """
     master = cast(RedisModelClient, backend.master)
-    key = master.index_key(ref, index_name)
+    idx_key = master.index_key(ref, index_name)
     if isinstance(master, RedisBackendClient):
-        return list(master.io.zrange(key, 0, -1))  # type: ignore
-    return cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+        io = master.io
+        found = io.keys(idx_key + ":*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        keys = [key.decode() for key in found]  # type: ignore
+        if io.exists(idx_key):
+            keys.append(idx_key)
+        return sorted(keys)
+    sqlite = cast(SQLiteBackendClient, master)
+    keys = sqlite.run_sync_(SQLiteStore.zkeys_with_prefix, idx_key + ":")
+    if sqlite.run_sync_(SQLiteStore.zmembers, idx_key):
+        keys.append(idx_key)
+    return sorted(keys)
+
+
+def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
+    """
+    索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表。
+    复合索引每组一个 zset，合并各组的（member 带着组前缀，合并后的顺序就是一个大 zset 的顺序）
+    """
+    master = cast(RedisModelClient, backend.master)
+    members: list[bytes] = []
+    for key in raw_index_zset_keys(backend, ref, index_name):
+        if isinstance(master, RedisBackendClient):
+            members.extend(master.io.zrange(key, 0, -1))  # type: ignore
+        else:
+            members.extend(
+                cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+            )
+    return sorted(members)
+
+
+def raw_zadd(backend: Backend, key: str, member: bytes) -> None:
+    """绕过事务直接往 zset 里加一个 member（造残留的索引 key 用：不动行、不发通知）"""
+    master = cast(RedisModelClient, backend.master)
+    if isinstance(master, RedisBackendClient):
+        master.io.zadd(key, {member: 0})  # type: ignore
+        return
+
+    def _add(store: SQLiteStore) -> None:
+        with store.write_txn():
+            store.zadd(key, member)
+
+    cast(SQLiteBackendClient, master).run_sync_(_add)
 
 
 def raw_hset(backend: Backend, ref, row_id: int, **fields: str) -> None:
@@ -294,3 +337,52 @@ def raw_key_count(backend: Backend, ref) -> int:
         return len(store.row_ids(prefix)) + len(store.zkeys_with_prefix(prefix + ":"))
 
     return cast(SQLiteBackendClient, master).run_sync_(count)
+
+
+def raw_seq_counter_key(backend: Backend, ref, **group) -> str:
+    """提交序号列（commit_seq）一个组的计数器 key，group 是 {分组列: 值}，不分组时不给"""
+    from hetu.data.backend.base import group_prefix_, resolve_group_
+
+    master = cast(RedisModelClient, backend.master)
+    comp = ref.comp_cls
+    values = resolve_group_(comp, comp.commit_seq_, group or None)
+    prefix = group_prefix_(comp, comp.commit_seq_, values)
+    return master.seq_counter_key_(master.cluster_prefix(ref), comp, prefix)
+
+
+def raw_kv_get(backend: Backend, key: str) -> bytes | None:
+    """读一个字符串 key（计数器）：Redis GET，SQLite 读 KV 表"""
+    master = cast(RedisModelClient, backend.master)
+    if isinstance(master, RedisBackendClient):
+        return master.io.get(key)  # type: ignore
+    return cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.kv_get, key)
+
+
+def raw_kv_set(backend: Backend, key: str, value: bytes) -> None:
+    """绕过事务直接写一个字符串 key（造计数器用）"""
+    master = cast(RedisModelClient, backend.master)
+    if isinstance(master, RedisBackendClient):
+        master.io.set(key, value)  # type: ignore
+        return
+
+    def _set(store: SQLiteStore) -> None:
+        with store.write_txn():
+            store.kv_set(key, value)
+
+    cast(SQLiteBackendClient, master).run_sync_(_set)
+
+
+def raw_kv_keys(backend: Backend, prefix: str) -> list[str]:
+    """以 prefix 开头的字符串 key（计数器），排好序"""
+    master = cast(RedisModelClient, backend.master)
+    if isinstance(master, RedisBackendClient):
+        found = master.io.keys(prefix + "*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        return sorted(
+            key.decode()
+            for key in found  # type: ignore
+            if master.io.type(key) in (b"string", "string")  # type: ignore
+        )
+    items = cast(SQLiteBackendClient, master).run_sync_(
+        SQLiteStore.kv_items_with_prefix, prefix
+    )
+    return [key for key, _value in items]

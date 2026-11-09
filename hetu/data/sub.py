@@ -19,6 +19,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 import numpy as np
 
 from hetu.data.backend import BackendClient, MQClient, RowFormat
+from hetu.data.backend.base import (
+    group_query_key_,
+    index_member_,
+    index_value_bytes_,
+    literal_bound_,
+)
 from hetu.data.component import Permission
 from hetu.i18n import _
 from hetu.safelogging.filter import ContextFilter
@@ -307,13 +313,14 @@ class IndexSubscription(BaseSubscription):
         ctx: Context,
         index_channel: str,
         query_param: dict,
-        point_value: np.generic | None = None,
+        enter_bounds: tuple[bytes, bytes] | None = None,
     ):
         """建好时结果为空，由 `initialize_` 读初始结果"""
         self.table_ref = table_ref
         self.servant = servant
         self.rls_ctx = rls_ctx_(table_ref, ctx)
-        # 点查询时是"索引=该值"的频道，区间查询时是整个索引的频道；收到就重跑 range 比对
+        # 点查询时是"索引=该值"的频道，复合索引是这一组 key 的频道，区间查询时是整个索引的
+        # 频道；收到就重跑 range 比对
         self.index_channel = index_channel
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
@@ -321,9 +328,15 @@ class IndexSubscription(BaseSubscription):
         # 最近一次读 range 的 id 顺序（索引顺序）：共享订阅按它排快照，后加入者的回复与首次
         # 订阅的回复一样按索引排。只改非索引字段的更新不影响顺序
         self.order: list[int] = []
-        # 订的是值频道时为该值（已按 dtype 规范化），否则 None。值频道只在有行"进入"时才有
-        # 通知，行"离开"（删除、字段改走）要靠结果里各行的行频道发现，见 get_updated
-        self.point_value = point_value
+        # 订的是只报"进入"的值频道时（单列 point_sub 的点查询）为查询匹配的排序键闭区间
+        # (lo, hi)（见 `BackendClient.index_query_keys_`），否则 None。值频道只在有行进入时才有
+        # 通知，行"离开"（删除、改走）要靠结果里各行的行频道发现，见 get_updated
+        self.enter_bounds = enter_bounds
+
+    @property
+    def enter_only(self) -> bool:
+        """订的频道是否只报"进入"（单列 point_sub 的值频道），离开要靠行频道发现"""
+        return self.enter_bounds is not None
 
     def use_servant_(self, servant: BackendClient) -> None:
         self.servant = servant
@@ -393,9 +406,9 @@ class IndexSubscription(BaseSubscription):
                     channel=channel
                 )
             )
-        if self.point_value is not None and self._left_(await row_sub.read_(channel)):
-            # 值频道只在有行"进入"时才有通知：这行离开了该值（删除 / 字段改走）只能在这里
-            # 发现。重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
+        if self.enter_only and self._left_(await row_sub.read_(channel)):
+            # 值频道只在有行"进入"时才有通知：这行离开了查询（删除 / 字段改走）只能在这里发现。
+            # 重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
             new_chans, rem_chans, rtn = await self._rerange()
             if channel in self.row_subs:
                 # 重跑后它仍在结果里（读到的索引与行不是同一时刻的）：照常推行更新
@@ -404,12 +417,20 @@ class IndexSubscription(BaseSubscription):
         return await row_sub.get_updated(channel)
 
     def _left_(self, row: dict[str, Any] | None) -> bool:
-        """值频道点查询：读回的原始行是否已不在该值上（行不存在，或字段不等于该值）"""
+        """
+        订只报进入的频道时：读回的行是否已不在查询里（行不存在，或它在索引上的排序键不在查询
+        的区间里）。排序键与数据库索引的 member 是同一套编码；单列点查询的区间只有那一个值
+        """
         if row is None:
             return True
+        assert self.enter_bounds is not None
+        lo, hi = self.enter_bounds
+        comp_cls = self.table_ref.comp_cls
         index_name = self.query_param["index_name"]
-        dtype = self.table_ref.comp_cls.dtype_map_[index_name]
-        return dtype.type(row[index_name]) != self.point_value
+        key = index_member_(
+            index_value_bytes_(comp_cls, index_name, row), int(row["id"])
+        )
+        return not lo <= key <= hi
 
     async def _rerange(
         self,
@@ -2125,12 +2146,27 @@ class SubscriptionBroker:
 
     @classmethod
     def make_query_id_(
-        cls, table_ref: TableReference, index_name: str, left, right, limit, desc
+        cls,
+        table_ref: TableReference,
+        index_name: str,
+        left,
+        right,
+        limit,
+        desc,
+        group: Mapping[str, Any] | None = None,
     ):
-        return (
+        """
+        订阅的 sub_id。复合索引的查询在末尾追加 `{k1=v1,k2=v2}`：分组值用 repr、键按名字排序
+        （见 `group_query_key_`），与共享键同一个口径；单列查询的格式不变
+        """
+        query_id = (
             f"{table_ref.comp_name}.{index_name}"
             f"[{left}:{right}:{desc and -1 or 1}][:{limit}]"
         )
+        if group:
+            pairs = ",".join(f"{k}={v}" for k, v in group_query_key_(group))
+            query_id += "{" + pairs + "}"
+        return query_id
 
     @classmethod
     def _has_table_permission(cls, table_ref: TableReference, ctx: Context) -> bool:
@@ -2158,10 +2194,18 @@ class SubscriptionBroker:
     ) -> bool:
         """
         按 hidden 字段查询：拒绝并警告。不推它的值，查询条件照样能试探出来，比如
-        `range(Player, "role", "werewolf")` 返回的就是所有狼人
+        `range(Player, "role", "werewolf")` 返回的就是所有狼人。复合索引的分组列是 hidden
+        时也一样：按组查询就是在试探分组列的值
         """
+        comp_cls = table_ref.comp_cls
+        hidden = comp_cls.hidden_fields_
         # index_name 是客户端传来的，不一定可哈希，用元组的 in
-        if index_name not in table_ref.comp_cls.hidden_fields_:
+        groups = (
+            comp_cls.index_groups_.get(index_name, ())
+            if type(index_name) is str
+            else ()
+        )
+        if index_name not in hidden and not any(col in hidden for col in groups):
             return False
         logger.warning(
             _(
@@ -2275,9 +2319,11 @@ class SubscriptionBroker:
         ctx: Context,
         index_name: str,
         query_value: int | float | str,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]:
         """
-        获取并订阅单行数据。
+        获取并订阅单行数据。复合索引（groupby）要用 group 给出全部分组列的值 {分组列: 值}。
+        query_value 和 `repo.get` 一样按字面比较，字符串开头的 `(` / `[` 不是区间标记。
         如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
         内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
         按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
@@ -2300,7 +2346,9 @@ class SubscriptionBroker:
         --------
         begin_subscribe_get : 拆成两段的写法（服务器的接收协程用它）
         """
-        finish = await self.begin_subscribe_get(table_ref, ctx, index_name, query_value)
+        finish = await self.begin_subscribe_get(
+            table_ref, ctx, index_name, query_value, group
+        )
         return await finish
 
     async def begin_subscribe_get(
@@ -2309,6 +2357,7 @@ class SubscriptionBroker:
         ctx: Context,
         index_name: str,
         query_value: int | float | str,
+        group: Mapping[str, Any] | None = None,
     ) -> Coroutine[Any, Any, tuple[str | None, dict[str, Any] | None]]:
         """
         `subscribe_get` 的前半段：检查、定位 row_id（按非 id 索引订阅时查一次索引）、登记（重复订阅
@@ -2329,16 +2378,22 @@ class SubscriptionBroker:
 
         servant = self._backend.servant
 
-        # 先定位 row_id（非主键只查索引，不读行）
+        # 先定位 row_id（非主键只查索引，不读行）。分组值不合法（复合索引漏给、单列索引给了）
+        # 在这里就抛 ValueError，按非法请求断开
         if index_name == "id":
+            if group:
+                raise ValueError(_("按 id 订阅不能给分组值"))
             row_id = int(query_value)
         else:
+            # 和 repo.get 一样按字面比较：字符串开头的 ( / [ 不是区间标记，"[GM]Bob" 不会订到
+            # "GM]Bob" 那一行
             ids = await servant.range(
                 table_ref,
                 index_name,
-                query_value,
+                literal_bound_(query_value),
                 limit=1,
                 row_format=RowFormat.ID_LIST,
+                group=group,
             )
             if len(ids) == 0:
                 return self._settled(None, None)
@@ -2475,9 +2530,11 @@ class SubscriptionBroker:
         limit: int = 10,
         desc: bool = False,
         force: bool = True,
+        group: Mapping[str, Any] | None = None,
     ) -> tuple[str | None, list[dict]]:
         """
-        获取并订阅多行数据。
+        获取并订阅多行数据。复合索引（groupby）要用 group 给出全部分组列的值 {分组列: 值}，
+        只订这一组。
         如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
         内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
         按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
@@ -2509,12 +2566,15 @@ class SubscriptionBroker:
           行增删/变更都会唤醒它重跑一次比对（点查询落到这里时服务器会警告一次）。
           热索引（如所有玩家都订自己的背包）请用点查询，并给索引声明 `point_sub=True`。
           `id` 不能声明 `point_sub`，按 id 订单行请用 `subscribe_get`。
+        - 复合索引（groupby）按组查询：每组单独存成一个 zset，只订这一组的频道，只有本组有行
+          进出、本组里本字段有变化时才唤醒，别的组的写入不会；不需要声明 `point_sub`。
 
         Point queries (`right` omitted or equal to `left`) on an index declared with
         `point_sub` only wake up when rows enter or leave that value. Range queries, and
         point queries on undeclared indexes (warned once), wake up on any write to the
         index. `id` cannot declare `point_sub`; watch a single row by id with
-        `subscribe_get`.
+        `subscribe_get`. Group queries on a composite (groupby) index only wake up on
+        changes within that group (each group is its own zset; no `point_sub` needed).
 
         Returns
         --------
@@ -2531,7 +2591,7 @@ class SubscriptionBroker:
 
         """
         finish = await self.begin_subscribe_range(
-            table_ref, ctx, index_name, left, right, limit, desc, force
+            table_ref, ctx, index_name, left, right, limit, desc, force, group
         )
         return await finish
 
@@ -2545,6 +2605,7 @@ class SubscriptionBroker:
         limit: int = 10,
         desc: bool = False,
         force: bool = True,
+        group: Mapping[str, Any] | None = None,
     ) -> Coroutine[Any, Any, tuple[str | None, list[dict]]]:
         """
         `subscribe_range` 的前半段：检查（含查询参数）、登记（重复订阅也在这里认出来），订阅的
@@ -2566,11 +2627,16 @@ class SubscriptionBroker:
             return self._settled(None, [])
 
         servant = self._backend.servant
-        # 查询参数（limit 是整数、索引存在、边界合法）当场校验、不合法当场抛出，不等到后台读的时候
-        # （后台读出错会换副本重试）
-        servant.check_range_(table_ref, index_name, left, right, limit, desc)
+        # 查询参数（limit 是整数、索引存在、边界与分组值合法）当场校验、不合法当场抛出，不等到
+        # 后台读的时候（后台读出错会换副本重试）
+        servant.check_range_(
+            table_ref, index_name, left, right, limit, desc, group=group
+        )
+        group = group or None  # {} 与 None 是同一个查询
 
-        sub_id = self.make_query_id_(table_ref, index_name, left, right, limit, desc)
+        sub_id = self.make_query_id_(
+            table_ref, index_name, left, right, limit, desc, group
+        )
         if (existing := self._subs.get(sub_id)) is not None:
             logger.warning(
                 _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
@@ -2586,26 +2652,44 @@ class SubscriptionBroker:
                 sub_id,
                 existing,
                 reg,
-                (index_name, left, right, limit, desc),
+                (index_name, left, right, limit, desc, group),
                 force,
             )
 
         def make() -> IndexSubscription:
             # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道。值频道只有
             # 声明了 point_sub 的索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引
-            # 的频道并警告一次。id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）
-            point_value = BackendClient.point_query_value_(
-                table_ref.comp_cls.dtype_map_[index_name], left, right
-            )
-            if point_value is not None and index_name in table_ref.comp_cls.point_subs_:
-                index_channel = servant.index_value_channel(
-                    table_ref, index_name, point_value
+            # 的频道并警告一次。id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）。
+            # 复合索引每组一个 zset，查询都在一组里：订这一组 key 的频道，进出都会通知，只有这
+            # 一组的写入叫醒它
+            comp_cls = table_ref.comp_cls
+            enter_only = False
+            if comp_cls.index_groups_[index_name]:
+                index_channel = servant.index_channel(
+                    table_ref, index_name, group=group
                 )
             else:
-                if point_value is not None:
-                    warn_point_sub_fallback_(table_ref, index_name)
-                index_channel = servant.index_channel(table_ref, index_name)
-                point_value = None  # 订的是整个索引的频道，离开会由它通知
+                point_value = BackendClient.point_query_value_(
+                    comp_cls.dtype_map_[index_name], left, right
+                )
+                if point_value is not None and index_name in comp_cls.point_subs_:
+                    index_channel = servant.index_value_channel(
+                        table_ref, index_name, point_value
+                    )
+                    enter_only = True
+                else:
+                    if point_value is not None:
+                        warn_point_sub_fallback_(table_ref, index_name)
+                    # 订的是整个索引的频道，离开会由它通知
+                    index_channel = servant.index_channel(table_ref, index_name)
+            # 只报进入的频道：离开靠行频道发现，判定用查询匹配的排序键区间
+            enter_bounds = (
+                servant.index_query_keys_(
+                    table_ref, index_name, left, right, group=group
+                )
+                if enter_only
+                else None
+            )
             return IndexSubscription(
                 table_ref,
                 servant,
@@ -2617,12 +2701,22 @@ class SubscriptionBroker:
                     "right": right,
                     "limit": limit,
                     "desc": desc,
+                    "group": group,
                 },
-                point_value,
+                enter_bounds,
             )
 
-        # desc 按真假（sub_id 也是），客户端传 1 或 True 是同一个查询
-        query = ("range", index_name, repr(left), repr(right), repr(limit), bool(desc))
+        # desc 按真假（sub_id 也是），客户端传 1 或 True 是同一个查询。分组值与 left / right 一样
+        # 用 repr 原值（见 group_query_key_），和 sub_id 同一个口径
+        query = (
+            "range",
+            index_name,
+            repr(left),
+            repr(right),
+            repr(limit),
+            bool(desc),
+            group_query_key_(group),
+        )
         p = self._subscribe(sub_id, self._share_key(table_ref, ctx, query), make)
         return self._finish_range(p, force)
 
@@ -2675,17 +2769,25 @@ class SubscriptionBroker:
         sub_id: str,
         existing: BaseSubscription,
         reg: object,
-        query: tuple[str, Any, Any, int, bool],
+        query: tuple[str, Any, Any, int, bool, Mapping[str, Any] | None],
         force: bool,
     ) -> tuple[str | None, list[dict]]:
         """
         重复的私有范围订阅：已有的订阅照旧，只把范围再读一遍返回（query 为 index_name, left, right,
-        limit, desc）。已有的还在初始化的先等它的结果，同 `_reread_get`
+        limit, desc, group）。已有的还在初始化的先等它的结果，同 `_reread_get`
         """
         if await self._await_existing(sub_id, existing, reg) is None:
             return None, []
+        index_name, left, right, limit, desc, group = query
         rows = await self._backend.servant.range(
-            table_ref, *query, RowFormat.TYPED_DICT
+            table_ref,
+            index_name,
+            left,
+            right,
+            limit,
+            desc,
+            RowFormat.TYPED_DICT,
+            group=group,
         )
         if not self._current(sub_id, reg):
             return None, []  # 读的这段时间里被退订了

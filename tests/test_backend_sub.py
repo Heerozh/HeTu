@@ -182,6 +182,30 @@ async def test_subscribe_get_by_id(
     assert "_version" not in row
 
 
+async def test_subscribe_get_literal_value(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """按索引订阅单行的值和 repo.get 一样按字面比较：开头的 ( / [ 不是区间标记，"[GM]Bob"
+    不会订到 "GM]Bob" 那一行"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for i, name in enumerate(("(cool)", "GM]Bob")):
+            row = comp.new_row()
+            row.name, row.time = name, 900 + i
+            await repo.insert(row)
+    await backend.wait_for_synced()
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "(cool)"
+    )
+    assert sub_id and row and row["time"] == 900
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "[GM]Bob"
+    )
+    assert sub_id is None and row is None
+
+
 async def test_subscribe_get_repeat_by_other_index_no_warning(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
@@ -521,7 +545,6 @@ async def test_subscribe_get_rls_update(
 async def test_query_subscribe_rls_lost(
     broker: SubscriptionBroker,
     filled_item_ref,
-    mod_item_model,
     user_id10_ctx,
 ):
     backend = broker._backend
@@ -556,7 +579,6 @@ async def test_query_subscribe_rls_lost(
 async def test_query_subscribe_rls_gain(
     broker: SubscriptionBroker,
     filled_item_ref,
-    mod_item_model,
     user_id10_ctx,
 ):
     # query订阅的rls gain处理的原理是，每次index变化都检查所有未注册行的rls
@@ -596,7 +618,7 @@ async def test_query_subscribe_rls_gain(
     # 测试insert新数据能否得到通知
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
-        new = mod_item_model.new_row()
+        new = filled_item_ref.comp_cls.new_row()
         new.owner = 10
         new_row_id = new.id
         await repo.insert(new)
@@ -612,7 +634,6 @@ async def test_query_subscribe_rls_gain(
 async def test_query_subscribe_rls_lost_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
-    mod_rls_test_model,
     user_id11_ctx,
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
@@ -646,7 +667,6 @@ async def test_query_subscribe_rls_lost_without_index(
 async def test_query_subscribe_rls_gain_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
-    mod_rls_test_model,
     user_id11_ctx,
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
@@ -699,9 +719,7 @@ async def test_query_subscribe_rls_gain_without_index(
 
 
 @pytest.mark.timeout(30)
-async def test_mq_backlog(
-    broker: SubscriptionBroker, filled_item_ref, mod_item_model, admin_ctx
-):
+async def test_mq_backlog(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     # 测试mq消息堆积的情况
     backend = broker._backend
     mq = broker._hub.mq
@@ -1191,7 +1209,7 @@ async def test_range_query_hidden_rows_are_not_pushed(
     assert sub_id and len(visible) == 22
     assert await broker.get_updates(timeout=0.5) == {}
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
-    assert idx_sub.point_value is None and len(idx_sub.row_subs) == 25
+    assert not idx_sub.enter_only and len(idx_sub.row_subs) == 25
 
     async with backend.session("pytest", 1) as session:
         repo = session.using(comp)
