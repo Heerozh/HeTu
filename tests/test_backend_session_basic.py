@@ -487,6 +487,25 @@ async def test_get_by_id_negative_cache(item_ref, mod_auto_backend):
             assert m_get.call_count == 2
 
 
+async def test_get_by_id_coerces_id_to_int(item_ref, mod_auto_backend):
+    """get_by_id 同 get(id=)，先把 id 转成 int：传 5.0 读到 id=5 的行。原来 Redis 拿 "5.0" 拼
+    行 key 读空，还按 5.0 登记读空记录（和 5 相等），之后 get(id=5) 也读成 None；SQLite 直接报错"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        row = comp.new_row(id_=5)
+        row.name, row.time = "five", 5
+        await s.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        repo = s.using(comp)
+        got = await repo.get_by_id(5.0)
+        assert got is not None and int(got.id) == 5
+        assert (await repo.get(id=5)) is not None
+
+
 async def test_get_by_id_repeatable_absent(item_ref, mod_auto_backend):
     """get(id=) 读空、别的事务随后插入这个 id：同一事务里再 get_by_id 仍返回 None，不会一边
     登记着"不存在"、一边把读到的行放进缓存"""

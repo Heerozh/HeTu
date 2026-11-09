@@ -257,7 +257,7 @@ class SessionRepository:
         row: np.record or None
             读空（含本事务删掉的行）返回 None，否则返回 np.record (c-struct) 格式的行。
         """
-        return await self._get_by_id(cast(int, row_id))
+        return await self._get_by_id(int(row_id))
 
     def _cached_by_id(self, row_id: int) -> tuple[bool, np.record | None]:
         """
