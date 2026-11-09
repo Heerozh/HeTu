@@ -412,8 +412,9 @@ keep these in mind when migrating and maintaining:
   from a backup keeps data and counters consistent, so no calibration is needed;
   but numbering goes back to where the backup was, and numbers handed out after
   the backup will be handed out again — consumers that keep their cursor
-  outside the database must check snowflake ids (see "Binlog-style syncing" in
-  [Advanced](advanced.md)).
+  outside the database must check snowflake ids with `servant_seq_read` and
+  `after_id` (see the consumers-outside-the-database subsection of
+  "Binlog-style syncing" in [Advanced](advanced.md)).
 - **Volatile tables** are cleared at every maintenance, and numbering starts
   over from 1.
 - **Don't use an `allkeys-*` eviction policy**: counters (and data rows) can be

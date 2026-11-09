@@ -10,10 +10,12 @@
 from .base import (
     BackendClient,
     BackendClientFactory,
+    CommitSeqDiverged,
     InconsistentRangeRead,
     MQClient,
     RaceCondition,
     RowFormat,
+    SeqReadResult,
     TableMaintenance,
     UniqueViolation,
 )
@@ -24,10 +26,12 @@ from .table import Table, TableReference
 __all__ = [
     "Backend",
     "BackendClient",
+    "CommitSeqDiverged",
     "InconsistentRangeRead",
     "MQClient",
     "RaceCondition",
     "RowFormat",
+    "SeqReadResult",
     "Session",
     "SessionRepository",
     "Table",

@@ -403,20 +403,112 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   订阅消费的，优先客户端消费，不占 master。
 - **`handle` 里的外部副作用**（发奖励、调别的服务）会随事务重试重复执行，要自己做成幂等。
 - **裁剪**：只删所有消费方都已经越过的头部。删中间的行会留下洞：服务端消费方能按上面的写法确认后跳过，客户端
-  消费方会停在洞前面。
+  消费方会停在洞前面。库外消费方游标所在的那一行也要留着，见下一小节的注意。
 - **易失表**：每次维护后号从 1 重来，消费方的游标要跟着清。
-- **第三方消费方**（游标存在库外，比如把日志同步到外部系统）：主库故障切换丢了最后几次提交、主库崩溃后用
-  AOF / RDB 重启、整库从备份恢复、易失表清空之后，号会被复用，同一个号可能对应另一行。所以除了号还要记下那一行
-  的雪花 id，每次读时把游标那一号一起读回来核对：
-
-  | 核对结果 | 说明 | 处理 |
-  |---|---|---|
-  | id 对不上 | 号被复用了 | 往回找到 id 还对得上的位置，从那里继续 |
-  | 读不到，组内最大号 ≥ 游标 | 那一行被删了（比如裁剪） | 照常往后读 |
-  | 读不到，组内最大号 < 游标 | 数据回退了 | 报警，按回退处理 |
-
-  服务端消费方的游标和日志在同一个事务里，会一起回退，不需要这样做。
+- **库外消费方**（游标存在库外，比如用 headless 读命令表、把日志同步到外部系统）：不在事务里，用
+  `servant_seq_read`，写法见下一小节。
 - **客户端消费**：订阅 `WatchRange("seq", cursor + 1, inf, limit, group: …)`，见[Unity 客户端 SDK](unity-client.md)。
+
+### 库外消费方：`servant_seq_read`
+
+游标存在库外的消费方（比如用 headless 读命令表、游标存在自己快照文件里的进程，见本页「非服务器进程读写表」）不在
+事务里，拿不到上面那种提交时的确认。`Table` 上有三个给它用的非事务读，都走副本、不读 master：
+
+- `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`：这一组最近发出的号，也就是发到了第几号，没发过号
+  是 0；批量版一次往返。它只用来发现有新号、监控积压、报警：它和读行不在同一个快照里，**不能**拿来把游标推过没见到
+  行的号。
+- `servant_seq_read(after, limit, group=..., after_id=...)`：读游标之后的行，返回 `(rows, blocked)`。一次读钉在一个
+  节点上：先读这一组的索引，再从同一个节点取行。号按提交顺序发，一个节点上读到了 n 号，比它小、却没读到的号就是
+  已经不在了，跳过；索引里有、取行时却读不到的行**不跳过**，停在它前面，它记为 `blocked`，下次再读。`after_id` 是
+  游标那一行的雪花 id，给了就核对：游标那一号换了一行（号被复用）、游标那一行没了而后面有号、组里有重号，都抛
+  `CommitSeqDiverged`。
+
+```python
+import time
+
+from hetu.data.backend import CommitSeqDiverged
+
+tbl = client.table(ChangeLog)
+cursors = load_snapshot()             # {owner: (seq, row_id)}，和消费方自己的状态存在同一个快照里
+stopped: set[int] = set()             # 序列对不上、已经停下的组
+behind_since: dict[int, float] = {}   # 计数器开始小于游标的时刻
+
+
+async def poll(owner: int) -> None:
+    seq, row_id = cursors.get(owner, (0, None))
+    rows, blocked = await tbl.servant_seq_read(
+        seq, limit=1000, group={"owner": owner}, after_id=row_id
+    )
+    for row in rows:
+        handle(row)  # 中间没出现的号都已确认不存在
+    if len(rows):
+        cursors[owner] = (int(rows[-1].seq), int(rows[-1].id))
+    watch_blocked(owner, blocked)  # 同一个 (号, id) 挡了很久才报警，见下文
+
+
+async def poll_all(owners: list[int]) -> None:
+    heads = await tbl.servant_seq_head_many([{"owner": o} for o in owners])
+    now = time.monotonic()
+    for owner, head in zip(owners, heads):
+        if owner in stopped:
+            continue
+        seq = cursors.get(owner, (0, None))[0]
+        if head < seq:  # 这个副本落后、在全量同步、换簇了，或者数据回退了
+            if now - behind_since.setdefault(owner, now) > 30:
+                await alarm_behind(owner, head, seq)  # 报警前先 client.check_schema()，见"换簇"
+            continue
+        behind_since.pop(owner, None)
+        if head == seq:
+            continue  # 没有新号
+        try:
+            await poll(owner)
+        except CommitSeqDiverged as exc:
+            stopped.add(owner)  # 只停这一组，别的组照常消费
+            await alarm_diverged(owner, exc)
+```
+
+**注意：裁剪只删号严格小于所有消费方落盘游标的行，删之前先核对。**
+
+- `servant_seq_read` 遇到"这一号没有行、后面有更大的号"，就认定这一号已经不在了，直接跳过，不报错。它分不清是处理
+  过了才删的，还是还没处理就被删了。
+- 消费方从快照文件恢复。如果裁剪按消费方运行时的进度来删，而快照比这个进度旧：崩溃重启后，快照到运行时进度之间
+  的命令已经被删了，会被当成缺口跳过，消费方的状态就悄悄对不上了。所以裁剪的依据必须是**已经落盘的**游标。
+- 裁剪方（服务端的 System 或运维脚本）读不到消费方本地的快照：消费方每次快照落盘成功之后，把快照里的
+  `(号, 行 id)` 写回库里的一张游标表（headless session 里 upsert，一次快照一次提交），裁剪方按这张表取最小值。
+- 只删号**严格小于**最小游标的行，留下每个消费方的游标那一行。它不会被正常删掉，所以它没了一定是异常，
+  `servant_seq_read` 会抛 `CommitSeqDiverged`。
+- 删之前先核对：最小游标那一号还是游标表里记的那一行（System 里用 `range(seq=(s, s), ...)`，headless 里用
+  `servant_range(..., row_format=RowFormat.ID_LIST)`），对不上就不删、报警。数据回退之后，复用了号的新行都不大于旧的
+  游标，不核对就删的话，这些从没被消费过的行会被裁掉，回退也发现不了。
+- 给了 `after_id` 时不能"消费完就删"，至少留下最后处理的那一行；要消费完就删，就不能传 `after_id`，也就发现不了
+  号被复用。游戏逻辑里不要删还没消费的命令，要撤销就另写一条"撤销"命令。
+
+| 情况 | 说明 | 处理 |
+|---|---|---|
+| 游标那一号还是那一行 | 正常 | 接着往后读（`servant_seq_read` 自动处理） |
+| 游标那一号换了一行、组里有重号、游标那一行没了而后面有号 | 序列对不上了：数据回退（故障切换丢了最后几次提交、AOF / RDB 重启、整库恢复、易失表清空），或者计数器落后于数据（手工删了计数器、内存淘汰、只导入了行） | 抛 `CommitSeqDiverged`，`reason` 说明是哪一种：停下这一组，报警 |
+| 什么都没读到 | 没有新命令；或者这个副本落后；或者数据回退到了游标之前、号还没被复用 | 等。计数器持续小于游标才报警（见下） |
+
+- **计数器持续小于游标**：一个时间窗（比如 30 秒，要大于副本延迟）里每次读到的计数器都小于游标才报警。报警要写明
+  可能的原因：副本严重落后或在全量同步、换簇了、数据回退了。
+- **被挡住**：`blocked` 不为 None 只说明这一轮被它挡住了，取行落到落后的副本、读完索引后行被删都会这样，下一轮
+  通常就好了。同一个 `(号, id)` 挡了很久才报警：`servant_get` 一直读不到这一行，是索引残留（比如维护脚本只删了行），
+  停服跑 `hetu upgrade` 重建索引；读得到，多半是读写分离代理把请求发到了断了复制的只读节点，要修副本，或者让代理
+  摘掉它。
+- **追上没有**：看 `rows` 为空且 `blocked` 为 None，不看游标是否等于计数器。最新的几行在消费之前就被删了的话，游标
+  会停在最后见到的那一行，直到更新的一行出现；这期间计数器减游标大于 0，但没有可消费的东西。
+- **快照**：游标（号和雪花 id）要和消费方自己的状态存在同一个快照里。崩溃后从快照恢复，会重放快照之后的命令：
+  `handle` 要么幂等，要么状态和游标一起恢复。
+- **换簇**：计数器和数据跟着换簇搬走，没重连的消费方会读到计数器全是 0、什么都读不到。报警前先
+  `client.check_schema()`，遇到 `ClusterChanged` 就重连，游标照常用。
+- **组很多时**：每组每轮算一次 key（约 3µs），10 万组每轮约 0.3 秒 CPU，副本上每轮也要查 10 万个 key。组多就
+  降低轮询频率，或者只轮询活跃的组；组的清单要消费方自己维护（比如从游戏逻辑的房间表来）。`limit` 越大，一次读
+  占住副本的时间越长，一般几百到几千行。
+- **计数器被写坏**：`servant_seq_head_many` 整批抛 RuntimeError、带上 key，`hetu upgrade` 重建索引时会校准回来。
+  Redis 上它被写成了别的类型时读成 0（这时提交本身也会报 WRONGTYPE）。
+- **提交中途出错留下的行**：Redis 上提交脚本写到一半出运行时错误，可能留下"有行、没有索引项"的行，按缺口跳过。之后
+  重建索引会把它放回原来的号上，已经越过它的消费方不会再处理它。
+- **服务端消费方**的游标和日志在同一个事务里，会一起回退，不用这样核对。
 
 ## 用于范围查询的 NumPy 模式
 
@@ -705,7 +797,7 @@ client = await hetu.headless.connect(
 
 ### 读：`Table.servant_*`
 
-`client.table(comp)` 返回的就是引擎的 `Table`，非事务读沿用它的 `servant_get` / `servant_range`，外加批量的 `servant_get_many(ids)`。轮询命令队列的写法：
+`client.table(comp)` 返回的就是引擎的 `Table`，非事务读沿用它的 `servant_get` / `servant_range`，外加批量的 `servant_get_many(ids)`，以及给提交序号列用的 `servant_seq_head` / `servant_seq_head_many` / `servant_seq_read`。轮询命令队列的写法：
 
 ```python
 cmd_tbl = client.table(BattleCommand)
@@ -716,6 +808,8 @@ for row in rows:
 ```
 
 注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+
+要连号、不漏的命令表，给它加提交序号列（`commit_seq`），用 `servant_seq_read` 消费，见本页「binlog 式同步」的库外消费方一节。不要拿 `servant_range` 结果里的缺号当缺口跳过：它先查索引、再逐行取，取行落到落后的副本时读不到的行会被静默跳过。
 
 ### 写：`client.session(*comps)`
 

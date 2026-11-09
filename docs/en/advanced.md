@@ -647,28 +647,168 @@ async def consume(ctx: hetu.SystemContext, owner: int):
   services) run again when the transaction retries; make them idempotent.
 - **Trimming**: only delete the head that every consumer has passed. Deleting a
   row in the middle leaves a hole: server-side consumers confirm and skip it as
-  above, client-side consumers stop in front of it.
+  above, client-side consumers stop in front of it. A consumer outside the
+  database also needs its cursor row kept; see the note in the next subsection.
 - **Volatile tables**: numbering starts over from 1 after every maintenance;
   reset consumer cursors along with it.
-- **Third-party consumers** (cursors kept outside the database, e.g. syncing the
-  log to an external system): after a failover that lost the last commits, a
-  primary restarted from AOF / RDB after a crash, a restore of the whole
-  database from a backup, or clearing a volatile table, numbers are reused and
-  one number may now belong to another row. So besides the number, remember
-  that row's snowflake id, and on every read, read back the row at the cursor
-  too and check it:
-
-  | Result | Meaning | What to do |
-  |---|---|---|
-  | The id differs | The number was reused | Walk back to the position whose id still matches and continue from there |
-  | No row, and the group's largest number ≥ the cursor | The row was deleted (e.g. trimmed) | Read on as usual |
-  | No row, and the group's largest number < the cursor | The data rolled back | Raise an alert and handle it as a rollback |
-
-  Server-side consumers don't need this: their cursor and the log roll back
-  together, in the same transaction.
+- **Consumers outside the database** (cursors kept outside the database, e.g.
+  reading a command table through headless, or syncing the log to an external
+  system): they are not in a transaction; use `servant_seq_read`, see the next
+  subsection.
 - **Client-side consumers**: subscribe with
   `WatchRange("seq", cursor + 1, inf, limit, group: …)`, see
   [Unity Client SDK](unity-client.md).
+
+### Consumers outside the database: `servant_seq_read`
+
+A consumer whose cursor lives outside the database (e.g. a process that reads a
+command table through headless and keeps its cursor in its own snapshot file,
+see "Reading and writing tables from a non-server process" on this page) is not
+in a transaction and can't get the commit-time confirmation used above. `Table`
+has three non-transactional reads for it; they all go to replicas and never
+read the master:
+
+- `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`: the latest
+  number the group has issued, i.e. how far numbering has got; 0 if none yet.
+  The batch form takes one round trip. Use it only to notice new numbers,
+  monitor the backlog and raise alerts: it is not in the same snapshot as the
+  row reads, so it **must not** be used to move the cursor past numbers whose
+  rows you haven't seen.
+- `servant_seq_read(after, limit, group=..., after_id=...)`: reads the rows
+  after the cursor and returns `(rows, blocked)`. One read is pinned to one
+  node: it reads the group's index, then fetches the rows from the same node.
+  Numbers are handed out in commit order, so once a node shows number n, any
+  smaller number it doesn't show is gone, and is skipped; a row that is in the
+  index but can't be fetched is **not** skipped: the read stops in front of it,
+  reports it as `blocked`, and the next read tries again. `after_id` is the
+  snowflake id of the row at the cursor; when given, the read checks the
+  sequence: if the cursor's number now holds another row (the number was
+  reused), the cursor's row is gone while larger numbers exist, or the group
+  has duplicate numbers, it raises `CommitSeqDiverged`.
+
+```python
+import time
+
+from hetu.data.backend import CommitSeqDiverged
+
+tbl = client.table(ChangeLog)
+cursors = load_snapshot()             # {owner: (seq, row_id)}, in the same snapshot as the consumer's state
+stopped: set[int] = set()             # groups stopped because the sequence no longer matches
+behind_since: dict[int, float] = {}   # when the counter first dropped below the cursor
+
+
+async def poll(owner: int) -> None:
+    seq, row_id = cursors.get(owner, (0, None))
+    rows, blocked = await tbl.servant_seq_read(
+        seq, limit=1000, group={"owner": owner}, after_id=row_id
+    )
+    for row in rows:
+        handle(row)  # numbers that didn't show up in between are confirmed gone
+    if len(rows):
+        cursors[owner] = (int(rows[-1].seq), int(rows[-1].id))
+    watch_blocked(owner, blocked)  # alert only if the same (seq, id) blocks for long, see below
+
+
+async def poll_all(owners: list[int]) -> None:
+    heads = await tbl.servant_seq_head_many([{"owner": o} for o in owners])
+    now = time.monotonic()
+    for owner, head in zip(owners, heads):
+        if owner in stopped:
+            continue
+        seq = cursors.get(owner, (0, None))[0]
+        if head < seq:  # this replica lags or is resyncing, the cluster changed, or the data rolled back
+            if now - behind_since.setdefault(owner, now) > 30:
+                await alarm_behind(owner, head, seq)  # call client.check_schema() first, see "Cluster changes"
+            continue
+        behind_since.pop(owner, None)
+        if head == seq:
+            continue  # nothing new
+        try:
+            await poll(owner)
+        except CommitSeqDiverged as exc:
+            stopped.add(owner)  # stop only this group; the others go on
+            await alarm_diverged(owner, exc)
+```
+
+**Note: trim only rows numbered strictly below every consumer's persisted
+cursor, and check before deleting.**
+
+- When `servant_seq_read` sees a number with no row while a larger number
+  exists, it takes that number as gone and skips it, without an error. There is
+  no telling whether the row was deleted after being handled or before.
+- Consumers restore from snapshot files. If trimming follows a consumer's
+  in-memory progress and the snapshot is older than that progress, then after a
+  crash and restart the commands between the snapshot and that progress are
+  already deleted: they are skipped as gaps, and the consumer's state silently
+  diverges. So trimming must go by cursors that have **already been persisted**.
+- The trimmer (a server-side System or an ops script) can't read the consumers'
+  local snapshots: after each snapshot is persisted, the consumer writes the
+  snapshot's `(seq, row id)` back to a cursor table in the database (an upsert
+  in a headless session, one commit per snapshot), and the trimmer takes the
+  minimum from that table.
+- Delete only rows numbered **strictly below** the minimum cursor, keeping each
+  consumer's cursor row. It is never deleted in normal operation, so if it is
+  gone something is wrong, and `servant_seq_read` raises `CommitSeqDiverged`.
+- Check before deleting: the minimum cursor's number must still hold the row
+  recorded in the cursor table (in a System, `range(seq=(s, s), ...)`; through
+  headless, `servant_range(..., row_format=RowFormat.ID_LIST)`). If it doesn't,
+  don't delete; raise an alert. After a rollback, the new rows that reuse
+  numbers all sit at or below the old cursor; trimming without the check would
+  delete these never-consumed rows, and the rollback would go unnoticed.
+- With `after_id`, don't delete each row as soon as it is consumed; keep at
+  least the last handled row. To consume-and-delete, don't pass `after_id`,
+  which means number reuse can't be detected. Game logic must not delete
+  commands that haven't been consumed; to cancel one, write a separate "cancel"
+  command.
+
+| Case | Meaning | What to do |
+|---|---|---|
+| The cursor's number still holds the same row | Normal | Read on (`servant_seq_read` handles it) |
+| The cursor's number holds another row, the group has duplicate numbers, or the cursor's row is gone while larger numbers exist | The sequence no longer matches: the data rolled back (a failover that lost the last commits, an AOF / RDB restart, a full restore, clearing a volatile table), or the counter fell behind the data (counter deleted by hand, evicted, rows imported alone) | `CommitSeqDiverged` is raised, its `reason` says which: stop this group and raise an alert |
+| Nothing was read | No new commands; or this replica lags; or the data rolled back to before the cursor and the numbers haven't been reused yet | Wait. Alert only if the counter stays below the cursor (see below) |
+
+- **Counter staying below the cursor**: alert only when every counter read
+  within a window (e.g. 30 seconds, longer than replication lag) is below the
+  cursor. The alert should name the possible causes: a replica far behind or
+  in a full resync, a cluster change, or a rollback.
+- **Blocked**: a non-None `blocked` only means this round was blocked by that
+  row: a fetch that hit a lagging replica, or a row deleted after the index was
+  read, both do it, and the next round usually goes through. Alert only when
+  the same `(seq, id)` blocks for a long time: if `servant_get` never finds the
+  row, an index entry was left behind (e.g. a maintenance script deleted only
+  the row), so stop the servers and run `hetu upgrade` to rebuild indexes; if
+  the row can be read, a read-write splitting proxy is most likely sending
+  reads to a read-only node whose replication is broken: fix the replica, or
+  have the proxy take it out.
+- **Caught up?** Look at whether `rows` is empty and `blocked` is None, not at
+  whether the cursor equals the counter. If the newest rows were deleted before
+  being consumed, the cursor stays at the last row seen until a newer row
+  appears; meanwhile the counter minus the cursor is positive, but there is
+  nothing to consume.
+- **Snapshots**: store the cursor (number and snowflake id) in the same snapshot
+  as the consumer's own state. Restoring from a snapshot after a crash replays
+  the commands after it: `handle` must be idempotent, or the state and the
+  cursor must be restored together.
+- **Cluster changes**: counters and data move with a cluster change; a consumer
+  that hasn't reconnected reads all counters as 0 and finds nothing. Before
+  alerting, call `client.check_schema()`; on `ClusterChanged`, reconnect and keep
+  the cursors as they are.
+- **Many groups**: each group costs one key computation per round (about 3µs):
+  100k groups take about 0.3 s of CPU per round, and the replica looks up 100k
+  keys per round. With many groups, poll less often or only poll active
+  groups; the consumer keeps the group list itself (e.g. from the game's room
+  table). The larger `limit` is, the longer one read holds the replica;
+  a few hundred to a few thousand rows is typical.
+- **Corrupted counters**: `servant_seq_head_many` raises RuntimeError for the
+  whole batch, naming the key; `hetu upgrade` recalibrates it when rebuilding
+  indexes. On Redis, a counter key overwritten with another type reads as 0
+  (commits then fail with WRONGTYPE as well).
+- **Rows left by a failed commit**: on Redis, a runtime error halfway through the
+  commit script can leave a row without its index entry; it is skipped as a gap.
+  A later index rebuild puts it back at its number, and consumers already past
+  it won't handle it.
+- **Server-side consumers** keep their cursor and the log in the same
+  transaction, so they roll back together and don't need these checks.
 
 ## NumPy patterns for range queries
 
@@ -1081,7 +1221,7 @@ When the server creates a table it stores the component's schema and `cluster_id
 
 ### Reading: `Table.servant_*`
 
-`client.table(comp)` returns the engine's own `Table`. Non-transactional reads use its existing `servant_get` / `servant_range`, plus the batch `servant_get_many(ids)`. Polling a command queue looks like this:
+`client.table(comp)` returns the engine's own `Table`. Non-transactional reads use its existing `servant_get` / `servant_range`, plus the batch `servant_get_many(ids)`, and `servant_seq_head` / `servant_seq_head_many` / `servant_seq_read` for commit sequence columns. Polling a command queue looks like this:
 
 ```python
 cmd_tbl = client.table(BattleCommand)
@@ -1092,6 +1232,8 @@ for row in rows:
 ```
 
 Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend. `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
+
+For a command table that must be consumed in order without gaps, give it a commit sequence column (`commit_seq`) and consume it with `servant_seq_read`; see the consumers-outside-the-database subsection of "Binlog-style syncing" on this page. Don't treat gaps in `servant_range` results as real gaps: it reads the index first and then fetches the rows one by one, and rows that a lagging replica can't return are silently skipped.
 
 ### Writing: `client.session(*comps)`
 

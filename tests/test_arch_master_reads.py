@@ -29,10 +29,14 @@ READ_METHODS = (
     "range",
     "range_read_",
     "range_index_",
+    "seq_head",
+    "seq_head_many",
+    "seq_read",
 )
-# `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……
+# `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……；后面跟 `,` 或 `)` 的
+# 也算：`Table` 的属性写成 `bind_first_arg_with_typehint(self.backend.master.get, self)`
 PATTERN = re.compile(
-    r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*\(",
+    r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*[(,)]",
 )
 
 # {(相对路径, 方法): 理由}。key 不含行号，挪动代码不会误报
@@ -75,6 +79,22 @@ def test_no_unlisted_master_reads():
     assert not unlisted, "发现未登记的 master 读（详见本文件顶部说明）：\n" + "\n".join(
         f"  {rel}:{lineno}  {text}" for rel, meth, lineno, text in unlisted
     )
+
+
+def test_pattern_catches_table_bindings():
+    """调用形式和 `Table` 属性里的绑定写法都认得出，写方法、别的属性不误报"""
+    hits = [
+        "rows = await self._master.range(ref, 'owner', 1)",
+        "return bind_first_arg_with_typehint(self.backend.master.seq_read, self)",
+        "fn = backend.master.get)",
+    ]
+    misses = [
+        "return bind_first_arg_with_typehint(self.backend.master.direct_set, self)",
+        "self.master.get_lock()",
+        "backend.servant.seq_read(ref, 0)",
+    ]
+    assert all(PATTERN.search(line) for line in hits)
+    assert not any(PATTERN.search(line) for line in misses)
 
 
 def test_allowlist_has_no_stale_entries():

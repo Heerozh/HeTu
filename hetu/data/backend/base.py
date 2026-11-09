@@ -37,6 +37,7 @@ import importlib
 import logging
 import math
 import random
+import re
 import struct
 import time
 import warnings
@@ -48,11 +49,20 @@ from collections.abc import (
     Iterable,
     Iterator,
     Mapping,
+    Sequence,
 )
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    NamedTuple,
+    final,
+    overload,
+)
 
 import numpy as np
 
@@ -113,6 +123,50 @@ class InconsistentRangeRead(RaceCondition):
         )
 
 
+class CommitSeqDiverged(Exception):
+    """
+    The commit_seq sequence no longer matches what the consumer recorded.
+
+    提交序号列的序列和库外消费方记下的对不上了，由 `BackendClient.seq_read` 抛出。重试不会好，
+    所以不继承 RaceCondition：这一组要停下来、报警，由人来处理，别的组照常消费。
+
+    `reason` 是下面三种之一：
+
+    - ``"reused"``：游标那一号现在是另一行，号被复用了。可能是数据回退（故障切换丢了最后几次提交、
+      AOF / RDB 重启、整库从备份恢复、易失表清空），也可能是计数器落后于数据之后又发了一遍（手工删了
+      计数器、内存淘汰、只导入了行、改了组件名或字段名之后重新校准）；
+    - ``"anchor_missing"``：游标那一行没了，后面却有号。数据回退了，或者游标那一行被误删了（按文档的
+      裁剪规则，游标那一行不会被正常删掉）；
+    - ``"duplicate"``：组里有重号，计数器落后于数据时会发出重号。
+
+    属性：`comp_name`、`group`（调用方给的原值）、`seq`（出问题的那一号）、`expected_id`、
+    `found_id`（`anchor_missing` 时为 None）、`reason`。
+    """
+
+    def __init__(
+        self,
+        comp_name: str,
+        group: Mapping[str, Any] | None,
+        seq: int,
+        expected_id: int,
+        found_id: int | None,
+        reason: str,
+    ):
+        super().__init__(comp_name, group, seq, expected_id, found_id, reason)
+        self.comp_name = comp_name
+        self.group = group
+        self.seq = seq
+        self.expected_id = expected_id
+        self.found_id = found_id
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return (
+            f"COMMIT_SEQ: {self.reason} {self.comp_name} group={self.group!r} "
+            f"seq={self.seq} expected_id={self.expected_id} found_id={self.found_id}"
+        )
+
+
 class UniqueViolation(IndexError):
     """
     唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。
@@ -139,6 +193,22 @@ class RowFormat(Enum):
     STRUCT = 1  # 默认值：按Component定义严格转换的np.record（c-struct like）类型
     TYPED_DICT = 2  # 先转换成STRUCT，再转换成dict的类型。
     ID_LIST = 3  # 只返回list of row id，只能用于range查询
+
+
+class SeqReadResult[RowsT](NamedTuple):
+    """
+    Result of `BackendClient.seq_read`: the rows read and what blocked the read.
+
+    提交序号列增量读（`seq_read`）的结果，可以直接解包：``rows, blocked = ...``。
+
+    - `rows`：号大于 `after` 的行，按号升序，格式按 `row_format`；
+    - `blocked`：``(号, 行 id)`` 或 None。索引里有、这次却没取到行的第一个 member，它挡住了后面的
+      行；None 表示没被挡住。取行落到落后的副本、读完索引之后行被删了都会挡住，下一次通常就好了；
+      同一个 ``(号, 行 id)`` 一直挡着，多半是索引残留（索引里有、行没有）。
+    """
+
+    rows: RowsT
+    blocked: tuple[int, int] | None
 
 
 def to_sortable_bytes(value: np.generic) -> bytes:
@@ -293,6 +363,22 @@ REBUILD_PENDING_VERSION = "rebuild-pending"
 # 提交序号列（commit_seq）的号的上限（不含）：提交脚本里的数是 Lua 的 double，再往上不精确。
 # 提交时到了上限返回 SEQ 失败，重建时库里已有的号到了上限报错
 COMMIT_SEQ_LIMIT = 1 << 53
+
+# Redis 认的整数串（string2ll）：可选负号加不以 0 开头的数字，或者就是 "0"
+_REDIS_INT = re.compile(rb"0|-?[1-9][0-9]*")
+
+
+def parse_redis_int_(raw: bytes) -> int | None:
+    """
+    内部方法：按 Redis string2ll 的规则（INCRBY 认的整数）解析一个字符串值，不是整数返回 None。
+    可选的负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里；Python 的 int() 会放过
+    " 5"、"+5"、"05"、"1_0"，两个后端就对不上了
+    """
+    if not _REDIS_INT.fullmatch(raw):
+        return None
+    value = int(raw)
+    return value if -(1 << 63) <= value < (1 << 63) else None
+
 
 # 索引的存储格式版本，并进表的 schema 版本号（见 `schema_version_`）。member 的编码一变就加一：
 # 旧库每张表的版本号都对不上，服务器拒绝启动，`hetu upgrade` 按新格式重建索引。
@@ -1156,6 +1242,185 @@ class BackendClient:
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
+        """
+        raise NotImplementedError
+
+    async def seq_head(
+        self, table_ref: TableReference, group: Mapping[str, Any] | None = None
+    ) -> int:
+        """
+        Read the latest number issued by one commit_seq group.
+
+        读提交序号列（`commit_seq`）一个组最近发出的号，也就是这一组发到了第几号。还没发过号是 0，
+        易失表维护清空之后也是 0。非事务读，走副本，可能落后。
+
+        计数器和索引是两个 key，读计数器不和任何一次读在同一个快照里：只能用来发现有新号、监控
+        积压、报警，**不能**拿来把游标推过没见到行的号。库外消费方的写法见 `seq_read`。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`：带 groupby 的必须正好给出全部分组列，
+            不带 groupby 的不给。
+
+        Returns
+        -------
+        head: int
+            这一组最近发出的号，没发过号是 0。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者分组值不对。
+        RuntimeError
+            计数器的值被写坏了（不是 Redis 认的非负整数）。`hetu upgrade` 重建索引时会把它校准回来。
+
+        Notes
+        -----
+        Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
+        """
+        return (await self.seq_head_many(table_ref, [group]))[0]
+
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int]:
+        """
+        Read the latest numbers issued by many commit_seq groups in one round trip.
+
+        批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
+        一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。有一个计数器被写坏，
+        整批抛 RuntimeError。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        groups: Sequence[Mapping[str, Any] | None]
+            每一项是一个组的分组值，规则同 `seq_head` 的 `group`。
+
+        Returns
+        -------
+        heads: list[int]
+            每个组最近发出的号，没发过号是 0，顺序同 `groups`。
+
+        Raises
+        ------
+        ValueError
+            组件没有提交序号列，或者某一项分组值不对（在访问数据库之前检查）。
+        RuntimeError
+            有计数器的值被写坏了，报错里带着它的 key。
+        """
+        raise NotImplementedError
+
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> SeqReadResult[np.recarray]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> SeqReadResult[list[dict[str, str]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> SeqReadResult[list[dict[str, Any]]]: ...
+    @overload
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format: RowFormat = ...,
+    ) -> SeqReadResult[np.recarray | list[dict[str, str]] | list[dict[str, Any]]]: ...
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format=RowFormat.STRUCT,
+    ) -> SeqReadResult[Any]:
+        """
+        Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
+
+        给库外消费方用的提交序号列增量读：读游标 `after` 之后的行，顺带确认缺口。非事务读，走副本，
+        不需要 master。
+
+        一次读钉在一个节点上：先一条 ZRANGE 读这一组在 `after` 之后的 member（这个节点上的原子快照），
+        再从同一个节点取行。号按提交顺序发，一个节点上能读到 n 号，比它小的号要么也读得到，要么那一行
+        已经不在了，所以：
+
+        - 返回号大于 `after` 的行，按号升序。设 n 是最后一行的号（没有返回行时 n = after），
+          (after, n] 里没出现在结果里的号都已确认不存在，游标推进到 n；
+        - 取行时读不到的行（取行落到落后的副本、读完索引之后被删了、索引残留）**不跳过**：停在它
+          前面，它记为 `blocked`，下次再读；
+        - 计数器（`seq_head`）不和这次读在同一个快照里，不能用来把游标推过没见到行的号。
+
+        注意：没有行的号一律当缺口跳过，分不清处理过了才删的、还是还没处理就被删了。裁剪只删号严格
+        小于所有消费方**已经落盘的**游标的行，删之前先核对，见文档"binlog 式同步"一节。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。组件要声明了 `commit_seq`。
+        after: int
+            游标，也就是最后处理过的那一号；从头读给 0。0 <= after < 2^53。
+        limit: int
+            最多返回的行数，正整数。一次读太多会长时间占住副本，一般几百到几千行。
+        group: Mapping[str, Any] | None
+            分组值 {分组列: 值}，规则同 `range` 的 `group`。
+        after_id: int | None
+            游标那一号的行的雪花 id（锚点）。给了就核对序列：游标那一号换了一行、游标那一行没了而
+            后面有号、组里有重号，都抛 `CommitSeqDiverged`。给的时候 `after` 必须 >= 1。不给就不核对，
+            也就发现不了号被复用。
+        row_format
+            返回数据解码格式，同 `range`，但不支持 `RowFormat.ID_LIST`。
+
+        Returns
+        -------
+        result: SeqReadResult
+            ``(rows, blocked)``。`rows` 是号大于 `after` 的行；`blocked` 是挡住后面的行的
+            ``(号, 行 id)``，没被挡住是 None。`rows` 为空且 `blocked` 为 None：读的那个节点上
+            `after` 之后没有任何行（没有新号、最新的行被删了，或者这个节点落后）。
+
+        Raises
+        ------
+        CommitSeqDiverged
+            给了 `after_id`，而序列和它对不上；或者组里有重号。
+        ValueError
+            组件没有提交序号列、分组值不对、参数取值不对，或者 `row_format` 是 `ID_LIST`。
+        TypeError
+            整数参数的类型不对（收 int 和 `np.integer`，不收 bool）。
         """
         raise NotImplementedError
 

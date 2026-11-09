@@ -12,9 +12,19 @@ SQLite 用 sqlite3 与它的 Python 版（`sqlite/commit.py`）。
 """
 
 import itertools
+import math
 import random
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload, override
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Never,
+    Protocol,
+    cast,
+    overload,
+    override,
+)
 
 # from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
 import msgpack
@@ -24,9 +34,11 @@ from ...i18n import _
 from .base import (
     COMMIT_SEQ_LIMIT,
     BackendClient,
+    CommitSeqDiverged,
     InconsistentRangeRead,
     RaceCondition,
     RowFormat,
+    SeqReadResult,
     UniqueViolation,
     detach_rows_,
     exact_number_,
@@ -39,6 +51,7 @@ from .base import (
     member_row_id_,
     member_value_,
     normalize_int_bounds_,
+    parse_redis_int_,
     peel_bound_,
     resolve_group_,
     row_group_prefix_,
@@ -145,6 +158,29 @@ class CommitSeqScan:
             (RedisModelClient.seq_counter_key_(cluster_prefix, self.comp_cls, p), seq)
             for p, seq in self.max_by_prefix.items()
         ]
+
+
+def seq_int_arg_(name: str, value: Any) -> int:
+    """`seq_read` 的整数参数：收 int 和 np.integer（比如直接传 rows[-1].seq），不收 bool"""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(
+            _("seq_read 的 {name} 必须是整数，收到：{value}").format(
+                name=name, value=repr(value)
+            )
+        )
+    return int(value)
+
+
+class SeqReader(Protocol):
+    """`seq_read` 用的两个读原语，由 `RedisModelClient.pinned_reader_` 给出，都发给同一个节点"""
+
+    def zrange_bylex_(
+        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
+    ) -> Awaitable[list[bytes]]: ...
+
+    async def hgetall_many_(
+        self, table_ref: TableReference, row_ids: Sequence[int]
+    ) -> list[dict[bytes, bytes]]: ...
 
 
 class RedisModelClient(BackendClient):
@@ -565,6 +601,13 @@ class RedisModelClient(BackendClient):
         """内部方法：按 row_ids 的顺序批量 HGETALL 这张表的行，读不到的为空 dict。子类实现"""
         raise NotImplementedError
 
+    async def kv_get_many_(self, keys: Sequence[str]) -> list[bytes | None]:
+        """
+        内部方法：按 keys 的顺序批量读字符串 key（提交序号列的计数器），不存在的为 None，同 MGET。
+        子类实现
+        """
+        raise NotImplementedError
+
     def zrange_bylex_(
         self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
     ) -> Awaitable[list[bytes]]:
@@ -814,6 +857,181 @@ class RedisModelClient(BackendClient):
             value = member_value_(member)[skip:]
             result.append((from_sortable_bytes(dtype, value), member_row_id_(member)))
         return result
+
+    # ============ 提交序号列的库外消费方：读计数器、增量读 ============
+
+    @staticmethod
+    def commit_seq_field_(comp_cls: type[BaseComponent]) -> str:
+        """内部方法：组件的提交序号列字段名，没有就抛 ValueError"""
+        field = comp_cls.commit_seq_
+        if field is None:
+            raise ValueError(
+                _("组件 `{comp}` 没有提交序号列（commit_seq）").format(
+                    comp=comp_cls.name_
+                )
+            )
+        return field
+
+    @override
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int]:
+        """批量读提交序号列的计数器，见基类"""
+        comp_cls = table_ref.comp_cls
+        field = self.commit_seq_field_(comp_cls)
+        prefix = self.cluster_prefix(table_ref)
+        # 先把分组值都校验完、key 都算好，再访问数据库
+        keys = [
+            self.seq_counter_key_(
+                prefix, comp_cls, self.group_prefix_of_(table_ref, field, group)
+            )
+            for group in groups
+        ]
+        if not keys:
+            return []
+        heads: list[int] = []
+        for key, raw in zip(keys, await self.kv_get_many_(keys), strict=True):
+            if raw is None:
+                heads.append(0)
+                continue
+            value = parse_redis_int_(raw)
+            if value is None or value < 0:
+                raise RuntimeError(
+                    _(
+                        "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。"
+                        "跑 hetu upgrade 重建索引时会把它校准回来"
+                    ).format(key=key, raw=repr(raw))
+                )
+            heads.append(value)
+        return heads
+
+    async def pinned_reader_(self, key: str) -> SeqReader:
+        """
+        内部方法：`seq_read` 的 ZRANGE 和取行要发给同一个节点（设计稿 §3.2）。key 是要读的组
+        zset，按它的 slot 选节点。默认就是自己：一个连接只连一个节点（显式配置的 servants、没有
+        副本、SQLite）。原生 cluster 由子类覆盖
+        """
+        return self
+
+    @override
+    async def seq_read(
+        self,
+        table_ref: TableReference,
+        after: int,
+        limit: int = 100,
+        *,
+        group: Mapping[str, Any] | None = None,
+        after_id: int | None = None,
+        row_format=RowFormat.STRUCT,
+    ) -> SeqReadResult[Any]:
+        """提交序号列的增量读，见基类"""
+        comp_cls = table_ref.comp_cls
+        field = self.commit_seq_field_(comp_cls)
+        after = seq_int_arg_("after", after)
+        if not 0 <= after < COMMIT_SEQ_LIMIT:
+            raise ValueError(
+                _("seq_read 的 after 要在 [0, 2^53) 里，收到：{after}").format(
+                    after=after
+                )
+            )
+        limit = seq_int_arg_("limit", limit)
+        if limit < 1:
+            raise ValueError(
+                _("seq_read 的 limit 必须是正整数，收到：{limit}").format(limit=limit)
+            )
+        if after_id is not None:
+            after_id = seq_int_arg_("after_id", after_id)
+            if not -(1 << 63) <= after_id < (1 << 63):
+                raise ValueError(
+                    _("seq_read 的 after_id 不在 int64 范围里：{id}").format(
+                        id=after_id
+                    )
+                )
+            if after < 1:
+                raise ValueError(_("给了 after_id 时 after 必须 >= 1：0 号没有行"))
+        if not isinstance(row_format, RowFormat) or row_format is RowFormat.ID_LIST:
+            raise ValueError(
+                _("seq_read 不支持 row_format={fmt}").format(fmt=repr(row_format))
+            )
+
+        # 1. 一条 ZRANGE：读的那个节点上的原子快照。给了锚点就从 after 读起，多读一个
+        anchored = after_id is not None
+        idx_key, b_left, b_right, _empty = self.zrange_args_(
+            table_ref, field, after if anchored else after + 1, math.inf, False, group
+        )
+        reader = await self.pinned_reader_(idx_key)
+        members = await reader.zrange_bylex_(
+            idx_key, b_left, b_right, False, limit + 1 if anchored else limit
+        )
+        # 值段是组前缀 P 加号的 8 字节编码；同号的 member 按 id 排，号是不降的
+        dtype = comp_cls.dtype_map_[field]
+        entries = [
+            (
+                int(from_sortable_bytes(dtype, member_value_(member)[-8:])),
+                member_row_id_(member),
+                member,
+            )
+            for member in members
+        ]
+
+        # 2. 核对序列，只看 member
+        name = comp_cls.name_
+        start = 0
+        if anchored and entries:
+            assert after_id is not None
+            at_after = list(itertools.takewhile(lambda e: e[0] == after, entries))
+            if not at_after:
+                # 后面有号、游标那一行却没了：按裁剪规则它不会被正常删掉
+                raise CommitSeqDiverged(
+                    name, group, after, after_id, None, "anchor_missing"
+                )
+            others = [row_id for _seq, row_id, _m in at_after if row_id != after_id]
+            if others:
+                # 锚点还在、另有同号的行是重号；锚点不在了、这一号是别的行是号被复用
+                reason = "duplicate" if len(others) < len(at_after) else "reused"
+                raise CommitSeqDiverged(name, group, after, after_id, others[0], reason)
+            start = len(at_after)
+        rest = entries[start : start + limit]
+        for (prev_seq, prev_id, _pm), (seq, row_id, _m) in itertools.pairwise(rest):
+            if seq == prev_seq:
+                raise CommitSeqDiverged(name, group, seq, prev_id, row_id, "duplicate")
+        if not rest:
+            empty: Any = (
+                self.rows_decode_(comp_cls, [])
+                if row_format is RowFormat.STRUCT
+                else []
+            )
+            return SeqReadResult(empty, None)
+
+        # 3. 从同一个节点取行，遇到第一个读不到的就停：它不跳过，记为 blocked
+        raw_rows = await reader.hgetall_many_(
+            table_ref, [row_id for _seq, row_id, _m in rest]
+        )
+        readable = next((i for i, raw in enumerate(raw_rows) if not raw), len(raw_rows))
+        decoded = self.rows_decode_(comp_cls, raw_rows[:readable])
+        # 行在索引上的值段（带组前缀）要和 member 的对上，同 `_range_checks`：只比号会放过被挪进
+        # 本组同一号的别组的行
+        values = index_value_bytes_list_(comp_cls, field, decoded)
+        for i, (value, (_seq, _row_id, member)) in enumerate(
+            zip(values, rest, strict=False)
+        ):
+            if value != member_value_(member):
+                readable = i
+                break
+        blocked = None
+        if readable < len(rest):
+            blocked = (rest[readable][0], rest[readable][1])
+        if row_format is RowFormat.STRUCT:
+            return SeqReadResult(decoded[:readable], blocked)
+        return SeqReadResult(
+            [
+                self.row_decode_(comp_cls, raw, row_format)
+                for raw in raw_rows[:readable]
+            ],
+            blocked,
+        )
 
     @override
     async def range_read_(

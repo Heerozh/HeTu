@@ -13,8 +13,15 @@ from unittest.mock import patch
 
 from hetu.data.backend import Backend
 
-# 事务里的 range 取行走 get_many_array_
-READ_METHODS = ("get", "get_many", "get_many_array_")
+# 事务里的 range 取行走 get_many_array_；seq_* 是提交序号列给库外消费方的读
+READ_METHODS = (
+    "get",
+    "get_many",
+    "get_many_array_",
+    "seq_head",
+    "seq_head_many",
+    "seq_read",
+)
 RANGE_METHODS = ("range", "range_read_")  # 事务里的 range 走 range_read_
 
 

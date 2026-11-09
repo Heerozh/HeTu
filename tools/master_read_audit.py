@@ -37,6 +37,9 @@ READ_METHODS = (
     "range",
     "range_read_",
     "range_index_",
+    "seq_head",
+    "seq_head_many",
+    "seq_read",
 )
 COUNTS: collections.Counter = collections.Counter()
 # 正在一个被记过的读方法里：里面再调的读方法不重复记

@@ -77,6 +77,21 @@ class Table(TableReference):
         """按 id 列表批量读行（非事务，走 servant），与 `servant_get` 同款绑定"""
         return bind_first_arg_with_typehint(self.backend.servant.get_many, self)
 
+    # 下面几个属性不写 docstring：gen_api_docs 只把"函数体只有一句 return 绑定"的属性认成方法，
+    # 文档和签名取自 BackendClient 上的同名方法
+
+    @property
+    def servant_seq_head(self):
+        return bind_first_arg_with_typehint(self.backend.servant.seq_head, self)
+
+    @property
+    def servant_seq_head_many(self):
+        return bind_first_arg_with_typehint(self.backend.servant.seq_head_many, self)
+
+    @property
+    def servant_seq_read(self):
+        return bind_first_arg_with_typehint(self.backend.servant.seq_read, self)
+
     @property
     def direct_set(self):
         return bind_first_arg_with_typehint(self.backend.master.direct_set, self)

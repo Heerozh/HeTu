@@ -82,7 +82,15 @@ working examples — read them first.
   numbers are missing before `row.seq`, read that span once with
   `range(seq=(expected, row.seq - 1), owner=..., limit=-1)` (range check on)
   before skipping it (see Advanced "Binlog-style syncing"); never derive the
-  next number yourself.
+  next number yourself. Consumers outside the database (headless, cursor in a
+  snapshot file) use `tbl.servant_seq_read(cursor, limit, group={...},
+  after_id=cursor_row_id)` → `(rows, blocked)`: gaps are confirmed from one
+  node's index snapshot, unreadable rows block instead of being skipped, and a
+  reused number / missing cursor row / duplicate raises `CommitSeqDiverged`;
+  `servant_seq_head(_many)` reads how far a group has got (alerts only, never
+  to advance the cursor). Trim only rows strictly below every consumer's
+  **persisted** cursor, after checking the cursor row is still the recorded
+  one. Don't infer gaps from `servant_range` results.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
@@ -237,6 +245,11 @@ async with client.session("BattleReport") as s:  # s[Comp] is a SessionRepositor
         row.kind = 1
 await client.close()
 ```
+
+Non-transactional reads on `client.table(...)`: `servant_get` / `servant_range` /
+`servant_get_many`, plus `servant_seq_head` / `servant_seq_head_many` /
+`servant_seq_read` for consuming a `commit_seq` command table in order without gaps
+(see the Commit sequence bullet above).
 
 Writes go through the same `Session.commit()` path as Systems, so client
 subscriptions fire identically. It reads cluster ids/schemas from the server's table

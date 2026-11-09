@@ -259,7 +259,9 @@ class HeadlessClient:
     """无服务器进程的表直读写客户端，用 `connect()` 创建。
 
     - `table(comp)` → 现有 `Table`：非事务读走 `servant_get` / `servant_range` /
-      `servant_get_many`（`direct_set` 不保证通知一致，请勿使用）。
+      `servant_get_many`；提交序号列（`commit_seq`）的命令表用 `servant_seq_read` 按号
+      消费、确认缺口，`servant_seq_head` / `servant_seq_head_many` 读发到第几号
+      （`direct_set` 不保证通知一致，请勿使用）。
     - `session(*comps)` → `HeadlessSession`：``s[Comp]`` 即现有 `SessionRepository`，
       退出 ``async with`` 即 commit，提交路径与 System 完全相同。
     - 不发雪花号：`insert` 的行 id 必须非零，`upsert` 只在锚定 ``id=<显式值>`` 时允许新建。

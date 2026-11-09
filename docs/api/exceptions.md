@@ -9,13 +9,79 @@ weight: 50
 
 
 
+## `CommitSeqDiverged`
+
+```python
+CommitSeqDiverged(
+    comp_name: str,
+    group: collections.abc.Mapping[str, Any] | None,
+    seq: int,
+    expected_id: int,
+    found_id: int | None,
+    reason: str,
+)
+```
+
+<small>Source: [`hetu/data/backend/base.py:126`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L126)</small>
+
+
+**Bases:** `Exception`
+
+
+
+The commit_seq sequence no longer matches what the consumer recorded.
+
+提交序号列的序列和库外消费方记下的对不上了，由 `BackendClient.seq_read` 抛出。重试不会好，
+所以不继承 RaceCondition：这一组要停下来、报警，由人来处理，别的组照常消费。
+
+`reason` 是下面三种之一：
+
+- ``"reused"``：游标那一号现在是另一行，号被复用了。可能是数据回退（故障切换丢了最后几次提交、
+  AOF / RDB 重启、整库从备份恢复、易失表清空），也可能是计数器落后于数据之后又发了一遍（手工删了
+  计数器、内存淘汰、只导入了行、改了组件名或字段名之后重新校准）；
+- ``"anchor_missing"``：游标那一行没了，后面却有号。数据回退了，或者游标那一行被误删了（按文档的
+  裁剪规则，游标那一行不会被正常删掉）；
+- ``"duplicate"``：组里有重号，计数器落后于数据时会发出重号。
+
+属性：`comp_name`、`group`（调用方给的原值）、`seq`（出问题的那一号）、`expected_id`、
+`found_id`（`anchor_missing` 时为 None）、`reason`。
+
+
+
+
+### Attributes
+
+- **`comp_name`** (Any) — _No description._
+
+- **`group`** (Any) — _No description._
+
+- **`seq`** (Any) — _No description._
+
+- **`expected_id`** (Any) — _No description._
+
+- **`found_id`** (Any) — _No description._
+
+- **`reason`** (Any) — _No description._
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## `RaceCondition`
 
 ```python
 RaceCondition
 ```
 
-<small>Source: [`hetu/data/backend/base.py:69`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L69)</small>
+<small>Source: [`hetu/data/backend/base.py:79`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L79)</small>
 
 
 **Bases:** `Exception`
@@ -62,7 +128,7 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:116`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L116)</small>
+<small>Source: [`hetu/data/backend/base.py:170`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L170)</small>
 
 
 **Bases:** `IndexError`
