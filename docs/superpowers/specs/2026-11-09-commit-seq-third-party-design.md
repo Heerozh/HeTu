@@ -407,7 +407,8 @@ async def poll_all(owners: list[int]) -> None:
 2. 增量读：`18fc35f9`
 3. 守门：`90db0f7b`
 4. §6 写法的用例、headless 端到端：`a4390bdb`
-5. 文档、`scripts/api_extras.py`、`docs/api`，以及本节：最后一个提交
+5. 文档、`scripts/api_extras.py`、`docs/api`，以及本节：`3b241130`
+6. 补上裁剪规则漏改的两处旧说法（原稿 §9 的补注、binlog 一节的"裁剪"条目：游标那一行要留着）：`a6fc407e`
 
 和本稿写法不同的地方：
 
