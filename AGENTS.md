@@ -16,13 +16,18 @@ uv run pytest tests/test_backend_basic.py  # 运行单个测试文件
 uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
 uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 uv run pytest -n 8 tests/     # 多进程并行测试（pytest-xdist）
-uv run scripts/gen_api_docs.py # PR前同步文档，不然CI不通过
+uv run scripts/gen_api_docs.py # 重新生成 docs/api：只在发版前跑，功能 PR 不提交，见下
 ```
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey 容器；SQLite 后端无需 Docker）。
 `HETU_TEST_BACKENDS` 接受逗号分隔的子集，取值范围：`redis`、`valkey`、`redis_cluster`、`sqlite`。
 未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`）。CI 只在 PR 上跑（全部
 后端 + 上传覆盖率），直接 `push` 到任何分支都不跑，推送前请在本地跑过测试。
+
+`docs/api/` 由 `scripts/gen_api_docs.py` 从 docstring 生成，条目带源码行号。功能 PR **不提交**
+docs/api 的改动：行号一变，改了同一个源文件的 PR 就会互相冲突。PR 上的 CI 只确认生成脚本能跑通；
+发版时先在 dev 上跑一次脚本、单独提交，再开 dev → main 的 PR，CI 只在指向 main 的 PR 上比对
+docs/api 是否过期。它的读者（文档站、`hetu/llms.txt`）只读 main。
 
 测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
 worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /
