@@ -265,9 +265,13 @@ class SessionRepository:
         有。返回 (有没有答案, 答案)
         """
         idmap = self._session.idmap
-        row, row_stat = idmap.get(self.ref, row_id)
-        if row_stat is not None:
-            return True, (None if row_stat == RowState.DELETE else row)
+        # 先查状态字典：不在缓存里的不用扫缓存数组（idmap.get 要扫）。按 id 读读库前后各查
+        # 一次，缓存里行多时，没命中的读每次省下一次扫描
+        if (row_stat := idmap.row_state(self.ref, row_id)) is not None:
+            if row_stat == RowState.DELETE:
+                return True, None
+            row, _ = idmap.get(self.ref, row_id)
+            return True, row
         if idmap.observed_absent(self.ref, "id", row_id):
             return True, None
         return False, None

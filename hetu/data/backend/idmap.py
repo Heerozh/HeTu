@@ -685,6 +685,12 @@ class IdentityMap:
         """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
         return len(self._row_cache.get(table_ref, ())) > 0
 
+    def row_state(self, table_ref: TableReference, row_id: int) -> RowState | None:
+        """这一行在缓存里的状态，不在缓存里为 None。只查状态字典，不扫缓存数组（同 `get`
+        返回的状态，但缓存里行多时快得多）"""
+        states = self._row_states.get(table_ref)
+        return None if states is None else states.get(row_id)
+
     def has_any(self, table_ref: TableReference, row_ids: Collection[int]) -> bool:
         """这些 id 里有没有已经在缓存里的（读到的、本事务写入的、删掉的都算）"""
         states = self._row_states.get(table_ref)
