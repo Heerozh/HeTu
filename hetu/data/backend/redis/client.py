@@ -519,27 +519,6 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         return [value for values in results for value in values]
 
     @override
-    async def pinned_reader_(self, key: str):
-        """
-        见基类。原生 cluster 下 servant 用的 ROUND_ROBIN_REPLICAS 是每个分片一个确定的轮询计数器，
-        每条读命令（pipeline 里的也一条一条算）加一：ZRANGE 和取行会落到不同的副本上。某个副本断了
-        复制、照常回答读请求时，每一轮的命令数对副本数取模是固定的，`seq_read` 会永久读不到东西。
-        所以按 key 的 slot 随机选一个副本（客户端不认得副本时是 primary；master 连接选 primary），
-        这次读都发给它。用随机不用轮询：别的读也推进轮询计数器，用轮询的话每轮选到的节点又是固定的
-        """
-        if not self._ios:
-            raise ConnectionError(_("连接已关闭，已调用过close"))
-        aio = self.aio
-        if not isinstance(aio, redis.asyncio.cluster.RedisCluster):
-            return self  # 一个连接只连一个节点
-        await aio.initialize()  # 第一次发命令之前，slot 表可能还是空的
-        strategy = LoadBalancingStrategy.RANDOM_REPLICA if self.is_servant else None
-        node = aio.nodes_manager.get_node_from_slot(
-            aio.keyslot(key), load_balancing_strategy=strategy
-        )
-        return _PinnedClusterReader(self, aio, node)
-
-    @override
     def zrange_bylex_(
         self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
     ) -> Awaitable[list[bytes]]:
@@ -625,48 +604,3 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         if self._hub is None:
             self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
         return self._hub
-
-
-class _PinnedClusterReader:
-    """`seq_read` 用：ZRANGE 和取行都发给同一个 cluster 节点，见 `RedisBackendClient.pinned_reader_`"""
-
-    def __init__(
-        self,
-        client: RedisBackendClient,
-        aio: redis.asyncio.cluster.RedisCluster,
-        node: redis.asyncio.cluster.ClusterNode,
-    ) -> None:
-        self._client = client
-        self._aio = aio
-        self._node = node
-
-    def zrange_bylex_(
-        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
-    ) -> Awaitable[list[bytes]]:
-        args: list[Any] = ["ZRANGE", idx_key, b_left, b_right, "BYLEX"]
-        if desc:
-            args.append("REV")
-        args += ["LIMIT", 0, limit]
-        return cast(
-            Awaitable[list[bytes]],
-            self._aio.execute_command(*args, target_nodes=self._node),
-        )
-
-    async def hgetall_many_(
-        self, table_ref: TableReference, row_ids: Sequence[int]
-    ) -> list[dict[bytes, bytes]]:
-        key_prefix = self._client.cluster_prefix(table_ref) + ":id:"
-        if len(row_ids) == 1:
-            row = await self._aio.execute_command(
-                "HGETALL", key_prefix + str(row_ids[0]), target_nodes=self._node
-            )
-            return [cast(dict[bytes, bytes], row)]
-        rows: list[dict[bytes, bytes]] = []
-        for chunk in itertools.batched(row_ids, self._client.RANGE_PIPELINE_CHUNK):
-            async with self._aio.pipeline(transaction=False) as pipe:
-                for row_id in chunk:
-                    pipe.execute_command(
-                        "HGETALL", key_prefix + str(row_id), target_nodes=self._node
-                    )
-                rows.extend(await pipe.execute())
-        return rows
