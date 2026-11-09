@@ -1278,25 +1278,29 @@ class BackendClient:
         ValueError
             组件没有提交序号列，或者分组值不对。
         RuntimeError
-            计数器的值被写坏了（不是 Redis 认的非负整数）。`hetu upgrade` 重建索引时会把它校准回来。
+            计数器的值被写坏了（不是 Redis 认的非负整数），报错里带着它的 key 和值。组里还有行时，
+            `hetu upgrade` 重建索引会把它校准回来；没有行时 upgrade 不动它，要手工改，见文档
+            "binlog 式同步"一节。
 
         Notes
         -----
         Redis 上计数器 key 被写成了别的类型时，这里读成 0，不报错；这时提交本身会报 WRONGTYPE。
         """
-        return (await self.seq_head_many(table_ref, [group]))[0]
+        raise NotImplementedError
 
     async def seq_head_many(
         self,
         table_ref: TableReference,
         groups: Sequence[Mapping[str, Any] | None],
-    ) -> list[int]:
+    ) -> list[int | None]:
         """
         Read the latest numbers issued by many commit_seq groups in one round trip.
 
         批量读多个组的计数器，每个组同 `seq_head`。一次往返：组很多时按块拆成几条 MGET，放在
-        一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。有一个计数器被写坏，
-        整批抛 RuntimeError。
+        一个 pipeline 里。返回值和 `groups` 一一对应；空列表不访问数据库。
+
+        逐组返回：计数器被写坏了的组是 None，不抛异常，别的组照常返回，一组坏了不会拖住所有组。
+        要看是哪个 key、什么值，对这一组调 `seq_head`。
 
         Parameters
         ----------
@@ -1307,15 +1311,13 @@ class BackendClient:
 
         Returns
         -------
-        heads: list[int]
-            每个组最近发出的号，没发过号是 0，顺序同 `groups`。
+        heads: list[int | None]
+            每个组最近发出的号，没发过号是 0，计数器被写坏了是 None，顺序同 `groups`。
 
         Raises
         ------
         ValueError
             组件没有提交序号列，或者某一项分组值不对（在访问数据库之前检查）。
-        RuntimeError
-            有计数器的值被写坏了，报错里带着它的 key。
         """
         raise NotImplementedError
 

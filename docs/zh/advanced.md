@@ -415,8 +415,8 @@ async def consume(ctx: hetu.SystemContext, owner: int):
 事务里，拿不到上面那种提交时的确认。`Table` 上有三个给它用的非事务读，都走副本、不读 master：
 
 - `servant_seq_head(group=...)` / `servant_seq_head_many(groups)`：这一组最近发出的号，也就是发到了第几号，没发过号
-  是 0；批量版一次往返。它只用来发现有新号、监控积压、报警：它和读行不在同一个快照里，**不能**拿来把游标推过没见到
-  行的号。
+  是 0；批量版一次往返，逐组返回，计数器被写坏了的组是 None（见下文）。它只用来发现有新号、监控积压、报警：它和读行
+  不在同一个快照里，**不能**拿来把游标推过没见到行的号。
 - `servant_seq_read(after, limit, group=..., after_id=...)`：读游标之后的行，返回 `(rows, blocked)`。先用一条命令
   读这一组的索引，再取行。号按提交顺序发，一个节点上读到了 n 号，比它小、却没读到的号就是已经不在了，跳过；缺口只按
   读索引的那一条命令确认。取行不一定和它落在同一个节点上，索引里有、取行时却读不到的行**不跳过**，停在它前面，它记为
@@ -453,12 +453,14 @@ async def poll_all(owners: list[int]) -> None:
         if owner in stopped:
             continue
         seq = cursors.get(owner, (0, None))[0]
-        if head < seq:  # 这个副本落后、在全量同步、换簇了，或者数据回退了
+        if head is not None and head < seq:  # 这个副本落后、在全量同步、换簇了，或者数据回退了
             if now - behind_since.setdefault(owner, now) > 30:
                 await alarm_behind(owner, head, seq)  # 报警前先 client.check_schema()，见"换簇"
             continue
         behind_since.pop(owner, None)
-        if head == seq:
+        if head is None:  # 计数器被写坏了：报警，照常读，读行不靠计数器（见下文）
+            await alarm_counter(owner)
+        elif head == seq:
             continue  # 没有新号
         try:
             await poll(owner)
@@ -504,8 +506,11 @@ async def poll_all(owners: list[int]) -> None:
 - **组很多时**：每组每轮算一次 key（约 3µs），10 万组每轮约 0.3 秒 CPU，副本上每轮也要查 10 万个 key。组多就
   降低轮询频率，或者只轮询活跃的组；组的清单要消费方自己维护（比如从游戏逻辑的房间表来）。`limit` 越大，一次读
   占住副本的时间越长，一般几百到几千行。
-- **计数器被写坏**：`servant_seq_head_many` 整批抛 RuntimeError、带上 key，`hetu upgrade` 重建索引时会校准回来。
-  Redis 上它被写成了别的类型时读成 0（这时提交本身也会报 WRONGTYPE）。
+- **计数器被写坏**（值不是非负整数，一般是手工改坏的）：`servant_seq_head_many` 里这一组是 None，别的组照常返回；
+  `servant_seq_head` 抛 RuntimeError，带上 key 和值。这一组的提交会失败，读行不受影响，所以示例里报警之后照常读
+  这一组。组里还有行时，`hetu upgrade` 重建索引会把它校准到组里最大的号；组里没有行时（比如行消费完就删了）
+  upgrade 不动它，要手工改成不小于所有消费方游标的值（比如游标表里最大的那个），不能直接删：删了会从 1 重新发号，
+  号被复用。Redis 上它被写成了别的类型时读成 0（这时提交本身也会报 WRONGTYPE）。
 - **提交中途出错留下的行**：Redis 上提交脚本写到一半出运行时错误，可能留下"有行、没有索引项"的行，按缺口跳过。之后
   重建索引会把它放回原来的号上，已经越过它的消费方不会再处理它。
 - **服务端消费方**的游标和日志在同一个事务里，会一起回退，不用这样核对。

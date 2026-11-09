@@ -4,6 +4,7 @@
 - 状态：已实现（§14），设计过了一轮两路独立审核（§13），已按审核意见改写。
   - 用户已定（2026-11-09）：读计数器和封装好的增量读都做。审核之后改了的命名和返回值见 §13。
   - 合并之后去掉了钉节点（§15）：§3.2、§5、§8、§9、§14 里钉节点的写法以 §15 为准。
+  - 合并之后 `servant_seq_head_many` 改成逐组返回（§16）：§4.1、§6、§9 里"整批抛 RuntimeError"的写法以 §16 为准。
 - 分支：`feat/commit-seq-third-party`（基于 dev `fce72f5b`）
 - 前置：提交序号列（PR #215，`2026-11-09-commit-seq-design.md`，下称"原稿"）
 - 影响范围：
@@ -102,6 +103,8 @@
 - 整数参数收 int 和 `np.integer`（比如直接传 `rows[-1].seq`），不收 bool / `np.bool_`，进来先 `int()`。类型不对抛 TypeError，取值不对抛 ValueError。
 
 ### 4.1 计数器：`servant_seq_head` / `servant_seq_head_many`
+
+> 已改（§16）：`servant_seq_head_many` 返回 `list[int | None]`，计数器被写坏的组是 None，不再整批抛异常；`servant_seq_head` 照旧抛 RuntimeError。`hetu upgrade` 只校准还有行的组，下面"会把它校准回来"说多了。
 
 ```python
 head = await tbl.servant_seq_head(group={"owner": 7})                    # -> int
@@ -213,6 +216,8 @@ rows, blocked = await tbl.servant_seq_read(
 - `tests/test_master_read_budget.py` 加一条：有副本时，按 §6 的写法轮询（读计数器 + 增量读），master 读 0 次。
 
 ## 6. 消费方的写法（写进文档）
+
+> 已改（§16）：`head` 可能是 None（计数器被写坏），示例先判 None：报警、照常读这一组。以文档里的写法为准。
 
 ```python
 import time
@@ -453,3 +458,33 @@ async def poll_all(owners: list[int]) -> None:
 - `redis/client.py`：删 `pinned_reader_` 的覆盖和 `_PinnedClusterReader`。
 - 测试：模拟取行读不到的桩改成包住 `hgetall_many_`；删掉 cluster 钉节点的用例。
 - 文档：`seq_read` 的 docstring（`docs/api` 重新生成）；`docs/zh|en/advanced.md` 里 `servant_seq_read` 的说明和"被挡住"一条，不再只说读写分离代理。
+
+## 16. `servant_seq_head_many` 逐组返回（2026-11-09，#217 合并之后）
+
+起因：§4.1 定的是"有一个计数器被写坏，整批抛 RuntimeError"。§6 的示例在逐组的循环之前读计数器，这一行不在按组的 try 里：一组的计数器被写坏，每一轮都在这里抛出，所有组都不读了，和示例里"只停这一组，别的组照常消费"对不上。§13 A8 / B3 改的就是"示例里一组出错拖垮所有组"，当时只按组捕获了 `CommitSeqDiverged`，计数器这条漏了。
+
+计数器坏了本来只影响这一组：
+
+- 写入端：提交脚本对坏计数器 INCRBY 出错（或者发出的号超出范围）时，把已经加上的号减回去、整笔提交不写（`commit_v2.lua` 发号那一段），只有写到这一组的提交失败，别的组照常提交。
+- 读取端：`servant_seq_read` 不读计数器，这一组已有的行照样能读。计数器本来只是提示（§3.3）。
+
+改动：
+
+- `seq_head_many` 返回 `list[int | None]`：计数器被写坏的组是 None，不抛异常，别的组照常返回。和 `servant_get_many` 的"不存在的位置是 None"同一个约定，类型检查会逼调用方先处理 None 再拿它比较。
+- `seq_head` 照旧抛 RuntimeError，报错里带着 key 和值：单个组没有别的组可拖，报错方便排查。它不再借 `seq_head_many` 实现，由 `RedisModelClient` 自己读，`BackendClient.seq_head` 改成抽象方法。
+- 原始值的解析挪进 `seq_head_value_`（`redis_model.py`），两个方法共用。
+- 文档里 §6 的示例：`head is None` 时报警、照常读这一组；"计数器被写坏"一条重写。
+- 测试：批量读时坏的那一组是 None、别的组照常（`test_seq_head_many_isolates_corrupted_counter`）；§6 写法的用例加一条：一组的计数器被写坏，这一组的提交失败、已有的行照样读完，别的组照常提交、照常消费（`test_recipe_isolates_corrupted_counter`）；单个读的用例另外检查报错里带着值。新用例在改之前的代码上都失败。
+
+不采用：
+
+- 坏了读成 -1 或 0：示例会把这一组当成"落后"或"没有新号"跳过，报警的原因也是错的。
+- 抛一个带部分结果的异常：示例里要多包一层 try。
+
+接口只在 dev 上（#217 还没进任何 tag），直接改返回值，不留兼容。
+
+**顺带改正：`hetu upgrade` 不校准没有行的组。** §4.1 和文档里"计数器被写坏，`hetu upgrade` 重建索引时会把它校准回来"说多了：原稿 §8.2 定的是"没有行的组，计数器不动"（`CommitSeqScan.counters` 只给出还有行的组），写坏了的也不动。库里没有这一组的行，重建不知道它发到了第几号，改小或者删掉都会让号被复用，所以规则不改，改说法：
+
+- 文档（中英）"计数器被写坏"一条、`seq_head` 的 docstring、报错信息：组里还有行时 upgrade 会校准；没有行时（比如行消费完就删了）要手工改成不小于所有消费方游标的值，不能直接删。
+- 测试：`test_rebuild_leaves_counters_of_empty_groups`（`tests/test_commit_seq.py`）：没有行的组，写坏的和正常的计数器重建后都原样；还有行的组照常校准。
+- 不做：重建时报告"没有行、计数器又被写坏"的组。只有手工改坏才会出现，这时提交报错、`servant_seq_head_many` 返回 None，已经看得到。

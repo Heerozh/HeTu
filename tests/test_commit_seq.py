@@ -1086,6 +1086,26 @@ async def test_rebuild_only_raises_counters(log_ref, mod_auto_backend):
     assert _counter(backend, log_ref, owner=10) == 1
 
 
+async def test_rebuild_leaves_counters_of_empty_groups(log_ref, mod_auto_backend):
+    """
+    没有行的组（比如行消费完就删了）：重建不动它的计数器，写坏了的也不动。库里没有这一组的行，
+    不知道它发到了第几号，改小或者删掉都会让号被复用。还有行的组照常校准
+    """
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    await _insert(backend, comp, *[_log(comp, 7) for _ in range(3)], _log(comp, 8))
+    await _insert(backend, comp, _log(comp, 9))
+    await _delete_seqs(backend, comp, 7, [1, 2, 3])
+    await _delete_seqs(backend, comp, 8, [1])
+    key7 = raw_seq_counter_key(backend, log_ref, owner=7)
+    raw_kv_set(backend, key7, b"abc")
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=9), b"abc")
+    backend.get_table_maintenance().do_rebuild_index_(log_ref)
+    assert raw_kv_get(backend, key7) == b"abc"
+    assert _counter(backend, log_ref, owner=8) == 1
+    assert _counter(backend, log_ref, owner=9) == 1
+
+
 async def test_volatile_flush_restarts_numbering(new_component_env, mod_auto_backend):
     """易失表每次维护清空，计数器一起删掉，号从 1 重来"""
     from hetu.data import BaseComponent, define_component, property_field

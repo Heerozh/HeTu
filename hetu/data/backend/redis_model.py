@@ -170,6 +170,17 @@ def seq_int_arg_(name: str, value: Any) -> int:
     return int(value)
 
 
+def seq_head_value_(raw: bytes | None) -> int | None:
+    """
+    提交序号列计数器的原始值转成号：key 不存在是 0；不是 Redis 认的非负整数（被写坏了）是 None。
+    解析规则同 INCRBY（`parse_redis_int_`）
+    """
+    if raw is None:
+        return 0
+    value = parse_redis_int_(raw)
+    return None if value is None or value < 0 else value
+
+
 class RedisModelClient(BackendClient):
     """
     Redis 数据模型的后端基类（纯逻辑，见模块说明）。子类实现 I/O：读行、查索引、`commit_script_`、
@@ -859,40 +870,51 @@ class RedisModelClient(BackendClient):
             )
         return field
 
-    @override
-    async def seq_head_many(
+    def _seq_counter_keys(
         self,
         table_ref: TableReference,
         groups: Sequence[Mapping[str, Any] | None],
-    ) -> list[int]:
-        """批量读提交序号列的计数器，见基类"""
+    ) -> list[str]:
+        """各组计数器的 key，顺序同 groups。分组值都在这里校验完，之后才访问数据库"""
         comp_cls = table_ref.comp_cls
         field = self.commit_seq_field_(comp_cls)
         prefix = self.cluster_prefix(table_ref)
-        # 先把分组值都校验完、key 都算好，再访问数据库
-        keys = [
+        return [
             self.seq_counter_key_(
                 prefix, comp_cls, self.group_prefix_of_(table_ref, field, group)
             )
             for group in groups
         ]
+
+    @override
+    async def seq_head(
+        self, table_ref: TableReference, group: Mapping[str, Any] | None = None
+    ) -> int:
+        """读一个组的计数器，被写坏了就抛 RuntimeError、带上 key 和值，见基类"""
+        (key,) = self._seq_counter_keys(table_ref, [group])
+        (raw,) = await self.kv_get_many_([key])
+        head = seq_head_value_(raw)
+        if head is None:
+            raise RuntimeError(
+                _(
+                    "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。组里还有行时，"
+                    "跑 hetu upgrade 重建索引会把它校准回来；没有行时 upgrade 不动它，要手工"
+                    "改成不小于所有消费方游标的值，不能直接删"
+                ).format(key=key, raw=repr(raw))
+            )
+        return head
+
+    @override
+    async def seq_head_many(
+        self,
+        table_ref: TableReference,
+        groups: Sequence[Mapping[str, Any] | None],
+    ) -> list[int | None]:
+        """批量读计数器，逐组返回：被写坏了的那一组是 None，不拖住别的组，见基类"""
+        keys = self._seq_counter_keys(table_ref, groups)
         if not keys:
             return []
-        heads: list[int] = []
-        for key, raw in zip(keys, await self.kv_get_many_(keys), strict=True):
-            if raw is None:
-                heads.append(0)
-                continue
-            value = parse_redis_int_(raw)
-            if value is None or value < 0:
-                raise RuntimeError(
-                    _(
-                        "提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。"
-                        "跑 hetu upgrade 重建索引时会把它校准回来"
-                    ).format(key=key, raw=repr(raw))
-                )
-            heads.append(value)
-        return heads
+        return [seq_head_value_(raw) for raw in await self.kv_get_many_(keys)]
 
     @override
     async def seq_read(
