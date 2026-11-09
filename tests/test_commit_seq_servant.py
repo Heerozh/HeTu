@@ -245,39 +245,29 @@ def seqs(rows) -> list[int]:
     return [int(seq) for seq in rows.seq]
 
 
-class _TamperedReader:
-    """包住 `pinned_reader_` 给出的读原语：取行时让指定的行读不到，或者换掉它的字段"""
+def tamper(monkeypatch, tbl: Table, drop=(), patch=None) -> None:
+    """
+    模拟取行落到落后的副本（drop：读不到）或者读到了不一致的行（patch：换掉字段）。
+    seq_read 不钉节点，取行用的就是 servant 的 `hgetall_many_`；包住它期间不要做别的读
+    """
+    client_cls = cast(Any, type(tbl.backend.servant))
+    original = client_cls.hgetall_many_
+    dropped = set(drop)
+    patched: dict[int, dict[bytes, bytes]] = patch or {}
 
-    def __init__(self, reader, drop: set[int], patch: dict[int, dict[bytes, bytes]]):
-        self._reader = reader
-        self._drop = drop
-        self._patch = patch
-
-    def zrange_bylex_(self, *args):
-        return self._reader.zrange_bylex_(*args)
-
-    async def hgetall_many_(self, table_ref, row_ids):
-        rows = await self._reader.hgetall_many_(table_ref, row_ids)
+    async def tampered(self, table_ref, row_ids):
+        rows = await original(self, table_ref, row_ids)
         out = []
         for row_id, row in zip(row_ids, rows, strict=True):
-            if row_id in self._drop:
+            if row_id in dropped:
                 out.append({})
-            elif row_id in self._patch:
-                out.append({**row, **self._patch[row_id]})
+            elif row_id in patched:
+                out.append({**row, **patched[row_id]})
             else:
                 out.append(row)
         return out
 
-
-def tamper(monkeypatch, tbl: Table, drop=(), patch=None) -> None:
-    """模拟取行落到落后的副本（drop：读不到）或者读到了不一致的行（patch：换掉字段）"""
-    client_cls = cast(Any, type(tbl.backend.servant))
-    original = client_cls.pinned_reader_
-
-    async def pinned(self, key):
-        return _TamperedReader(await original(self, key), set(drop), patch or {})
-
-    monkeypatch.setattr(client_cls, "pinned_reader_", pinned)
+    monkeypatch.setattr(client_cls, "hgetall_many_", tampered)
 
 
 async def test_seq_read_basics(cmd: Table):
@@ -506,49 +496,6 @@ async def test_seq_read_row_formats(cmd: Table):
         0, group={"owner": 7}, row_format=RowFormat.TYPED_DICT
     )
     assert [(row["seq"], row["kind"]) for row in typed] == [(1, 3), (2, 3)]
-
-
-@use_redis_family_backend_only
-async def test_seq_read_pins_one_cluster_node(cmd: Table, monkeypatch):
-    """
-    原生 cluster：一次 seq_read 的 ZRANGE 和所有取行都发给同一个节点，servant 连接按
-    RANDOM_REPLICA 随机选副本。ROUND_ROBIN_REPLICAS 是确定性轮询，某个副本断了复制时会让消费方
-    永久读不到东西（设计稿 §3.2）。测试用的 cluster 没有副本，这里只核对发给了谁、怎么选的
-    """
-    import redis.asyncio.cluster as rc
-    from redis.cluster import LoadBalancingStrategy
-
-    client = cmd.backend.servant
-    if not isinstance(client.aio, rc.RedisCluster):  # type: ignore[attr-defined]
-        pytest.skip("只有原生 cluster 要钉节点")
-    await insert(cmd, *[{"owner": 7}] * 3)
-    targets: list = []
-    strategies: list = []
-    exec_cluster = rc.RedisCluster.execute_command
-    exec_pipe = rc.ClusterPipeline.execute_command
-    get_node = rc.NodesManager.get_node_from_slot
-
-    async def spy_exec(self, *args, **kwargs):
-        targets.append(kwargs.get("target_nodes"))
-        return await exec_cluster(self, *args, **kwargs)
-
-    def spy_pipe(self, *args, **kwargs):
-        targets.append(kwargs.get("target_nodes"))
-        return exec_pipe(self, *args, **kwargs)
-
-    def spy_node(self, slot, read_from_replicas=False, load_balancing_strategy=None):
-        strategies.append(load_balancing_strategy)
-        return get_node(self, slot, read_from_replicas, load_balancing_strategy)
-
-    monkeypatch.setattr(rc.RedisCluster, "execute_command", spy_exec)
-    monkeypatch.setattr(rc.ClusterPipeline, "execute_command", spy_pipe)
-    monkeypatch.setattr(rc.NodesManager, "get_node_from_slot", spy_node)
-    monkeypatch.setattr(client, "is_servant", True)  # 测试环境的 cluster 没配 servants
-    rows, _ = await cmd.servant_seq_read(0, group={"owner": 7})
-    assert seqs(rows) == [1, 2, 3]
-    assert len(targets) == 4  # 一条 ZRANGE + 三条 HGETALL
-    assert targets[0] is not None and all(node is targets[0] for node in targets)
-    assert strategies == [LoadBalancingStrategy.RANDOM_REPLICA]
 
 
 # ============ 文档里库外消费方的写法（设计稿 §6） ============

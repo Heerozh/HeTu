@@ -20,7 +20,6 @@ from typing import (
     Any,
     Literal,
     Never,
-    Protocol,
     cast,
     overload,
     override,
@@ -169,18 +168,6 @@ def seq_int_arg_(name: str, value: Any) -> int:
             )
         )
     return int(value)
-
-
-class SeqReader(Protocol):
-    """`seq_read` 用的两个读原语，由 `RedisModelClient.pinned_reader_` 给出，都发给同一个节点"""
-
-    def zrange_bylex_(
-        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
-    ) -> Awaitable[list[bytes]]: ...
-
-    async def hgetall_many_(
-        self, table_ref: TableReference, row_ids: Sequence[int]
-    ) -> list[dict[bytes, bytes]]: ...
 
 
 class RedisModelClient(BackendClient):
@@ -907,14 +894,6 @@ class RedisModelClient(BackendClient):
             heads.append(value)
         return heads
 
-    async def pinned_reader_(self, key: str) -> SeqReader:
-        """
-        内部方法：`seq_read` 的 ZRANGE 和取行要发给同一个节点（设计稿 §3.2）。key 是要读的组
-        zset，按它的 slot 选节点。默认就是自己：一个连接只连一个节点（显式配置的 servants、没有
-        副本、SQLite）。原生 cluster 由子类覆盖
-        """
-        return self
-
     @override
     async def seq_read(
         self,
@@ -961,8 +940,7 @@ class RedisModelClient(BackendClient):
         idx_key, b_left, b_right, _empty = self.zrange_args_(
             table_ref, field, after if anchored else after + 1, math.inf, False, group
         )
-        reader = await self.pinned_reader_(idx_key)
-        members = await reader.zrange_bylex_(
+        members = await self.zrange_bylex_(
             idx_key, b_left, b_right, False, limit + 1 if anchored else limit
         )
         # 值段是组前缀 P 加号的 8 字节编码；同号的 member 按 id 排，号是不降的
@@ -1005,8 +983,9 @@ class RedisModelClient(BackendClient):
             )
             return SeqReadResult(empty, None)
 
-        # 3. 从同一个节点取行，遇到第一个读不到的就停：它不跳过，记为 blocked
-        raw_rows = await reader.hgetall_many_(
+        # 3. 取行，遇到第一个读不到的就停：它不跳过，记为 blocked。取行不钉节点，可能和 ZRANGE
+        # 落在不同的节点上（设计稿 §15）：取行的节点落后时只会停下，缺口只按上面那条 ZRANGE 确认
+        raw_rows = await self.hgetall_many_(
             table_ref, [row_id for _seq, row_id, _m in rest]
         )
         readable = next((i for i, raw in enumerate(raw_rows) if not raw), len(raw_rows))
