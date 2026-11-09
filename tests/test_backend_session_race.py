@@ -1311,3 +1311,29 @@ async def test_id_read_returns_none_if_marked_absent_during_fetch(
         with fetch_get, fetch_many:
             assert await repo.get(id=int(late.id)) is None
         assert s1.idmap.get(repo.ref, int(late.id)) == (None, None)
+
+
+async def test_range_skips_own_insert_deleted_during_fetch(item_ref, mod_auto_backend):
+    """本事务 insert 的行 p 在区间里；range 读库期间，同一事务的别的协程把要读回的 x 读进了
+    缓存（触发重新查缓存）、又删了 p：重新查缓存后 p 成了"缓存里没有"，但它没去读库，结果里
+    不该有它（同先删再读），不能按读回的行去填它的位置"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    x = _item(comp, owner=6, time=1, name="x")
+    await _insert_rows(backend, comp, x)
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        p = _item(comp, owner=6, time=2, name="p")
+        await repo.insert(p)
+
+        async def meddle():
+            assert await repo.get(id=int(x.id)) is not None
+            repo.delete(int(p.id))
+
+        fetch_get, fetch_many = _before_first_row_fetch(backend, meddle)
+        with fetch_get, fetch_many:
+            result = await repo.range(owner=(6, 6), limit=-1)
+        assert _ids(result) == [int(x.id)]
+        assert int(result[0].time) == 1

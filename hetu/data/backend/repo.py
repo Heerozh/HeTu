@@ -779,9 +779,12 @@ class SessionRepository:
             # 读不到的行是读索引与取行之间刚被删除的，跳过（记进观察，commit 直接判竞态）
             fetched, missing = await client.get_many_array_(ref, miss_ids)
             if len(fetched) and idmap.has_any(ref, fetched["id"].tolist()):
-                # 读库期间，同一事务的别的协程把其中一些行读进了缓存、或者改了它们（asyncio.gather
-                # 并发读）：这些行以缓存为准，同顺序执行时命中缓存一样，缓存里还没有的才放进去。
-                # 版本不同也用缓存的：版本号分不出新旧，提交时它的 VER 照常校验
+                # 读库期间，同一事务的别的协程把其中一些行读进了缓存（asyncio.gather 并发读）：
+                # 这些行以缓存为准，缓存里还没有的才放进去，同顺序执行时命中缓存一样。版本不同
+                # 也用缓存的：版本号分不出新旧，提交时它的 VER 照常校验。
+                # 别的协程在读的期间写了这张表（改了查询列、删了行）时不保证这一点：本事务的
+                # 改动只按读开始时合并（local、截断都在读之前算好），结果可能有不满足查询条件
+                # 的行，也不一定和哪种顺序执行一致。读索引期间写也一样
                 cached, index_of, miss_ids = idmap.lookup(ref, ids)
                 fetched = cast(np.recarray, fetched[np.isin(fetched["id"], miss_ids)])
             if len(fetched) == 1:
@@ -802,8 +805,9 @@ class SessionRepository:
             return fetched, obs
 
         # 按顺序整批填进结果：缓存里的、读回的各一次。两边都不在的跳过：读索引之后被删了
-        # （读回时已读不到，或者同一事务的别的协程删了它）
-        fetched_ids = set(miss_ids).difference(missing)
+        # （读回时已读不到，或者同一事务的别的协程删了它）。读回的按实际读回的行算：重新查过
+        # 缓存时，miss_ids 里可能有没去读库的 id（本事务 insert 的行在读库期间被删掉）
+        fetched_ids = set() if fetched is None else set(fetched["id"].tolist())
         cached_pos: list[int] = []
         cached_idx: list[int] = []
         fetched_pos: list[int] = []
