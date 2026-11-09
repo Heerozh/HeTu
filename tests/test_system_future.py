@@ -175,7 +175,12 @@ async def test_next_due_reads_scheduled_from_index(
 async def test_run_due_calls_wake_time(monkeypatch, test_app, tbl_mgr, new_ctx):
     """一轮扫描：执行所有表里到期的调用；返回距下次该扫的秒数——处理过调用就马上再扫（0），
     没有到期的就睡到最早那条，最多 1 秒"""
-    from hetu.system.future import FutureCalls, _build_future_row, run_due_calls
+    from hetu.system.future import (
+        MAX_IDLE_SLEEP,
+        FutureCalls,
+        _build_future_row,
+        run_due_calls,
+    )
 
     tables = [
         tbl_mgr.get_table(FutureCalls),
@@ -183,8 +188,12 @@ async def test_run_due_calls_wake_time(monkeypatch, test_app, tbl_mgr, new_ctx):
     ]
     callers = _task_callers(tbl_mgr)
 
-    delay = await run_due_calls(tables, callers)
-    assert 0.9 <= delay <= 1.0
+    # 没有到期的：睡满 MAX_IDLE_SLEEP。冻结时钟，扫描本身的耗时不算进去：第一轮扫描含 servant 上
+    # 异步 cluster 客户端的冷启动（CLUSTER SLOTS、COMMAND），CI 上并行加覆盖率时实测到过 264ms
+    with monkeypatch.context() as m:
+        started = time.time()
+        m.setattr(time, "time", lambda: started)
+        assert await run_due_calls(tables, callers) == pytest.approx(MAX_IDLE_SLEEP)
 
     await _insert_due_calls(tables[1], new_ctx(), 2)
     assert await run_due_calls(tables, callers) == 0
