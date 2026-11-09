@@ -256,6 +256,8 @@ async def long_running(ctx: hetu.SystemContext, ...):
 - **在此调用之后，`ctx.repo` 和 `ctx.depend` 无法使用。** 主体后续的所有操作都运行在事务*外部*。无法“重新打开”会话。
 - **`session_commit` 之后的操作不会在 `RaceCondition` 时重试。** 只有提交前的主体部分参与 HeTu 的乐观重试。如果提交后的工作失败，你需要自行恢复。
 
+`session_commit()` 返回这次提交里提交序号列（`commit_seq`）发出的号，见本页「binlog 式同步」。
+
 `session_discard()` 格式相同，但会丢弃所有内容。当 `System` 提前确定正确的答案是“什么也不做”并且希望完全跳过提交时，使用它。
 
 ## 查不到就插入：两种写法
@@ -361,7 +363,27 @@ class ChangeLog(hetu.BaseComponent):
     kind: np.int16 = hetu.property_field(0)
 ```
 
-写入方照常 insert，`seq` 留 0，不用管号。消费方在服务端这样写（一个游标只给一个消费方用）：
+写入方照常 insert，`seq` 留 0，不用管号。号在提交时才发，事务里看不到。要知道自己的行拿到了几号（比如回给客户端），
+就在 System 里提前提交：`ctx.session_commit()` 返回这次发出的号，`{组件类: {行 id: 号}}`：
+
+```python
+@hetu.define_system(namespace="ssw", components=(ChangeLog,))
+async def submit(ctx: hetu.SystemContext, kind: int):
+    row = ChangeLog.new_row()
+    row.owner, row.kind = ctx.caller, kind
+    await ctx.repo[ChangeLog].insert(row)
+    seqs = await ctx.session_commit()  # 撞 RaceCondition 时整个 System 重跑，失败的那次不占号
+    return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+- 键同 `ctx.repo`：System 引用的是副本组件时也是主组件类。只含这次 insert 的、带提交序号列的组件的行，没有这样的行时
+  是空 dict。
+- System 返回之后的自动提交不返回号，要拿号就提前提交（提交之后的代码不在事务里，见「提前 `session_commit`」）。
+- headless 等直接用 session 的写入方，显式调用 `await session.commit()`，返回值的形状相同，键是传给
+  `session.using` / `session[...]` 的组件类。
+- `hetu call --dry-run` 不提交、不发号，返回值里本该拿号的行都是 0（提交序号列里 0 就是"没有号"）。
+
+消费方在服务端这样写（一个游标只给一个消费方用）：
 
 ```python
 @hetu.define_component(namespace="ssw")
