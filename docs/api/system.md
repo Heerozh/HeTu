@@ -679,7 +679,7 @@ System调用时的上下文，继承自 `Context` 并添加事务相关属性。
 #### `session_commit`
 
 ```python
-session_commit() -> None
+session_commit() -> dict[type[BaseComponent], dict[int, int]]
 ```
 
 <small>Source: [`hetu/system/context.py:39`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L39)</small>
@@ -693,14 +693,46 @@ session_commit() -> None
 
 **Returns**
 
+The numbers this commit handed out to commit sequence columns
+(``commit_seq``): ``{component class: {row id: number}}``, keyed like
+`ctx.repo` (the master class when the System references a duplicate).
+Only rows this commit inserted into components with a commit sequence
+column are included; empty dict if there are none. The automatic commit
+after the System returns gives no numbers, so call this to get them.
+
+这次提交里提交序号列（`commit_seq`）发出的号：``{组件类: {行 id: 号}}``，组件类
+同 `ctx.repo` 的键（System 引用的是副本组件时也是主组件类）。只含这次 insert 的、
+带提交序号列的组件的行，没有这样的行时是空 dict。System 返回之后的自动提交不返回号，
+要拿号就调用它。
+
+
+
+
+**Examples**
+
+
+```python
+>>> @hetu.define_system(
+...     namespace="ssw", components=(ChangeLog,), permission=hetu.Permission.USER
+... )
+... async def submit(ctx: hetu.SystemContext, kind: int):
+...     row = ChangeLog.new_row()
+...     row.owner, row.kind = ctx.caller, kind
+...     await ctx.repo[ChangeLog].insert(row)
+...     seqs = await ctx.session_commit()  # 行里的 seq 仍是 0，号看返回值
+...     return hetu.ResponseToClient({"seq": seqs[ChangeLog][row.id]})
+```
+
+
+
+
+
+**Notes**
+
 如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition，UniqueViolation。
 异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试；
 UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` 观察其不存在），不重试。
 其他任何异常会记录日志并断开客户端连接。
-
-
-
-
 
 
 
@@ -710,7 +742,7 @@ UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` �
 session_discard() -> None
 ```
 
-<small>Source: [`hetu/system/context.py:57`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L57)</small>
+<small>Source: [`hetu/system/context.py:87`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L87)</small>
 
 提前显式结束事务，放弃所有写入操作。
 注意：调用完 `session_discard`，`ctx` 将不再能够读写 `repo` 。且后续不再属于事务，
@@ -891,7 +923,7 @@ servant_range(
 servant_seq_head(group: collections.abc.Mapping[str, Any] | None = None) -> int
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1251`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1251)</small>
+<small>Source: [`hetu/data/backend/base.py:1264`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1264)</small>
 
 Read the latest number issued by one commit_seq group.
 
@@ -933,7 +965,7 @@ servant_seq_head_many(
 ) -> list[int | None]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1291`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1291)</small>
+<small>Source: [`hetu/data/backend/base.py:1304`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1304)</small>
 
 Read the latest numbers issued by many commit_seq groups in one round trip.
 
@@ -975,7 +1007,7 @@ servant_seq_read(
 ) -> hetu.data.backend.base.SeqReadResult[typing.Any]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1368`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1368)</small>
+<small>Source: [`hetu/data/backend/base.py:1381`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1381)</small>
 
 Read a commit_seq group incrementally after a cursor, confirming gaps on the way.
 
@@ -1033,7 +1065,7 @@ Read a commit_seq group incrementally after a cursor, confirming gaps on the way
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:1433`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1433)</small>
+<small>Source: [`hetu/data/backend/base.py:1446`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L1446)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
