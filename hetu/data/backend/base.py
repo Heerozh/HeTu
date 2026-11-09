@@ -85,6 +85,8 @@ class RaceCondition(Exception):
     - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
     - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
       陈旧读（stale read）；纯读的行同样参与乐观锁校验；
+    - 提交时，本事务按 id 读空过（`get(id=)` / `get_by_id`）的行已经存在：读空之后被别的
+      事务插入，或者读空读到的是落后的副本；
     - 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
       `get` / `get_by_id`（或等值 `range`）观察到该值不存在**（negative observation，
       见 `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中

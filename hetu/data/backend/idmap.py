@@ -280,6 +280,9 @@ class IdentityMap:
         # “它不存在”的过期快照做的决策，应判为 RaceCondition 而非 UniqueViolation
         # （见 get_absent_unique_fields）。
         self._absent: dict[TableReference, set[tuple[str, object]]] = {}
+        # 按 id 读（get(id=) / get_by_id）读空过的 id：commit 时确认它们仍然不存在（见
+        # absent_ids_to_check）。按 unique 列读空的不在这里，由区间观察的 CNT 校验
+        self._absent_ids: dict[TableReference, set[int]] = {}
 
         # 本事务 range 读的观察，commit 时校验区间没变（防幻读），见 RangeObservation；
         # _range_keys 给完全相同的观察去重
@@ -569,6 +572,35 @@ class IdentityMap:
         if not absent:
             return False
         return (index_name, self._norm_value(value)) in absent
+
+    def mark_absent_id(self, table_ref: TableReference, row_id: int) -> None:
+        """
+        登记一次按 id 读（`get(id=)` / `get_by_id`）读空：除了读空记录（同
+        `mark_absent(table_ref, "id", row_id)`），commit 时还要确认这个 id 仍然不存在（见
+        `absent_ids_to_check`）。
+        """
+        self.mark_absent(table_ref, "id", row_id)
+        self._absent_ids.setdefault(table_ref, set()).add(int(row_id))
+
+    def absent_ids_to_check(self) -> dict[TableReference, list[int]]:
+        """
+        commit 时要确认仍然不存在的 id：按 id 读空过、本事务又没有 insert 它的。insert 的主键
+        检查就是这一条（撞车时同样判竞态，见 `get_absent_unique_fields`），不重复发。
+
+        本事务之后又读到了这一行的（比如 range 读到了别的事务刚插入的它）照样要查：前后两次
+        读对不上，commit 时判竞态。
+
+        Returns
+        -------
+        {TableReference: [row_id, ...]}，按 id 排序；没有要查的表不出现。
+        """
+        ret: dict[TableReference, list[int]] = {}
+        for table_ref, row_ids in self._absent_ids.items():
+            states = self._row_states.get(table_ref, {})
+            ids = sorted(i for i in row_ids if states.get(i) != RowState.INSERT)
+            if ids:
+                ret[table_ref] = ids
+        return ret
 
     def get_absent_unique_fields(self) -> dict[TableReference, dict[int, set[str]]]:
         """

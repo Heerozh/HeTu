@@ -244,8 +244,9 @@ class SessionRepository:
         命中缓存（含本事务新 insert 的行）时不去数据库查询。
 
         读空会登记"本事务观察到该 id 不存在"：同一事务内再读这个 id（`get_by_id` 或
-        `get(id=)`）直接返回 None，不再查询数据库；之后本事务 insert 这个 id、提交时撞上
-        并发写入的同 id 行，判为 `RaceCondition` 重试，而不是 `UniqueViolation`。
+        `get(id=)`）直接返回 None，不再查询数据库。commit 时确认这个 id 仍然不存在：读空之后
+        被别的事务插入了，或者读空读到的是落后的副本，判为 `RaceCondition` 重试；本事务
+        insert 这个 id 撞车时同样判竞态，而不是 `UniqueViolation`。
 
         Parameters
         ----------
@@ -273,13 +274,17 @@ class SessionRepository:
             row, _ = idmap.get(self.ref, row_id)
             return True, row
         if idmap.observed_absent(self.ref, "id", row_id):
+            # 读空记录也可能是 range 的 id 点查登记的（那边按 phantom_check 校验）。这次是按 id
+            # 读到的 None，commit 时同样要确认它仍然不存在
+            idmap.mark_absent_id(self.ref, row_id)
             return True, None
         return False, None
 
     async def _get_by_id(self, row_id: int) -> np.record | None:
         """
         按 id 读，`get_by_id` 和 `get(id=)` 共用：缓存（含本事务新 insert 的行）→ 读空记录 →
-        读数据库。读到的放进缓存；读空登记读空记录（主键恒为 unique）
+        读数据库。读到的放进缓存；读空登记读空记录（主键恒为 unique），commit 时确认它仍然
+        不存在
         """
         known, row = self._cached_by_id(row_id)
         if known:
@@ -297,7 +302,7 @@ class SessionRepository:
         if fetched is not None:
             idmap.add_clean(self.ref, fetched)
         else:
-            idmap.mark_absent(self.ref, "id", row_id)
+            idmap.mark_absent_id(self.ref, row_id)
         return fetched
 
     def _point_kwargs(
@@ -369,7 +374,8 @@ class SessionRepository:
         从数据库获取单行数据，并放入Session缓存。
         推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
         主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
-        None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
+        None（不再查询数据库），commit 时若该值已被并发写入（或读空读到的是落后的副本）则判为
+        `RaceCondition` 重试。
         结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
         例外是提交序号列（`commit_seq`）：本事务 insert 的行还没有号（是 0），按这一列查不到它们，
         按 id、按别的索引能查到。

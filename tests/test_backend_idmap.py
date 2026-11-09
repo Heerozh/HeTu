@@ -263,6 +263,27 @@ def test_row_state_matches_get(mod_item_model):
     assert id_map.row_state(item_ref, 405) is None
 
 
+def test_absent_ids_to_check(mod_item_model):
+    """按 id 读空（mark_absent_id）的 id，commit 时要确认仍然不存在：读空记录照常登记；本事务
+    insert 了的不算（insert 的主键检查就是这一条）；只经 mark_absent 登记的（range 的 id 点查）
+    不在这里"""
+    Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+    id_map = IdentityMap()
+    assert id_map.absent_ids_to_check() == {}
+
+    for row_id in (30, 10, 20):
+        id_map.mark_absent_id(item_ref, row_id)
+    id_map.mark_absent(item_ref, "id", 40)
+    assert id_map.observed_absent(item_ref, "id", 10)
+    assert id_map.observed_absent(item_ref, "id", 40)
+
+    row = Item.new_row()
+    row.id, row.time = 20, 1
+    id_map.add_insert(item_ref, row)
+    assert id_map.absent_ids_to_check() == {item_ref: [10, 30]}
+
+
 def test_exceptions(mod_item_model):
     """测试异常情况"""
     Item = mod_item_model  # noqa
