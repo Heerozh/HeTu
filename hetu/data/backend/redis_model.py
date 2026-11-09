@@ -1194,7 +1194,10 @@ class RedisModelClient(BackendClient):
         """
 
         def _key_must_not_exist(_key: str, _race: bool, _label: str):
-            """添加key must not exist的检查（insert 主键）；_race 表示本事务曾 get 观察其不存在"""
+            """
+            添加key must not exist的检查（insert 主键、按 id 读空过的行）；_race 表示本事务曾
+            get 观察其不存在
+            """
             (race_checks if _race else strict_checks).append(
                 ["NX", _key, "RACE" if _race else "UNIQUE", _label]
             )
@@ -1508,6 +1511,18 @@ class RedisModelClient(BackendClient):
             clean_id_prefix = self.cluster_prefix(ref) + ":id:"
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
+        # 按 id 读空过的行（get(id=) / get_by_id）：确认仍然不存在。读空之后被别的事务插入了，
+        # 或者读空读到的是落后的副本，判竞态。本事务 insert 了的 id 不在这里（insert 的主键检查
+        # 就是这一条）；按 unique 列读空的由区间观察的 CNT 校验
+        for ref, absent_ids in idmap.absent_ids_to_check().items():
+            absent_id_prefix = self.cluster_prefix(ref) + ":id:"
+            comp_name = ref.comp_cls.name_
+            for row_id in absent_ids:
+                _key_must_not_exist(
+                    absent_id_prefix + str(row_id),
+                    True,
+                    f"{comp_name}.id id={row_id} observed absent",
+                )
 
         checks = race_checks + range_checks + strict_checks
         # 添加一个带cluster id的key，指明lua脚本执行的集群
@@ -1557,7 +1572,8 @@ class RedisModelClient(BackendClient):
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了，可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了；或本事务按 id
+            读空过的行已经存在，可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 

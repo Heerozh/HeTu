@@ -453,6 +453,212 @@ async def test_get_negative_cache(item_ref, mod_auto_backend):
         assert (await repo.get(id=424242)) is not None
 
 
+async def test_get_by_id_negative_cache(item_ref, mod_auto_backend):
+    """get_by_id 读空同 get(id=)：登记 absent，同一事务内再按 id 读不再打远程，get_by_id 和
+    get(id=) 两种写法共用这条记录；本事务 insert 这个 id 之后能读到"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with patch.object(master, "get", wraps=master.get) as m_get:
+            assert await repo.get_by_id(434343) is None
+            assert m_get.call_count == 1
+            assert await repo.get_by_id(434343) is None
+            assert m_get.call_count == 1
+            # get_by_id 读空 → get(id=) 不再读库，反过来也一样
+            assert await repo.get(id=434343) is None
+            assert m_get.call_count == 1
+            assert await repo.get(id=434344) is None
+            assert m_get.call_count == 2
+            assert await repo.get_by_id(434344) is None
+            assert m_get.call_count == 2
+
+            # 本事务 insert 曾观察不存在的 id 后能读到（本地缓存先于读空记录）
+            row = comp.new_row(id_=434343)
+            row.name, row.time = "by_id", 1
+            await repo.insert(row)
+            got = await repo.get_by_id(434343)
+            assert got is not None and got.name == "by_id"
+            assert m_get.call_count == 2
+
+
+async def test_get_by_id_coerces_id_to_int(item_ref, mod_auto_backend):
+    """get_by_id 同 get(id=)，先把 id 转成 int：传 5.0 读到 id=5 的行。原来 Redis 拿 "5.0" 拼
+    行 key 读空，还按 5.0 登记读空记录（和 5 相等），之后 get(id=5) 也读成 None；SQLite 直接报错"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        row = comp.new_row(id_=5)
+        row.name, row.time = "five", 5
+        await s.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        repo = s.using(comp)
+        got = await repo.get_by_id(5.0)
+        assert got is not None and int(got.id) == 5
+        assert (await repo.get(id=5)) is not None
+
+
+async def test_get_by_id_repeatable_absent(item_ref, mod_auto_backend):
+    """get(id=) 读空、别的事务随后插入这个 id：同一事务里再 get_by_id 仍返回 None，不会一边
+    登记着"不存在"、一边把读到的行放进缓存"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        repo = s.using(comp)
+        assert await repo.get(id=-81) is None
+        async with backend.session("pytest", 1) as s2:  # 并发插入 -81
+            r2 = comp.new_row(id_=-81)
+            r2.name, r2.time = "late", 1
+            await s2.using(comp).insert(r2)
+        assert await repo.get_by_id(-81) is None
+
+
+async def test_get_by_id_absent_insert_conflict_is_race(item_ref, mod_auto_backend):
+    """get_by_id 读空后 insert 同一个 id，撞上并发插入的行：同 get(id=) 判 RaceCondition 重试，
+    不是 UniqueViolation"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    with pytest.raises(RaceCondition, match=r"Item\.id"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get_by_id(-79) is None
+            async with backend.session("pytest", 1) as s2:  # 并发插入 -79
+                r2 = comp.new_row(id_=-79)
+                r2.name, r2.time = "by_id2", 2
+                await s2.using(comp).insert(r2)
+            r = comp.new_row(id_=-79)
+            r.name, r.time = "by_id3", 3
+            await repo.insert(r)
+
+
+def _new_item(comp, row_id: int, name: str, time: int, owner: int = 0):
+    row = comp.new_row(id_=row_id)
+    row.name, row.time, row.owner = name, time, owner
+    return row
+
+
+def _spy_nx_checks(backend: Backend):
+    """包住 master.commit_script_，记下每次提交里的 NX 检查（key 不能存在）"""
+    from unittest.mock import patch
+
+    import msgpack
+
+    master = backend.master
+    captured: list[list] = []
+    orig_commit_script = master.commit_script_
+
+    async def spy(keys, args):
+        checks = msgpack.unpackb(args[0], raw=True)[0]
+        captured.append([chk for chk in checks if chk[0] == b"NX"])
+        return await orig_commit_script(keys, args)
+
+    return captured, patch.object(master, "commit_script_", new=spy)
+
+
+@pytest.mark.parametrize("reader", ["get_id", "get_by_id"])
+async def test_id_absent_read_checked_at_commit(item_ref, mod_auto_backend, reader):
+    """按 id 读空、之后只写别的行：commit 时确认这个 id 仍然不存在。没人插入时照常提交；读空
+    之后被别的事务插入了，判 RaceCondition（原来提交成功，事务建立在过期的"不存在"上）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def read(repo, row_id):
+        if reader == "get_id":
+            return await repo.get(id=row_id)
+        return await repo.get_by_id(row_id)
+
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        repo = s.using(comp)
+        assert await read(repo, -91) is None
+        await repo.insert(_new_item(comp, -92, "u92", 92))
+
+    with pytest.raises(RaceCondition, match=r"Item\.id id=-93 observed absent"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await read(repo, -93) is None
+            async with backend.session("pytest", 1) as s2:  # 读空之后被插入
+                await s2.using(comp).insert(_new_item(comp, -93, "u93", 93))
+            await repo.insert(_new_item(comp, -94, "u94", 94))
+
+
+async def test_id_absent_then_seen_by_range_is_race(item_ref, mod_auto_backend):
+    """按 id 读空，之后 range 读到了别的事务刚插入的这一行：前后两次读对不上（range 读到的
+    那一行版本没变，VER 过得去），commit 时确认"仍然不存在"失败，判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    with pytest.raises(RaceCondition, match=r"Item\.id id=-95 observed absent"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(id=-95) is None
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_new_item(comp, -95, "u95", 95, owner=7))
+            rows = await repo.range(owner=(7, 7), limit=-1)
+            assert rows.id.tolist() == [-95]
+            await repo.insert(_new_item(comp, -96, "u96", 96))
+
+
+async def test_id_absent_from_range_point_then_get_is_checked(
+    item_ref, mod_auto_backend
+):
+    """读空记录是 range 的 id 点查（phantom_check=False，不校验）登记的，之后 get(id=) 靠这条
+    记录返回 None：这次 get 的 None 照样在 commit 时确认"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    with pytest.raises(RaceCondition, match=r"Item\.id id=-97 observed absent"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            rows = await repo.range(id=(-97, -97), phantom_check=False)
+            assert len(rows) == 0
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_new_item(comp, -97, "u97", 97))
+            assert await repo.get(id=-97) is None
+            await repo.insert(_new_item(comp, -98, "u98", 98))
+
+
+async def test_id_absent_read_check_in_payload(item_ref, mod_auto_backend):
+    """每个按 id 读空过的 id 一条 NX（竞态类）；本事务 insert 了的 id 只有 insert 自己那条；
+    只读事务不提交；range 的 id 点查读空不加（由 phantom_check 管）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    captured, spy = _spy_nx_checks(backend)
+    with spy:
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(id=-101) is None
+            assert await repo.get(id=-101) is None  # 再读命中读空记录，不重复加
+            assert await repo.get_by_id(-102) is None
+            assert len(await repo.range(id=(-104, -104), phantom_check=False)) == 0
+            assert await repo.get(id=-103) is None
+            await repo.insert(_new_item(comp, -103, "u103", 103))
+        async with backend.session("pytest", 1) as s:  # 只读：不提交
+            s.only_master = True
+            assert await s.using(comp).get(id=-105) is None
+
+    assert len(captured) == 1
+    labels = sorted(chk[3].decode().split(" ", 1)[1] for chk in captured[0])
+    assert labels == [
+        "id=-101 observed absent",
+        "id=-102 observed absent",
+        "id=-103 insert",
+    ]
+    assert {chk[2] for chk in captured[0]} == {b"RACE"}
+
+
 async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
     """测试upsert操作"""
     backend = mod_auto_backend()

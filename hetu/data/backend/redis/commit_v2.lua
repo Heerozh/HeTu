@@ -41,7 +41,7 @@ if checks then
                 return "RACE: Version mismatch " .. key .. " exp:" .. tostring(expected) .. " got:" .. tostring(current)
             end
 
-            -- 检查 Key 不存在 (用于 Insert 主键)
+            -- 检查 Key 不存在 (用于 Insert 主键，以及本事务按 id 读空过的行)
             -- 格式: ["NX", key, code, label]
             -- code 为 "RACE"/"UNIQUE"：本事务曾 get 观察该 id 不存在则为竞态，否则为确定性冲突；
             -- label 只做定位信息，原样回显

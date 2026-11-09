@@ -233,6 +233,57 @@ def test_mark_deleted(mod_item_model):
     assert "300" in [d["id"] for d in deletes]
 
 
+def test_row_state_matches_get(mod_item_model):
+    """row_state 只查状态字典，结果和 get 返回的状态一致：读到的、insert 的、改过的、删掉的，
+    以及不在缓存里的（含本事务 insert 后又删掉、直接从缓存去掉的）"""
+    Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+    id_map = IdentityMap()
+    assert id_map.row_state(item_ref, 1) is None  # 这张表还没有缓存
+
+    clean, edited, gone = Item.new_row(), Item.new_row(), Item.new_row()
+    clean.id, edited.id, gone.id = 401, 402, 403
+    clean.time, edited.time, gone.time = 1, 2, 3
+    id_map.add_clean(item_ref, clean)
+    id_map.add_clean(item_ref, edited)
+    id_map.add_clean(item_ref, gone)
+    edited.qty = 9
+    id_map.update(item_ref, edited)
+    id_map.mark_deleted(item_ref, 403)
+    fresh, dropped = Item.new_row(), Item.new_row()
+    fresh.id, dropped.id = 404, 405
+    fresh.time, dropped.time = 4, 5
+    id_map.add_insert(item_ref, fresh)
+    id_map.add_insert(item_ref, dropped)
+    id_map.mark_deleted(item_ref, 405)
+
+    for row_id in (401, 402, 403, 404, 405, 999):
+        assert id_map.row_state(item_ref, row_id) == id_map.get(item_ref, row_id)[1]
+    assert id_map.row_state(item_ref, np.int64(402)) is RowState.UPDATE
+    assert id_map.row_state(item_ref, 405) is None
+
+
+def test_absent_ids_to_check(mod_item_model):
+    """按 id 读空（mark_absent_id）的 id，commit 时要确认仍然不存在：读空记录照常登记；本事务
+    insert 了的不算（insert 的主键检查就是这一条）；只经 mark_absent 登记的（range 的 id 点查）
+    不在这里"""
+    Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+    id_map = IdentityMap()
+    assert id_map.absent_ids_to_check() == {}
+
+    for row_id in (30, 10, 20):
+        id_map.mark_absent_id(item_ref, row_id)
+    id_map.mark_absent(item_ref, "id", 40)
+    assert id_map.observed_absent(item_ref, "id", 10)
+    assert id_map.observed_absent(item_ref, "id", 40)
+
+    row = Item.new_row()
+    row.id, row.time = 20, 1
+    id_map.add_insert(item_ref, row)
+    assert id_map.absent_ids_to_check() == {item_ref: [10, 30]}
+
+
 def test_exceptions(mod_item_model):
     """测试异常情况"""
     Item = mod_item_model  # noqa

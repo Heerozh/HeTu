@@ -66,7 +66,8 @@ def _run_checks(
                     + _lua_str(current)
                 )
         elif op == b"NX":
-            # 检查 Key 不存在 (用于 Insert 主键) ["NX", key, code, label]
+            # 检查 Key 不存在 (用于 Insert 主键，以及本事务按 id 读空过的行)
+            # ["NX", key, code, label]
             if store.exists(check[1].decode()):
                 return check[2] + b": Key already exists " + check[3]
         elif op == b"EX":
