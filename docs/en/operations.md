@@ -553,7 +553,6 @@ The specific definitions are explained in detail within the document's comments.
 ## Where to next
 
 - **[API Reference](../api/)** — every public symbol you'll touch in `app.py`.
-- The [README](https://github.com/Heerozh/HeTu/blob/main/README.md) has
-  performance benchmarks (in Chinese) for capacity-planning context.
-  comments.
+- The [README](https://github.com/Heerozh/HeTu/blob/main/README.md#-benchmarks) has
+  performance benchmarks for capacity-planning context.
 

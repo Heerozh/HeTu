@@ -364,4 +364,4 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
 ## 下一步
 
 - **[API 参考](api/)** — 在 `app.py` 中会接触到的所有公开符号。
-- [README](https://github.com/Heerozh/HeTu/blob/main/README.md) 包含性能基准测试（中文），适用于容量规划场景。
+- [README](https://github.com/Heerozh/HeTu/blob/main/README.zh-CN.md#-性能测试) 包含性能基准测试，适用于容量规划场景。
