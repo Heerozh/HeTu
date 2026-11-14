@@ -619,7 +619,7 @@ def next_conn_id() -> str: ...
     这期间 Connection 行还在，还会多打一条发送异常。Sanic 上靠传输层关闭后取消 handler 兜底。现在接收协程
     一结束就拆。
   - PUSH_CLOSE 保留：接收协程结束时照旧塞，发送循环取到就自己返回；塞不进去也不影响拆连接。第 4b 步的排空
-    要用它。
+    没有用它，另加了 `PUSH_DRAINED`（§5.5）。
   - 订阅回复的占位 future 不会造成卡死：deferred 任务一结束，`settle` 回调就会把它取消
     （`receiver.py` 的 `defer_sub_reply_`）。
 - 协议错误的日志改在等收发结束之后打，不管是 handler 被取消、还是收发某一边先结束。原来只在 handler 被取消的
@@ -927,7 +927,7 @@ abort。所以：
   - 变异检查：审查时存活的 6 个（第二个信号直接退出、删掉 fail(1001) 的循环、`runtime.stop()` 挪到最前、
     删掉关服标记的检查、`_serve` 不接停服请求，以及上面几处修复各自的变异）现在都会被抓到。
 
-### 5.5 第 4b 步：关服排空（已实施，分支 `feat/aiohttp-drain`，叠在第 4a 步的 PR #230 上）
+### 5.5 第 4b 步：关服排空（已实施，PR #231，分支 `feat/aiohttp-drain`，叠在第 4a 步的 PR #230 上）
 
 目标：关服时，在途的 RPC 处理完再断开，而不是直接取消。Sanic 栈做不到，它的 `_cancel_websocket_tasks` 会在
 `before_server_stop` 里直接取消 handler，所以 Sanic 栈保持原样，排空的测试只在 aiohttp 栈上跑。
@@ -943,16 +943,22 @@ abort。所以：
 
 - `AiohttpWsConnection.stop_receiving()`：置标记，之后的 recv 抛 `Draining`；正在等的 recv 用取消叫醒，转成
   `Draining`。
-  - 叫醒用的取消要撤销（`uncancel`）；同时还有真的取消请求时照常抛 `CancelledError`，不能吞掉。
+  - 叫醒用的取消要撤销（`uncancel`）；同时还有真的取消请求时照常抛 `CancelledError`，不能吞掉。比较的是进
+    `recv` 时的取消计数（同 `asyncio.timeout`），不假定它是 0。
   - aiohttp 的读缓冲对取消是安全的（`WebSocketDataQueue.read` 被取消时不动缓冲）：叫醒时刚到的消息留在缓冲里，
     不交出去，也就不会执行。
-  - `wait_failed()`：等到连接被 fail。
+- `AiohttpWsConnection.wait_closed()`：等到连接关了，也就是被 fail 了，或者发现对端已经断开：
+  - recv 收到关闭；
+  - send 发现连接断了，或者 aiohttp 心跳超时已经把它标成关了。
+
+  对端已经断开的连接没有要发的东西了，排空不用等它跑完断线 System。
 - `AiohttpServer.stop()`：
   1. 停止监听；
-  2. `_drain()`：各连接 `stop_receiving()`，等它们都被 fail（发送循环发完回复后以 1001 断开），最多
-     `SHUTDOWN_DRAIN_TIMEOUT`（新的配置键，默认 5 秒）。超时打一条警告。关服被打断后再调 `stop()` 时，
-     只等预算剩下的部分；
-  3. 没在预算内排空的：`fail(1001)`，再取消各连接的收发任务，在途的 RPC 随之取消（第 4a 步的做法，见 §5.4.4）；
+  2. `_drain()`：各连接 `stop_receiving()`，等它们都关了（`wait_closed`：发送循环发完回复后以 1001 断开，或者
+     对端已经断开），最多 `SHUTDOWN_DRAIN_TIMEOUT`（新的配置键，默认 5 秒）。超时打一条警告。关服被打断后再调
+     `stop()` 时，只等预算剩下的部分；
+  3. 没在预算内排空的：`fail(1001)`，再取消各连接的收发任务，在途的 RPC 随之取消（第 4a 步的做法，见 §5.4.4）。
+     取消落在提交之前的不提交；正好落在提交的往返里的可能已经提交了，回复却发不出去，同第 4a 步和 Sanic 栈；
   4. `runtime.stop()`、`runner.cleanup()`，同第 4a 步。
 - 握手阶段遇到排空的连接（`recv` 抛 `Draining`，`serve_connection` 记一条"关服中"再返回），handler
   收尾时以 1001 断开。
@@ -980,13 +986,23 @@ abort。所以：
 - 没有 runtime 级的 draining 状态：由 aiohttp 适配层逐个连接叫停。连接对象在 `AiohttpServer` 手里，runtime
   不持有。
 - 发送循环在 `PUSH_DRAINED` 时顺带发掉待发区里的推送和 sync。
+- 原设计是排空期间的 PUSH_CLOSE 改用 `await put`，实际另加了 `PUSH_DRAINED`。两者语义不同：
+  - PUSH_CLOSE 的意思是"接收协程已经 fail 了连接"，发送循环取到就返回；
+  - 排空时连接还开着，要发完再断开。
+- 判断排空完没有，看的是"连接关了"（被 fail，或者对端已经断开），不只是"被 fail"。
 
 **留到第 6 步**：
 
 - 配置模板和文档里写 `SHUTDOWN_DRAIN_TIMEOUT`，提示设置 compose 的 `stop_grace_period`：这个键现在只在 aiohttp
   栈上生效，而 `HETU_HTTP_SERVER` 本身不进文档。
-- 关服总时长：排空（最多 5 秒）加拆连接（最多 `GRACEFUL_SHUTDOWN_TIMEOUT`，默认 15 秒），本来就超过 docker 默认
-  的 10 秒宽限期，第 6 步写文档时一起提示。
+- 关服总时长：通常是排空的时间加断线 System 的时间。最坏情况下，排空（最多 `SHUTDOWN_DRAIN_TIMEOUT`）之后，
+  下面三步各有一份 `GRACEFUL_SHUTDOWN_TIMEOUT` 的预算：
+  - 取消收发任务；
+  - 等连接拆完；
+  - 停 FutureCalls。
+
+  取消通常立即生效。默认配置本来就可能超过 docker 默认的 10 秒宽限期，第 6 步写 `stop_grace_period` 的提示时
+  按这个估算。
 
 **测试**：
 
@@ -995,21 +1011,28 @@ abort。所以：
   - 正在执行的 RPC：执行完、回复送达之后才 1001，排在后面没读的消息不执行。假连接的发送带延迟，模拟慢链路：
     回复还在发的时候接收协程就已经停下了；
   - 在后台等着的订阅：做完、回复送达之后才 1001；
+  - 排空时队列是满的（链路慢）：`PUSH_DRAINED` 等着塞进去，已经执行的调用的回复都送达；
   - 握手之前就排空：安静地结束；发送卡住时，适配层的兜底照样能收掉。
 - `test_websocket.py`：
-  - 发送循环取到 `PUSH_DRAINED` 时发掉推送和 sync 再 1001，不计发送频率；
+  - 发送循环取到 `PUSH_DRAINED` 时发掉推送和 sync 再 1001，不计发送频率。用例把 `PUSH_MAX_HOLD` 调大，推送
+    不会在普通轮次里先发出去；
   - 发推送期间交来的 tick，它的 sync 不发。
 - `test_aiohttp_adapter.py`：
   - `stop_receiving` 叫醒正在等的 recv，之后的 recv 也抛，发送照常；
   - 缓冲里没读的消息不交出去；
-  - 叫醒用的取消和真的取消碰在一起时照常取消；
-  - `wait_failed`；握手中遇到排空收到 1001；
-  - `_drain` 按预算等，都排空了就不等满；被打断后再调只等剩下的预算，在等的任务都收掉。
+  - 叫醒之后取消计数归零；叫醒用的取消和真的取消碰在一起时照常取消；进 recv 之前吞过一次取消的任务，叫醒
+    照样转成 `Draining`；
+  - `wait_closed`：被 fail、recv 发现对端断开（正常关闭、直接断开 TCP）、send 发现连接断了、心跳超时之后
+    send；
+  - 握手中遇到排空收到 1001；
+  - `_drain` 按预算等，都排空了就不等满；不等对端已经断开、还在拆的连接；被打断后再调只等剩下的预算，在等的
+    任务都收掉。
 - `test_server_signals.py`（真起 `hetu start`）：
   - aiohttp 栈：在途的 RPC 执行完、提交，回复送达后 1001，后面没读的不执行；超出排空预算的长 RPC 被取消、
     没有提交；
-  - Sanic 栈仍是取消：原来"关服取消在途 RPC"的用例改成只跑 Sanic 栈。
-- 变异检查：下面 11 个都被抓到：
+  - Sanic 栈仍是取消：原来"关服取消在途 RPC"的用例改成只跑 Sanic 栈；
+  - 这几个用例等服务器输出里出现 `slow_mark` 开始执行的标记再发信号，不靠 sleep 估计 RPC 已经在跑了。
+- 变异检查：下面 17 个都被抓到：
   - 排空时不等发送那一边；
   - 没有排空阶段；
   - `stop_receiving` 不叫醒；
@@ -1020,7 +1043,32 @@ abort。所以：
   - 握手中排空用 1000；
   - 排空不设预算；
   - 被打断后再调重新等满预算；
-  - 被打断时不收掉在等的任务。
+  - 被打断时不收掉在等的任务；
+  - `PUSH_DRAINED` 用 `put_nowait`；
+  - recv 发现对端断开不算关了；
+  - send 发现连接断了不算关了（`ConnectionError`、`ws.closed` 两处）；
+  - 叫醒时假定进 recv 时的取消计数是 0；
+  - 叫醒不撤销取消计数。
+
+**PR #231 审查后的修改**：
+
+- 对端已经断开、还在跑断线 System 的连接也算排空完了。原来要等它拆完，到点还会误报没排空。
+  - `wait_failed` 改成 `wait_closed`，recv 发现关闭、send 发现断开也触发；
+  - 警告的文案改成"没在 N 秒内排空"。
+- recv 叫醒时比较进来时的取消计数。
+- 补测试：
+  - 队列满时 `PUSH_DRAINED` 不能丢；
+  - 叫醒后取消计数归零；
+  - 对端断开、心跳超时之后的 send。
+- 测试时序：
+  - 发送循环的排空用例把 `PUSH_MAX_HOLD` 调大；
+  - 命令行用例等服务器输出里的标记再发信号。
+- 文档：
+  - §5.3 关于 PUSH_CLOSE 的说法；
+  - "和设计的出入"；
+  - `serve_connection`、`AiohttpServer.connections` 的注释；
+  - "不提交"的说法；
+  - 关服总时长。
 
 ### 5.6 第 4c 步：性能对比
 
