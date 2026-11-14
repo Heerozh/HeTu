@@ -927,21 +927,100 @@ abort。所以：
   - 变异检查：审查时存活的 6 个（第二个信号直接退出、删掉 fail(1001) 的循环、`runtime.stop()` 挪到最前、
     删掉关服标记的检查、`_serve` 不接停服请求，以及上面几处修复各自的变异）现在都会被抓到。
 
-### 5.5 第 4b 步：关服排空（单独的 PR，只在 aiohttp 栈上做）
+### 5.5 第 4b 步：关服排空（已实施，分支 `feat/aiohttp-drain`，叠在第 4a 步的 PR #230 上）
 
 目标：关服时，在途的 RPC 处理完再断开，而不是直接取消。Sanic 栈做不到，它的 `_cancel_websocket_tasks` 会在
 `before_server_stop` 里直接取消 handler，所以 Sanic 栈保持原样，排空的测试只在 aiohttp 栈上跑。
 
-设计：
+**接口**：
 
-- runtime 进入 draining 状态。接收协程在两条消息之间停下来：检查标志位，并取消正空闲等待的 `recv`。已经读到
-  的消息照常处理完。没读的消息就没执行，客户端重连后重发不会造成重复执行。
-- 排空期间的 PUSH_CLOSE 用 `await put` 放进队列，不能用 `put_nowait` 丢掉。
-- 发送循环要等占位都完成、把回复发出去之后，才调用 `fail(1001)`。
-- 第 3 步的 `serve_connection` 是收发任意一边结束就拆连接、取消发送协程（§5.3）。排空时接收端会先停下，
-  所以进入排空后要改成等发送那一边结束，不能接收协程一停就取消发送协程。
-- 预算不复用 `GRACEFUL_SHUTDOWN_TIMEOUT`，单独设一个短的 `SHUTDOWN_DRAIN_TIMEOUT`（如 5 秒）。关服总时长要放进
-  编排器给的宽限期：docker 默认 10 秒，k8s 默认 30 秒。文档里提示设置 compose 的 `stop_grace_period`。
+- `conn.Draining(ConnectionClosed)`：适配层要求停止接收（关服排空）之后，`recv` 抛它，正在等的 recv 也要醒来
+  抛它；没读的消息不再交出去。连接还开着，发送照常。不认识它的地方当成 `ConnectionClosed` 处理也安全：停下来、
+  不再收。
+- `CLOSE_GOING_AWAY = 1001` 进 `hetu/endpoint/connection.py`，原因留空，同 Sanic 关服时发的。
+
+**aiohttp 适配层**：
+
+- `AiohttpWsConnection.stop_receiving()`：置标记，之后的 recv 抛 `Draining`；正在等的 recv 用取消叫醒，转成
+  `Draining`。
+  - 叫醒用的取消要撤销（`uncancel`）；同时还有真的取消请求时照常抛 `CancelledError`，不能吞掉。
+  - aiohttp 的读缓冲对取消是安全的（`WebSocketDataQueue.read` 被取消时不动缓冲）：叫醒时刚到的消息留在缓冲里，
+    不交出去，也就不会执行。
+  - `wait_failed()`：等到连接被 fail。
+- `AiohttpServer.stop()`：
+  1. 停止监听；
+  2. `_drain()`：各连接 `stop_receiving()`，等它们都被 fail（发送循环发完回复后以 1001 断开），最多
+     `SHUTDOWN_DRAIN_TIMEOUT`（新的配置键，默认 5 秒）。超时打一条警告。关服被打断后再调 `stop()` 时，
+     只等预算剩下的部分；
+  3. 没在预算内排空的：`fail(1001)`，再取消各连接的收发任务，在途的 RPC 随之取消（第 4a 步的做法，见 §5.4.4）；
+  4. `runtime.stop()`、`runner.cleanup()`，同第 4a 步。
+- 握手阶段遇到排空的连接（`recv` 抛 `Draining`，`serve_connection` 记一条"关服中"再返回），handler
+  收尾时以 1001 断开。
+
+**与框架无关的部分**（Sanic 栈上没人调 `stop_receiving`，这些分支走不到）：
+
+- 接收协程（`client_handler`）收到 `Draining`：
+  - 不再收新消息。它是在两条消息之间停下的，已经收到的那条照常执行完；
+  - 不取消在后台跑的订阅后半段，等它们做完；
+  - 用 `await put` 往队列塞 `PUSH_DRAINED`，满了也等着，不能丢；
+  - 返回 True。
+
+  在这期间被取消（排空超时，适配层兜底）时，取消还在等的订阅。
+- 发送循环取到 `PUSH_DRAINED`：排在前面的回复（包括订阅回复的占位）都已发出。再把待发区里的推送、sync 发掉，
+  然后以 1001 断开。
+  - 这几帧不计发送频率上限：是服务端要关，超限断开的话客户端收到的是 4002（别重连）而不是 1001。
+  - 待发区和 sync 同平时一样，在同一个同步段里取。发推送期间 hub 又交来的 tick，它的推送不发，它的 sync
+    也不能发，否则客户端会以为那次调用引起的推送都到了。
+  - 之后才交来的推送不等，客户端重连、重新订阅时会拿到最新的数据。
+- `serve_connection`：接收协程因为排空返回 True 时，不马上拆连接，接着等发送协程。原来是收发任意一边结束就拆，
+  发送协程会被取消，回复就发不出去了。
+
+**和设计的出入**：
+
+- 没有 runtime 级的 draining 状态：由 aiohttp 适配层逐个连接叫停。连接对象在 `AiohttpServer` 手里，runtime
+  不持有。
+- 发送循环在 `PUSH_DRAINED` 时顺带发掉待发区里的推送和 sync。
+
+**留到第 6 步**：
+
+- 配置模板和文档里写 `SHUTDOWN_DRAIN_TIMEOUT`，提示设置 compose 的 `stop_grace_period`：这个键现在只在 aiohttp
+  栈上生效，而 `HETU_HTTP_SERVER` 本身不进文档。
+- 关服总时长：排空（最多 5 秒）加拆连接（最多 `GRACEFUL_SHUTDOWN_TIMEOUT`，默认 15 秒），本来就超过 docker 默认
+  的 10 秒宽限期，第 6 步写文档时一起提示。
+
+**测试**：
+
+- `test_ws_serve.py`（假连接，Redis / SQLite）：
+  - 空闲的连接：马上以 1001 断开，照常拆完；
+  - 正在执行的 RPC：执行完、回复送达之后才 1001，排在后面没读的消息不执行。假连接的发送带延迟，模拟慢链路：
+    回复还在发的时候接收协程就已经停下了；
+  - 在后台等着的订阅：做完、回复送达之后才 1001；
+  - 握手之前就排空：安静地结束；发送卡住时，适配层的兜底照样能收掉。
+- `test_websocket.py`：
+  - 发送循环取到 `PUSH_DRAINED` 时发掉推送和 sync 再 1001，不计发送频率；
+  - 发推送期间交来的 tick，它的 sync 不发。
+- `test_aiohttp_adapter.py`：
+  - `stop_receiving` 叫醒正在等的 recv，之后的 recv 也抛，发送照常；
+  - 缓冲里没读的消息不交出去；
+  - 叫醒用的取消和真的取消碰在一起时照常取消；
+  - `wait_failed`；握手中遇到排空收到 1001；
+  - `_drain` 按预算等，都排空了就不等满；被打断后再调只等剩下的预算，在等的任务都收掉。
+- `test_server_signals.py`（真起 `hetu start`）：
+  - aiohttp 栈：在途的 RPC 执行完、提交，回复送达后 1001，后面没读的不执行；超出排空预算的长 RPC 被取消、
+    没有提交；
+  - Sanic 栈仍是取消：原来"关服取消在途 RPC"的用例改成只跑 Sanic 栈。
+- 变异检查：下面 11 个都被抓到：
+  - 排空时不等发送那一边；
+  - 没有排空阶段；
+  - `stop_receiving` 不叫醒；
+  - 叫醒吞掉真的取消；
+  - 排空时取消订阅；
+  - `PUSH_DRAINED` 不发推送；
+  - 发完推送才取 sync；
+  - 握手中排空用 1000；
+  - 排空不设预算；
+  - 被打断后再调重新等满预算；
+  - 被打断时不收掉在等的任务。
 
 ### 5.6 第 4c 步：性能对比
 
@@ -1097,7 +1176,7 @@ abort。所以：
 | `ctx.request` 变成 aiohttp 的 `web.Request` | 6 | 无（文档本来就标注 unsafe） |
 | Sanic app 的 `app.ctx` 上不再有 `table_managers`、`default_backend` 和各后端名的属性，统一改为放在 `app.ctx.runtime` 上。这些属性没写进文档，但用户的 `on_server_setup` 钩子可能用过 | 1 | 无 |
 | `on_server_setup` 只在 worker 里执行，不再在管理进程执行 | 5（aiohttp 栈）、6 | 无 |
-| 关服时在途的 RPC 先处理完再断开 | 4b（aiohttp 栈）、6 | 无 |
+| 关服时在途的 RPC 先处理完、回复发出去再断开，没读的消息不执行；新配置 `SHUTDOWN_DRAIN_TIMEOUT`（默认 5 秒），超时的取消 | 4b（aiohttp 栈）、6 | 无 |
 | ws 心跳超时：客户端看到 1006（aiohttp 直接断开 transport），以前是 1011；`WEBSOCKET_PING_TIMEOUT` 不再可配，等 pong 的时间是 heartbeat/2 | 4a（aiohttp 栈）、6 | 无 |
 | 发送数据时出了意外的异常：客户端收到的 close 码从 1000 变成 1011 | 3 | 无 |
 | 落库 Connection 行失败时（包括同 IP 匿名连接数超限）：close 码从 1000 变成 1011；匿名连接数超限时不再打堆栈 | 3 | 无 |
