@@ -68,8 +68,8 @@ public class NetBootstrap : MonoBehaviour
 
 源码强制执行但片段中不易察觉的关键点：
 
-- **URL 格式** — `ws://<host>:<port>/hetu/<instance>`（如果服务器/反向代理终止 TLS，则使用
-  `wss://...`）。`/hetu/` 前缀是必需的，`<instance>` 必须匹配服务器 `config.yml` 中的
+- **URL 格式** — `ws://<host>:<port>/hetu/<instance>`（如果前面的反向代理（推荐 Caddy）终止了 TLS，
+  则使用 `wss://...`；HeTu 自己不处理 TLS）。`/hetu/` 前缀是必需的，`<instance>` 必须匹配服务器 `config.yml` 中的
   `INSTANCES:` 条目之一（如果从 CLI 启动，则匹配 `--instance`
   标志）。未知实例会在握手后被拒绝 — 这是设计使然，以防止端口扫描器枚举有效名称。
 - **`Connect` 是长阻塞的。** 它会等待直到套接字关闭，正常关闭时返回 `null`，应用退出 / 调用

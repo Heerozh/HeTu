@@ -12,7 +12,7 @@ Sanic adapter: builds the Sanic app and wires its lifecycle into `WorkerRuntime`
 
 import asyncio
 import logging
-import logging.config
+import signal
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,8 +22,6 @@ from sanic.worker.process import WorkerProcess
 
 from ... import webext
 from ...i18n import _
-from ...safelogging.default import DEFAULT_LOGGING_CONFIG
-from ...safelogging.formatter import ContextAutoFormatter
 from .. import websocket as _websocket  # noqa: F401  导入即注册 ws 路由
 from ..config import HeTuConfig
 from ..runtime import (
@@ -32,6 +30,7 @@ from ..runtime import (
     STARTUP_TIMEOUT_CONFIG_KEY,
     WorkerRuntime,
     prepare_worker,
+    setup_logging,
     setup_message_pipeline,
 )
 from ..threaded_accept import IS_WINDOWS, threaded_accept_listener
@@ -97,6 +96,54 @@ async def _stop_when_serving(app: Sanic) -> None:
     app.stop()
 
 
+_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def _ignore_shutdown_signals() -> None:
+    for sig in _SHUTDOWN_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+
+
+async def _guard_shutdown_signals(app: Sanic) -> None:
+    """
+    after_server_start（Windows 除外）：关服信号只认第一个，之后的都忽略。
+
+    Sanic 在 worker 里给 SIGINT / SIGTERM 注册的处理是每次都调 app.stop()。终端里 Ctrl+C 会把 SIGINT
+    发给整个进程组，多 worker 时管理进程还会再转发一次；systemd 默认的 KillMode=control-group 也会给
+    每个进程都发 SIGTERM。所以 worker 常常会收到第二个信号。Linux 上用的是 uvloop，loop 停下之后
+    remove_signal_handler 不起作用，第二个信号照样 loop.stop()，正在跑的关服步骤的 run_until_complete
+    抛 RuntimeError：
+
+    - 落在 before / after_server_stop 里：Sanic 的 _run_shutdown_coro 把它整个重跑一遍，第一遍的 task
+      还挂着接着跑（runtime.stop() 为此只执行一次）；
+    - 落在 _cleanup 等连接拆完的那段里：异常没人接，after_server_stop 整个被跳过，断线 System 不跑、
+      Connection 行不删、租约不释放、后端不关。
+
+    所以第一个信号一到就把两种关服信号都忽略掉，再走 Sanic 原来的停服。代价是单进程模式下第二次
+    Ctrl+C 不能强退；关服的每一步都有 GRACEFUL_SHUTDOWN_TIMEOUT 兜底，不会一直卡住。
+    """
+    loop = asyncio.get_running_loop()
+
+    def on_shutdown_signal() -> None:
+        app.ctx.shutdown_signal_received = True
+        _ignore_shutdown_signals()
+        app.stop(terminate=False)
+
+    # 在 Sanic 注册之后（after_server_start）再注册，覆盖它的
+    for sig in _SHUTDOWN_SIGNALS:
+        loop.add_signal_handler(sig, on_shutdown_signal)
+
+
+async def _keep_ignoring_shutdown_signals(app: Sanic) -> None:
+    """
+    before_server_stop：Sanic 停服时会卸掉信号处理。标准 asyncio 的 remove_signal_handler 会把 SIGINT
+    恢复成抛 KeyboardInterrupt、把 SIGTERM 恢复成直接终止进程，这里重新忽略，保护接下来的关服步骤。
+    只在确实是收到关服信号停服时才这么做：测试、嵌入场景里由代码调用 app.stop() 时不动进程的信号处理
+    """
+    if getattr(app.ctx, "shutdown_signal_received", False):
+        _ignore_shutdown_signals()
+
+
 async def _runtime_start(app: Sanic) -> None:
     """before_server_start：每次开服新建一个 runtime（Sanic 的测试客户端会对同一个 app 反复起停）"""
     runtime = WorkerRuntime(
@@ -131,12 +178,12 @@ def worker_main(app_name: str, config: Mapping[str, Any]) -> Sanic:
     # 加载玩家的app文件、建簇、把配置传给各模块
     prepare_worker(config)
 
-    # 日志由 HeTu 自己 dictConfig，不交给 Sanic。深度 Debug 时把 ctx 等字段逐行附在日志后面
-    ContextAutoFormatter.LOG_EXTRA = int(config["DEBUG"]) > 1
-    logging.config.dictConfig(config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
+    # 日志由 HeTu 自己配，不交给 Sanic
+    setup_logging(config)
 
-    # 加载web服务器
-    app = Sanic(app_name, configure_logging=False)
+    # 加载web服务器。不让 Sanic 读 SANIC_ 前缀的环境变量：配置只有 HeTuConfig 这一份，CLI、runtime、
+    # ack 阈值读到的都一样
+    app = Sanic(app_name, configure_logging=False, env_prefix=None)
     app.update_config(config)
     # 访问日志交给前面的反向代理；Sanic 的 Inspector 不用（以后由 CLI 提供 reload）。配置里就算还
     # 留着这两个键也关掉
@@ -153,10 +200,7 @@ def worker_main(app_name: str, config: Mapping[str, Any]) -> Sanic:
     # 重定向logger，把sanic的重定向到hetu
     root_logger = logging.getLogger("sanic")
     root_logger.parent = logger
-    if config["DEBUG"]:
-        logger.setLevel(logging.DEBUG)
     if int(config["DEBUG"]) > 1:
-        logging.getLogger().setLevel(logging.DEBUG)
         root_logger.setLevel(logging.DEBUG)
 
     # 加载协议, 初始化消息处理流水线
@@ -172,6 +216,10 @@ def worker_main(app_name: str, config: Mapping[str, Any]) -> Sanic:
     # 见 threaded_accept.py
     if IS_WINDOWS:
         app.before_server_start(threaded_accept_listener)
+    else:
+        # 关服信号只认第一个，之后的不能打断关服流程，见 _guard_shutdown_signals
+        app.after_server_start(_guard_shutdown_signals)
+        app.before_server_stop(_keep_ignoring_shutdown_signals)
 
     # 开始监听之后启动 FutureCalls，要注册在用户的钩子（webext.apply_to）之前。续约、水位预留
     # 两个循环在 runtime.start() 拿到租约时就起了

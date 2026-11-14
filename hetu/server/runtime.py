@@ -16,6 +16,7 @@ any web framework; each framework adapter only wires it into its own lifecycle.
 import asyncio
 import functools
 import logging
+import logging.config
 import os
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
@@ -28,6 +29,8 @@ from ..endpoint import connection
 from ..i18n import _
 from ..local import load_app_module
 from ..manager import ComponentTableManager
+from ..safelogging.default import DEFAULT_LOGGING_CONFIG
+from ..safelogging.formatter import ContextAutoFormatter
 from ..system import SystemClusters
 from ..system import lock as system_lock
 from ..system.future import future_call_task
@@ -104,6 +107,23 @@ def prepare_worker(config: Mapping[str, Any]) -> None:
     system_lock.CALL_LOCK_RETENTION = config.get(
         "CALL_LOCK_RETENTION", system_lock.CALL_LOCK_RETENTION
     )
+
+
+def setup_logging(config: Mapping[str, Any]) -> None:
+    """
+    按配置的 LOGGING 配好日志（dictConfig），并按 DEBUG 调 HeTu 的日志级别。与 Web 框架无关，在建
+    框架的 app 之前调用；Sanic 多进程时管理进程也会跑一遍。深度 Debug（DEBUG > 1）时控制台日志附带
+    ctx 等 extra 字段。
+
+    Configure logging from the LOGGING config, independent of the web framework.
+    """
+    debug = int(config.get("DEBUG", 0))
+    ContextAutoFormatter.LOG_EXTRA = debug > 1
+    logging.config.dictConfig(config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
+    if debug:
+        logger.setLevel(logging.DEBUG)
+    if debug > 1:
+        logging.getLogger().setLevel(logging.DEBUG)
 
 
 def setup_message_pipeline(config: Mapping[str, Any]) -> None:
@@ -489,9 +509,10 @@ class WorkerRuntime:
         4. 停续约、水位预留循环，写精确水位并释放 Worker ID；
         5. 关后端。
 
-        可以重复调用、并发调用，只真正关一次。Sanic 关服时 after_server_stop 可能跑两遍，而且
-        两遍并发：终端里 Ctrl+C 会把 SIGINT 发给整个进程组，管理进程再转发一次；第二个信号打断
-        第一遍后，Sanic 的 `_run_shutdown_coro` 会把它整个重跑一遍，第一遍的 task 还挂着接着跑。
+        可以重复调用、并发调用，只真正关一次；关到一半被打断后再调，已经做完的步骤不再做。Sanic 关服
+        时 after_server_stop 可能跑两遍，而且两遍并发：第二个关服信号让 loop.stop()，正在跑的那遍
+        run_until_complete 抛 RuntimeError，Sanic 的 `_run_shutdown_coro` 把它整个重跑一遍，第一遍的
+        task 还挂着接着跑（Sanic 适配层已经让 worker 只认第一个关服信号，这里是兜底）。
 
         Shut down in a fixed order: wait for connections, cancel leftover connection
         tasks, stop FutureCalls, release the lease, close backends. Safe to call more

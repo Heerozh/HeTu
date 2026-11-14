@@ -134,11 +134,16 @@ class StartCommand(CommandInterface):
         from sanic import Sanic
         from sanic.worker.loader import AppLoader
 
+        from ..common.helper import WORKER_INDEX_ENV
         from ..safelogging import handlers as log_handlers
         from ..server import StartupAborted, worker_main
         from ..server.config import HeTuConfig
         from ..server.pipeline import CryptoLayer
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
+
+        # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能传给 worker：它比 Sanic 给的
+        # 序号优先，所有 worker 会拿到同一个，SQLite 后端上 Worker ID 就重了
+        os.environ.pop(WORKER_INDEX_ENV, None)
 
         # 命令行转配置文件
         config_file = locate_config_file(args)

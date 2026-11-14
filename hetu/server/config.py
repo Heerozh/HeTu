@@ -14,8 +14,9 @@ HeTu server config: a dict with attribute access, independent of the web framewo
 from collections.abc import Mapping
 from typing import Any
 
-# 原来由 Sanic 读取、迁移后仍保留的键，HeTu 自己给默认值（和 Sanic 25.12 的默认值相同），免得换
-# 框架时默认值悄悄变掉。DEBUG 也给个默认值：worker_main 要按它设日志级别
+# 原来由 Sanic 读取、迁移后仍保留的键，HeTu 自己给默认值（和 Sanic 25.12 的默认值等价，只有
+# PROXIES_COUNT 用 0 代替 None，都表示不解析），免得换框架时默认值悄悄变掉。DEBUG 也给个默认值：
+# worker_main 要按它设日志级别
 DEFAULTS: dict[str, Any] = {
     "DEBUG": False,
     # 关服时等连接拆完、等后台任务停下各自的上限（秒）
@@ -60,3 +61,7 @@ class HeTuConfig(dict[str, Any]):
             return self[name]
         except KeyError:
             raise AttributeError(name) from None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # 按属性写也写进 dict，不然属性读到新值、config["X"] / get 还是旧值
+        self[name] = value

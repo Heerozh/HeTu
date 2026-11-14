@@ -571,9 +571,9 @@ async def test_runtime_post_configures_and_closes_each_backend_once(
 async def test_runtime_stop_runs_once_when_called_twice(
     monkeypatch, mod_test_app, mod_backend_config
 ):
-    """Sanic 关服时 after_server_stop 可能跑两遍，而且两遍并发：终端里 Ctrl+C 会把 SIGINT 发给
-    整个进程组，管理进程再转发一次；第二个信号打断第一遍后，Sanic 的 _run_shutdown_coro 会把它
-    整个重跑一遍，第一遍的 task 还挂着接着跑。stop() 要只真正关一次：租约只释放一次，后端只关一次"""
+    """Sanic 关服时 after_server_stop 可能跑两遍，而且两遍并发：第二个关服信号让 loop.stop()，
+    正在跑的那遍 run_until_complete 抛 RuntimeError，Sanic 的 _run_shutdown_coro 把它整个重跑一遍，
+    第一遍的 task 还挂着接着跑。stop() 要只真正关一次：租约只释放一次，后端只关一次"""
     from hetu.data.backend import Backend
     from hetu.data.backend.snowflake_lease import SnowflakeLease
 
@@ -595,6 +595,51 @@ async def test_runtime_stop_runs_once_when_called_twice(
     await asyncio.gather(runtime.stop(), runtime.stop())
     await runtime.stop()
     assert calls == {"close": 1, "release": 1}
+
+
+async def test_runtime_stop_resumes_after_being_interrupted(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """关到一半被打断（被取消，或标准 asyncio 下抛 KeyboardInterrupt）后再调 stop()：已经释放的
+    租约、已经关掉的后端不再来第二次，没关完的接着关"""
+    from hetu.data.backend import Backend
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    closed: list[int] = []
+    releases: list[int] = []
+    interrupted: list[int] = []
+    close, release = Backend.close, SnowflakeLease.release
+
+    async def interrupting_close(self):
+        # 第一个后端关掉之后、第二个后端第一次关的时候被打断
+        if closed and not interrupted:
+            interrupted.append(id(self))
+            raise asyncio.CancelledError
+        closed.append(id(self))
+        return await close(self)
+
+    async def counting_release(self):
+        releases.append(1)
+        return await release(self)
+
+    monkeypatch.setattr(Backend, "close", interrupting_close)
+    monkeypatch.setattr(SnowflakeLease, "release", counting_release)
+    runtime = WorkerRuntime(
+        {
+            "NAMESPACE": "pytest",
+            "INSTANCES": ["snowflake_restart"],
+            "BACKENDS": {"main": mod_backend_config, "second": mod_backend_config},
+        },
+        on_lease_lost=lambda: None,
+    )
+    await runtime.start_backends()
+    first, second = (backend for _name, backend in runtime._unique_backends())
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.stop()
+    assert interrupted == [id(second)]
+    await runtime.stop()
+    assert closed == [id(first), id(second)]
+    assert releases == [1]
 
 
 def test_runtime_default_backend_is_first_configured(monkeypatch):
@@ -1016,6 +1061,17 @@ def test_worker_ident(monkeypatch):
     assert worker_index() == 12
     monkeypatch.delenv("HETU_WORKER_INDEX")
     assert (worker_index(), worker_ident()) == (5, "Srv 5")
+    # 过渡期：Sanic 给 Reloader 等进程的标识里没有序号，原样显示
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Reloader")
+    assert (worker_index(), worker_ident()) == (None, "Reloader")
+    # 空串当作没设；其他不是非负整数的值直接报错
+    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "")
+    assert worker_index() is None
+    for bad in ("-1", "abc", "1.5"):
+        monkeypatch.setenv("HETU_WORKER_INDEX", bad)
+        with pytest.raises(ValueError, match="HETU_WORKER_INDEX"):
+            worker_index()
 
 
 async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path):

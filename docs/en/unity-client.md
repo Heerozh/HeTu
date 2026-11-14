@@ -81,7 +81,7 @@ public class NetBootstrap : MonoBehaviour
 Key points the source enforces but isn't always obvious from a snippet:
 
 - **URL format** — `ws://<host>:<port>/hetu/<instance>` (or `wss://...`
-  when the server / reverse-proxy terminates TLS). The `/hetu/` prefix is
+  when the reverse proxy in front, e.g. Caddy, terminates TLS; HeTu itself does not). The `/hetu/` prefix is
   required, and `<instance>` must match one of the `INSTANCES:` entries
   in your server's `config.yml` (or the `--instance` flag if it was
   started from CLI). An unknown instance is rejected after the handshake
