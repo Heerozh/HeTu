@@ -552,7 +552,8 @@ def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
     """
     按 LISTEN（host:port）建好监听 socket，端口冲突等错误在这里就抛出，不会先跑一遍开服。和 Sanic 的
     bind_socket 一样：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上
-    不设 SO_REUSEADDR，那里设了它别的进程就能抢同一个端口
+    不设 SO_REUSEADDR：那里设了它，端口冲突报的是 10013（WSAEACCES）而不是 10048，会被当成端口落在
+    excludedportrange 里、打出误导的提示（Win11 实测，设了也抢不到别的进程正在监听的同一个地址）
     """
     host, port = listen.rsplit(":", 1)
     host = host.strip("[]")

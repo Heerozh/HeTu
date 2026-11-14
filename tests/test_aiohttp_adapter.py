@@ -879,6 +879,36 @@ async def test_shutdown_signals_stay_ignored_after_the_first():
         signal.signal(signal.SIGTERM, previous[1])
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows 的 Ctrl+C")
+def test_windows_ctrl_c_handled_while_loop_idle():
+    """
+    Windows：selector 事件循环卡在 select() 里的时候 Python 的信号处理跑不了，Ctrl+C 要等事件循环醒来才
+    生效。装上关服信号的处理之后，事件循环每 WINDOWS_WAKEUP_INTERVAL 秒醒一次，空闲时按 Ctrl+C 也马上
+    开始关服。事件循环是这里自己建的，上面除了等 5 秒的超时没有别的定时器；不叫醒的话要等到超时
+    """
+    import signal
+    import threading
+
+    async def main() -> float:
+        stopped = asyncio.Event()
+        restore = aiohttp_app._install_stop_signals(
+            asyncio.get_running_loop(), stopped.set
+        )
+        try:
+            start = time.monotonic()
+            # 别的线程里来一个 SIGINT：C 层只记下来，Python 的处理要等主线程从 select() 回来才跑
+            threading.Timer(0.3, signal.raise_signal, (signal.SIGINT,)).start()
+            async with asyncio.timeout(5):
+                await stopped.wait()
+            return time.monotonic() - start
+        finally:
+            restore()
+
+    with asyncio.Runner(loop_factory=aiohttp_app.new_event_loop) as runner:
+        took = runner.run(main())
+    assert took < 0.3 + 0.5
+
+
 def test_lease_lost_requests_stop_with_failure_code():
     """
     雪花号租约丢了：单进程没法只重启 worker，要求停服（hetu start 随后关服），退出码非 0，交给
