@@ -53,3 +53,46 @@ def test_resolve_worker_num_negative_means_auto():
     assert resolve_worker_num(1) == 1
     assert resolve_worker_num(-1) == (os.process_cpu_count() or 1)
     assert resolve_worker_num(-1) >= 1
+
+
+def _write_config(tmp_path, workers: int) -> str:
+    config = tmp_path / "config.yml"
+    config.write_text(
+        f"""
+APP_FILE: app.py
+NAMESPACE: pytest
+INSTANCES: [cli_start]
+LISTEN: 127.0.0.1:0
+WORKER_NUM: {workers}
+PACKET_LAYERS:
+  - type: jsonb
+BACKENDS:
+  main:
+    type: sqlite
+    master: sqlite:///{tmp_path / "cli_start.db"}
+""",
+        encoding="utf-8",
+    )
+    return str(config)
+
+
+def test_aiohttp_rejects_multiple_workers(tmp_path, monkeypatch, capsys):
+    """aiohttp 栈第 5 步之前只支持单进程：WORKER_NUM > 1 时报错退出，不悄悄降成单进程"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HETU_HTTP_SERVER", "aiohttp")
+    sys.argv[1:] = ["start", "--config", _write_config(tmp_path, workers=2)]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+    assert "WORKER_NUM" in capsys.readouterr().out
+
+
+def test_http_server_env_must_be_known(tmp_path, monkeypatch, capsys):
+    """HETU_HTTP_SERVER 只能是 sanic 或 aiohttp"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HETU_HTTP_SERVER", "tornado")
+    sys.argv[1:] = ["start", "--config", _write_config(tmp_path, workers=1)]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+    assert "tornado" in capsys.readouterr().out

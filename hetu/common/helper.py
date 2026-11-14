@@ -57,6 +57,22 @@ def is_container_env():
     return False
 
 
+def enable_windows_console_ansi() -> None:
+    """
+    在 Windows 控制台打开 ANSI 转义支持，彩色日志和启动 LOGO 才不会显示成裸转义码。移植自 Sanic 的
+    `enable_windows_color_support`（MIT License），原来 `import sanic.app` 时会顺带调用；不加载 sanic
+    的启动路径要自己调。其他平台什么也不做。
+
+    Enable ANSI escape sequences on the Windows console; a no-op elsewhere.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    kernel = ctypes.windll.kernel32
+    kernel.SetConsoleMode(kernel.GetStdHandle(-11), 7)
+
+
 def worker_index() -> int | None:
     """
     本进程在本机内的 worker 序号；单进程模式、管理进程、工具进程没有，返回 None。

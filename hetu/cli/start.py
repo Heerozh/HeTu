@@ -25,6 +25,10 @@ from .base import (
 # 命令行参数模式下的默认值。参数本身默认为 None，才能判断是否显式给出（见 flag_mode_requested）
 DEFAULT_APP_FILE = "/app/app.py"
 DEFAULT_DB = "redis://127.0.0.1:6379/0"
+# 换 aiohttp 的过渡期里选 Web 服务器：sanic（默认）或 aiohttp。只在过渡期用，不写进配置模板和文档，
+# 删掉 Sanic 时一起删（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §4.3）
+HTTP_SERVER_ENV = "HETU_HTTP_SERVER"
+HTTP_SERVERS = ("sanic", "aiohttp")
 
 logger = logging.getLogger("HeTu.root")
 
@@ -49,6 +53,68 @@ def resolve_worker_num(worker_num: int) -> int:
     if worker_num < 0:
         return os.process_cpu_count() or 1
     return worker_num
+
+
+def log_server_info(config, name: str, workers: int, http_server: str) -> None:
+    """开服前打一遍服务器信息：LOGO、模式、进程数、监听地址、消息流水线、auth_key 指纹"""
+    from ..server.pipeline import CryptoLayer
+
+    host, port = config.LISTEN.rsplit(":", 1)
+    logger.info(FULL_COLOR_LOGO)
+    logger.info(
+        _("ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}").format(
+            name=name,
+            mode="Debug" if config.DEBUG else "Production",
+            workers=workers,
+            pid=os.getpid(),
+        )
+    )
+    logger.info(
+        _("ℹ️ Python {version} 平台 {platform}").format(
+            version=sys.version, platform=sys.platform
+        )
+    )
+    logger.info(_("ℹ️ Web 服务器：{server}").format(server=http_server))
+    # TLS 由前面的反向代理（推荐 Caddy）终止，HeTu 自己只监听明文
+    logger.info(_("📡 监听地址： http://{host}:{port}").format(host=host, port=port))
+    layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
+    logger.info(
+        _("ℹ️ 消息流协议：json -> {layers} -> Network").format(
+            layers=" -> ".join(layer_types)
+        )
+    )
+    # 打印 crypto 层 auth_key 的脱敏指纹，便于多服开服时核对各服/客户端密钥是否一致
+    crypto_layer = next(
+        (
+            layer
+            for layer in config.get("PACKET_LAYERS", [])
+            if layer.get("type") == "crypto"
+        ),
+        None,
+    )
+    if crypto_layer is not None:
+        masked = CryptoLayer.mask_auth_key(crypto_layer.get("auth_key"))
+        if masked:
+            logger.info(_("🔑 auth_key: {key}").format(key=masked))
+        else:
+            logger.warning(_("🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"))
+
+    if int(config.DEBUG) > 1:
+        logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
+        logger.warning(_("⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"))
+        logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
+
+
+def print_port_hint(err: OSError) -> None:
+    """Windows 上端口落在系统保留段（excludedportrange）时 bind 报 10013，提示怎么解开"""
+    if "10013" in str(err):
+        print(
+            _(
+                "端口可能被系统 excludedportrange 禁用了，请用管理员执行："
+                "net stop winnat"
+                "net start winnat"
+            )
+        )
 
 
 def wait_for_port(host, port, timeout=30):
@@ -131,19 +197,24 @@ class StartCommand(CommandInterface):
 
     @classmethod
     def execute(cls, args):
-        from sanic import Sanic
-        from sanic.worker.loader import AppLoader
-
         from ..common.helper import WORKER_INDEX_ENV
-        from ..safelogging import handlers as log_handlers
-        from ..server import StartupAborted, worker_main
         from ..server.config import HeTuConfig
-        from ..server.pipeline import CryptoLayer
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 
         # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能传给 worker：它比 Sanic 给的
         # 序号优先，所有 worker 会拿到同一个，SQLite 后端上 Worker ID 就重了
         os.environ.pop(WORKER_INDEX_ENV, None)
+
+        http_server = os.environ.get(HTTP_SERVER_ENV) or "sanic"
+        if http_server not in HTTP_SERVERS:
+            print(
+                _("环境变量 {name} 只能是 {choices}，现在是 {value!r}").format(
+                    name=HTTP_SERVER_ENV,
+                    choices=" / ".join(HTTP_SERVERS),
+                    value=http_server,
+                )
+            )
+            sys.exit(2)
 
         # 命令行转配置文件
         config_file = locate_config_file(args)
@@ -203,6 +274,67 @@ class StartCommand(CommandInterface):
         # per-boot uuid：main进程每次开服生成一次，经config_for_factory透传给每个worker，
         # 使 on_start System 在本次开服只跑一次（去重见 hetu.system.startup）
         config_for_factory[ON_START_UUID_CONFIG_KEY] = make_boot_uuid()
+        if http_server == "aiohttp":
+            cls.serve_aiohttp(config_for_factory, workers)
+            return
+        cls.serve_sanic(config, config_for_factory, workers)
+
+    @classmethod
+    def serve_aiohttp(cls, config_for_factory, workers: int) -> None:
+        """
+        aiohttp 栈：单进程，在本进程里开服（设计稿 §5.4.3）。依次：配日志、启动日志 Listener；bind
+        监听 socket（端口冲突在这里就失败，不会先跑一遍开服）；开服、等关服信号、关服
+        """
+        from ..common.helper import enable_windows_console_ansi
+        from ..safelogging import handlers as log_handlers
+        from ..server import StartupAborted
+        from ..server.adapters import aiohttp_app
+
+        if workers != 1:
+            print(
+                _(
+                    "{name}=aiohttp 目前只支持单进程，请把 WORKER_NUM 设为 1（现在是 {workers}）"
+                ).format(name=HTTP_SERVER_ENV, workers=workers)
+            )
+            sys.exit(2)
+        # 原来 import sanic 时会顺带打开；这条路径不加载 sanic
+        enable_windows_console_ansi()
+        config = aiohttp_app.prepare(config_for_factory)
+        log_handlers.AutoListener.start_all()
+        log_server_info(config, f"Hetu-{config.NAMESPACE}", workers, "aiohttp")
+        try:
+            sock = aiohttp_app.bind_socket(config.LISTEN)
+        except OSError as e:
+            logger.error(
+                _("❌ 监听 {listen} 失败：{err}").format(listen=config.LISTEN, err=e)
+            )
+            print_port_hint(e)
+            log_handlers.stop_all_logging_handlers()
+            sys.exit(1)
+        try:
+            exit_code = aiohttp_app.run(config, sock)
+        except StartupAborted as e:
+            logger.error(
+                _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
+            )
+            log_handlers.stop_all_logging_handlers()
+            sys.exit(1)
+        finally:
+            sock.close()
+        # 退出log listener
+        log_handlers.stop_all_logging_handlers()
+        if exit_code:
+            sys.exit(exit_code)
+
+    @classmethod
+    def serve_sanic(cls, config, config_for_factory, workers: int) -> None:
+        """Sanic 栈：单进程或多进程，由 Sanic 管"""
+        from sanic import Sanic
+        from sanic.worker.loader import AppLoader
+
+        from ..safelogging import handlers as log_handlers
+        from ..server import StartupAborted, worker_main
+
         # 加载app
         loader = AppLoader(
             factory=partial(worker_main, f"Hetu-{config.NAMESPACE}", config_for_factory)
@@ -222,51 +354,7 @@ class StartCommand(CommandInterface):
 
         # 显示服务器信息
         host, port = config.LISTEN.rsplit(":", 1)
-
-        logger.info(FULL_COLOR_LOGO)
-        logger.info(
-            _("ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}").format(
-                name=app.name,
-                mode="Debug" if config.DEBUG else "Production",
-                workers=workers,
-                pid=os.getpid(),
-            )
-        )
-        logger.info(
-            _("ℹ️ Python {version} 平台 {platform}").format(
-                version=sys.version, platform=sys.platform
-            )
-        )
-        # TLS 由前面的反向代理（推荐 Caddy）终止，HeTu 自己只监听明文
-        logger.info(
-            _("📡 监听地址： http://{host}:{port}").format(host=host, port=port)
-        )
-        layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
-        logger.info(
-            _("ℹ️ 消息流协议：json -> {layers} -> Network").format(
-                layers=" -> ".join(layer_types)
-            )
-        )
-        # 打印 crypto 层 auth_key 的脱敏指纹，便于多服开服时核对各服/客户端密钥是否一致
-        crypto_layer = next(
-            (
-                layer
-                for layer in config.get("PACKET_LAYERS", [])
-                if layer.get("type") == "crypto"
-            ),
-            None,
-        )
-        if crypto_layer is not None:
-            masked = CryptoLayer.mask_auth_key(crypto_layer.get("auth_key"))
-            if masked:
-                logger.info(_("🔑 auth_key: {key}").format(key=masked))
-            else:
-                logger.warning(_("🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"))
-
-        if int(config.DEBUG) > 1:
-            logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
-            logger.warning(_("⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"))
-            logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
+        log_server_info(config, app.name, workers, "sanic")
 
         # 准备启动服务器
         os.environ["SANIC_IGNORE_PRODUCTION_WARNING"] = "1"
@@ -296,15 +384,8 @@ class StartCommand(CommandInterface):
             log_handlers.stop_all_logging_handlers()
             sys.exit(1)
         except PermissionError as e:
-            if "10013" in str(e):
-                print(
-                    _(
-                        "端口可能被系统 excludedportrange 禁用了，请用管理员执行："
-                        "net stop winnat"
-                        "net start winnat"
-                    )
-                )
-                raise
+            print_port_hint(e)
+            raise
 
         # 单进程模式丢租约时 on_lease_lost 停服并把 runtime.exit_code 置为非 0（app.stop() 本身
         # 退出码是 0），让 docker/systemd/k8s 按失败重启。多进程时管理进程没有 runtime
