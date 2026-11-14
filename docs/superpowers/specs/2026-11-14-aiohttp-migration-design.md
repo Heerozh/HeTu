@@ -1,8 +1,8 @@
 # 用 aiohttp 替换 Sanic — 设计稿
 
 - 日期：2026-11-14
-- 状态：设计中，已做一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0 步在 `test/server-harness`
-  分支上做。已定事项见 §13，待定问题见 §14。
+- 状态：设计中，已做一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0 步已合并（PR #226），
+  第 1 步在 `refactor/worker-runtime` 分支上做。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -308,89 +308,120 @@ loop（`web_app.py:264-270`）。
 验收：全部测试照旧通过；`test_websocket.py`、`test_headless_ws.py` 不再 import sanic / sanic_testing，
 也不再用 `test_client`（docstring 里讲服务端行为时提到 Sanic 的不算）。
 
-### 5.1 第 1 步：WorkerRuntime
+### 5.1 第 1 步：WorkerRuntime（已实施，分支 `refactor/worker-runtime`）
 
-新增 `hetu/server/runtime.py`：
+新增 `hetu/server/runtime.py`、`hetu/server/adapters/sanic_app.py`，删掉 `hetu/server/main.py`：
 
 ```python
 class TaskRegistry:
     """HeTu 自己的任务表，两个栈共用。"""
 
-    def spawn(self, coro, *, name: str | None = None) -> asyncio.Task: ...
-    async def cancel(self, name: str) -> None: ...  # 按名取消并等它结束；不存在就什么也不做
-    async def cancel_all(self, timeout: float) -> None: ...
+    def spawn(self, coro, *, name: str | None = None) -> asyncio.Task: ...  # 重名抛 ValueError
+    async def cancel(self, target: asyncio.Task | str) -> None: ...  # 按句柄或名字取消并等它结束
+    async def cancel_all(self, timeout: float | None) -> bool: ...
 
 class WorkerRuntime:
-    """一个服务实例一个，持有 HeTu 在一个 worker 里的全部运行时状态。"""
+    """一个服务实例一个：适配层每次开服新建一个。"""
 
     config: Mapping[str, Any]
-    backends: dict[str, Backend]
-    default_backend: Backend
+    backends: dict[str, Backend]  # 按配置名登记，另有 "default" 别名指向第一个
+    default_backend: Backend  # 属性：配置里的第一个后端（和原来一致）
     table_managers: dict[str, ComponentTableManager]
-    snowflake_lease: SnowflakeLease
-    tasks: TaskRegistry  # 连接相关的任务（接收协程、recheck_alive）
-    background: TaskRegistry  # FutureCalls、续约、水位
+    snowflake_lease: SnowflakeLease | None
+    tasks: TaskRegistry  # 连接相关：接收协程、顶号核查
+    background: TaskRegistry  # FutureCalls
+    live_connections: set[asyncio.Task]  # 连接表：Connection 行已落库的连接协程
+    cleanup_tasks: set[asyncio.Task]  # 连接表：拆连接的清理任务
     on_lease_lost: Callable[[], None]  # 由适配层注入
+    exit_code: int  # 单进程丢租约时由适配层置为非 0
 
     async def start(self) -> None: ...
-    def start_background(self) -> None: ...  # 开始监听之后：FutureCalls、雪花水位
+    async def start_backends(self) -> None: ...
+    def start_background(self) -> None: ...  # 开始监听之后：FutureCalls
     async def wait_connections_closed(self, timeout: float) -> bool: ...
     async def stop(self) -> None: ...
+    async def close_backends(self) -> None: ...
 ```
 
-**`start()`**：内容是现在的 `worker_start`，有两处改动：
+另有两个进程级、与框架无关的准备函数：`prepare_worker(config)` 加载 app 文件、建簇、把配置传给各模块；
+`setup_message_pipeline(config)` 初始化服务端消息流水线。
 
-- **拿到租约后立即启动续约**，不再等开始监听（修 §3.4 第 2 条）。
-- `start_backends` 里的 `app.stop()`（`main.py:115`）不搬进 runtime，改成直接抛 `StartupAborted`。
+**每次开服新建一个 runtime**：Sanic 的测试客户端会对同一个 app 反复起停，每次起服各用各的 runtime，连接表
+天然按服务实例隔离。原来 `wait_connections_closed` 里"只算本 loop 的任务"那段过滤删掉了。
+
+**`start()`**：原 `worker_start` 原样搬过来，拿到租约就开始续约（#225）。不同之处：
+
+- 迁移检查失败时不再调 `app.stop()`，直接抛错，由外层包成 `StartupAborted`；
+- 任何异常（包括被取消）都会先停续约循环、释放租约再往外抛，原来只在 `StartupAborted` 时这样做。释放之后
+  不再持有租约，之后的 `stop()` 不会再释放一次；
+- 每个后端的 `post_configure` 只做一次。原来 "default" 别名让第一个后端做两次（版本探测、Lua 加载等同步调用）；
+- 没配 `APP_FILE`（嵌入场景）时跳过"加载 xx 完成"那条日志，不再抛 TypeError。
 
 **任务表**：用 HeTu 自己的实现，两个栈共用，不再交给 Sanic。
 
-- 持有强引用，任务结束后自动移除，未处理的异常打 `logger.exception`。
-- 名字在一个 runtime 内唯一：重名直接报错。
-- 连接任务改用 runtime 内的计数器命名，例如 `client_handler:{seq}`，不再用 `request.id`（修 §3.4 第 3 条）。
-- Sanic 的 `shutdown_tasks` 从此看不到 HeTu 的任务。接收协程改由连接清理来取消（`runtime.tasks.cancel(...)`），
-  时间点在 `_cancel_websocket_tasks` 取消 handler 之后。和现在一样，都发生在关服一开始；现有测试会守住这一点。
+- 持有强引用，任务结束后自动移除，未处理的异常打 `logger.error`（带堆栈）。
+- 有名字的任务名字唯一，重名抛 ValueError。名字按登记时的算，task 之后被改名也不会留下死条目。连接任务仍用
+  #225 的进程内序号命名。
+- `cancel()` 用 `asyncio.wait` 等任务结束，不直接 `await task`。直接 await 时调用方被取消，asyncio 会把这次
+  取消转给 task；task 吞掉 CancelledError 正常返回的话（`client_handler` 就是这样），调用方的取消就丢了。
+  另外，被取消任务的 CancelledError 也会冒充成调用方自己的取消。第 3 步要在 handler 的 finally 里取消子任务，
+  会踩到这两点。
+- `cancel_all()` 会一直取消，直到表空或超时，等待期间新登记的任务也一起取消。
+- 接收协程由连接清理按句柄取消（`runtime.tasks.cancel(recv_task)`），不按名字找。原来它进 Sanic 的任务表，
+  会被 `app.stop()` 开头的 `shutdown_tasks(timeout=0)` 先取消；现在改为在 `_cancel_websocket_tasks` 取消
+  handler、连接清理开始时取消，前后只差几毫秒。
+- 顶号核查这类无名任务也登记进来，关服时一并取消。原来它们不受任何管理。
 
-**`stop()` 固定顺序**（修 §3.4 第 1 条）：
+**续约和水位预留**：这两个循环仍由 `SnowflakeLease` 自己管（#225 的 `start_loops` / `stop_loops`，CLI 工具
+进程也用它）。`background` 里只放 FutureCalls。
 
-1. `wait_connections_closed`；
-2. 取消并 await 后台任务（FutureCalls、续约、水位）；
-3. 释放租约，写精确水位；
-4. 关后端。
+**`stop()` 的固定顺序**：
 
-**连接表**：
+1. `wait_connections_closed`，等断线 System 跑完、Connection 行删掉；
+2. 取消残留的连接任务，和第 1 步共用一个 `GRACEFUL_SHUTDOWN_TIMEOUT`（那边用完了也至少给 1 秒），停不下来
+   打警告；
+3. 停 FutureCalls，单独一个 `GRACEFUL_SHUTDOWN_TIMEOUT`：它执行的 System 会发号，必须在释放租约之前停掉；
+4. 停续约和水位预留循环，写精确水位并释放 Worker ID；
+5. 关后端。每个后端只关一次；原来 "default" 和第一个后端是同一个对象，会被关两次。
 
-- `websocket.py` 模块级的 `_live_connections`、`_cleanup_tasks`、`wait_connections_closed` 搬进 runtime，
-  每个服务实例一份。之后不再需要"只算本 loop 的任务"那段过滤，测试里先后起的服务各用各的 runtime。
-- `DISCONNECT_SYSTEM`、`SubscriptionBroker`、`_cleanup_connection` 仍保留为 `websocket.py` 模块级的名字（§3.3）。
+最坏情况是 2 × `GRACEFUL_SHUTDOWN_TIMEOUT` + 1 秒，和原来基本一样，另外还要加上 Sanic 自己 `_cleanup` 里等连接的
+那一段。
 
-**Sanic 适配**（`adapters/sanic_app.py`，由现在的 `worker_main` 拆出来）只负责接线：
+**Sanic 适配**（`adapters/sanic_app.py`，即原来的 `worker_main`）只负责接线：
 
-- `before_server_start` 调 `runtime.start()`；
-- `after_server_start` 调 `runtime.start_background()`，要注册在 `webext.apply_to` 之前，保持和用户钩子的
-  先后顺序；
-- `after_server_stop` 调 `runtime.stop()`；
-- `app.ctx.runtime = runtime`；
-- `on_lease_lost`：多进程时调 `app.m.restart()`；单进程时走优雅停机，再以非 0 退出（修 §3.4 第 4 条）。
+- `before_server_start`：新建 runtime，挂到 `app.ctx.runtime`，然后调 `runtime.start()`；
+- `after_server_start`：调 `runtime.start_background()`，注册在 `webext.apply_to` 之前；
+- `after_server_stop`：调 `runtime.stop()`；
+- `on_lease_lost(app, runtime)`：多进程时只重启本 worker；单进程时把 `runtime.exit_code` 置为非 0 并停服。
+  CLI 从 `app.ctx.runtime.exit_code` 读退出码，多进程时管理进程没有 runtime，按 0 处理。
 
 **其他调用点**：
 
-- `websocket.py` 里的 `request.app.ctx.*` 改走 runtime，`add_task` / `cancel_task` / `purge_tasks` 改走
-  `runtime.tasks`；
+- `websocket.py` 改走 runtime：`table_managers`、`config`、`default_backend`、`tasks`、`live_connections`、
+  `cleanup_tasks`。`_cleanup_connection` 的第一个参数从 request 换成 runtime；
 - `future_call_task(app)` 改成 `future_call_task(runtime)`；
-- `test_system_future.py`、`test_common.py`、`test_system_startup.py` 里的假 app 改成假 runtime。
+- 测试里的假 app 都换掉：`test_system_startup.py`、`test_common.py` 换成真的 `WorkerRuntime`，
+  `test_system_future.py` 换成只有 `table_managers`、`config` 的 SimpleNamespace；
+- `ServerHarness.runtime` 指向 `app.ctx.runtime`；
+- `hetu.server` 改成按需加载 `worker_main`：只 import `runtime`、`pipeline` 时不加载 Sanic，也不注册 ws 路由。
 
-这一步 `runtime.config` 仍是 Sanic 的 `app.config`（Mapping），第 2 步再换。
+这一步 `runtime.config` 仍是 Sanic 的 `app.config`。runtime 只用 `config[...]` / `config.get(...)` 读，第 2 步
+换成 HeTuConfig 时不用再改。
 
-**新增测试**：
+**测试**：#225 加的测试照旧通过，改动有：
 
-- 释放租约时，后台任务都已经结束；
-- on_start 超过围栏时间后仍能发号（测试里缩短常数）；
-- 两个连接带相同的 `X-Request-ID` 时互不影响；
-- 单进程模式下丢租约，以非 0 退出。
+- 导入路径；
+- monkeypatch 的目标，改为 `hetu.server.runtime.future_call_task`；
+- `_wait_server_connections` 改为接收 runtime、读 `runtime.live_connections`；
+- `on_lease_lost` 相关测试的签名。
 
-§3.4 的四个修复已由 PR #225 先行合并（§13 第 7 条）。上面列的修复点和测试都已存在，这一步只把它们搬进
-runtime。
+新增的测试：
+
+- `tests/test_server_runtime.py`：`TaskRegistry`，包括调用方被取消、不误抛目标的取消、重名、改名、
+  `cancel_all` 超时和等待期间新登记的任务；
+- `test_common.py`：每个后端只 post_configure、关闭一次；默认后端是第一个；迁移检查失败时中止；拿到租约后
+  失败会释放租约，而且只释放一次；Sanic 的 `_runtime_start` 监听器原样抛出 `StartupAborted`；
+- `test_websocket.py`：关服时残留的连接任务在释放租约之前已经取消；每次调用都换一个新 runtime。
 
 ### 5.2 第 2 步：配置、日志、worker 序号，删除 TLS / 访问日志 / Inspector
 
@@ -417,12 +448,10 @@ runtime。
 
 **删掉的配置**（§13）
 
-判断"配了"一律看值的真假：CLI 路径总会传 `CERT_CHAIN: ""`、`ACCESS_LOG: False`，模板里也有
-`ACCESS_LOG: false`，这些都不能触发。
-
-- `CERT_CHAIN` 有值，或者给了 `--cert`：**拒绝启动**，报错提示在 Caddy 处终止 TLS（§14 第 2 条）。`--cert`
-  先保留为隐藏参数（`help=SUPPRESS`），只用来给出这条报错，下个版本再删。
-- `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` 为真：打一条警告，然后忽略。
+- `CERT_CHAIN`、`--cert` 直接删掉：不做检查，也不留隐藏参数（§14 第 2 条：还没有线上游戏，不需要向前兼容）。
+- `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` 为真：打一条警告，然后忽略。判断看值的真假：CLI 路径总会传
+  `ACCESS_LOG: False`，模板里也有 `ACCESS_LOG: false`，这些都不能触发。按 §14 第 2 条同样的理由，这条警告和
+  下面 LOGGING 的兼容改写也可以不做，第 2 步动手前再确认。
 - Sanic 栈固定 `access_log=False`、`ssl=None`、`auto_tls=False`，`INSPECTOR` 不再传给 Sanic。
 - 模板和文档（`operations.md` 中英文里 `--cert` 那一行）同步删除。
 
@@ -459,7 +488,7 @@ class ConnectionClosed(Exception):
     """对端已断开或本端已关闭。替代 sanic.exceptions.WebsocketClosed。"""
 
 class WsConnection(Protocol):
-    conn_id: str  # 本 worker 内唯一，由 runtime 的计数器生成（§5.1）
+    conn_id: str  # 本进程内唯一，用 websocket.py 的进程级计数器 _conn_seq（#225）
     client_ip: str  # 已经按 §3.2 第 7 条解析过
     request: Any  # 框架的原始请求，放进 ctx.request（unsafe）
 
@@ -522,8 +551,9 @@ class WsConnection(Protocol):
   打警告并跳过。
 - 客户端地址按 §3.2 第 7 条完整实现：`REAL_IP_HEADER`、`FORWARDED_FOR_HEADER`、`PROXIES_COUNT`，以及地址
   规范化（丢掉 "unknown"、IPv6 加方括号、转小写）。
-  - `FORWARDED_SECRET` 不实现，aiohttp 栈上配了就拒绝启动，免得静默退回代理地址。不然的话：Caddy 在本机时，
-    地址变成 127.0.0.1 被豁免，匿名连接数限制等于失效；Caddy 在别的机器时，所有匿名用户共用代理的 IP，会被
+  - `FORWARDED_SECRET` 不实现，也不做检查：和 §14 第 2 条同一原则，还没有线上部署，不需要向前兼容。文档里写明
+    只支持 `X-Forwarded-For` 这一套。如果误配成只靠 `Forwarded` 头，会退回代理的地址：Caddy 在本机时，地址
+    变成 127.0.0.1 被豁免，匿名连接数限制等于失效；Caddy 在别的机器时，所有匿名用户共用代理的 IP，会被
     `MAX_ANONYMOUS_CONNECTION_BY_IP` 一起挡掉。
   - 注意：HeTu 如果绕过 Caddy、被直接访问，`X-Forwarded-For` 是可以伪造的，可以借此绕过按 IP 限制的匿名连接
     数。这是现有行为，文档提示用防火墙挡住直连。
@@ -760,13 +790,14 @@ abort。所以：
 
 | 变更 | 第几步 | 兼容处理 |
 |---|---|---|
-| 删除 `CERT_CHAIN`、`--cert` | 2 | 有值就拒绝启动，提示改用 Caddy |
+| 删除 `CERT_CHAIN`、`--cert` | 2 | 无（不需要向前兼容，§14 第 2 条） |
 | 删除 `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` | 2 | 为真时打一条警告，然后忽略 |
 | LOGGING 里的 `sanic.logging.formatter.AutoFormatter` | 2 | 自动改写成 HeTu 的 formatter，并打警告 |
 | `SANIC_` 前缀的环境变量配置失效 | 2 | 无 |
-| `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 配了就拒绝启动 |
+| `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 无（同 §14 第 2 条） |
 | `define_route` / `on_server_setup` 改为 aiohttp 接口 | 6 | 无，发版说明给出对照示例 |
 | `ctx.request` 变成 aiohttp 的 `web.Request` | 6 | 无（文档本来就标注 unsafe） |
+| Sanic app 的 `app.ctx` 上不再有 `table_managers`、`default_backend` 和各后端名的属性，统一改为放在 `app.ctx.runtime` 上。这些属性没写进文档，但用户的 `on_server_setup` 钩子可能用过 | 1 | 无 |
 | `on_server_setup` 只在 worker 里执行，不再在管理进程执行 | 5（aiohttp 栈）、6 | 无 |
 | 关服时在途的 RPC 先处理完再断开 | 4b（aiohttp 栈）、6 | 无 |
 | ws 心跳超时：客户端看到 1006（aiohttp 直接断开 transport），以前是 1011；`WEBSOCKET_PING_TIMEOUT` 不再可配，等 pong 的时间是 heartbeat/2 | 4a（aiohttp 栈）、6 | 无 |
@@ -779,7 +810,7 @@ abort。所以：
 |---|---|
 | 0 | 全部现有测试照旧通过；新增 `test_harness_*` 守住 harness 的语义（§5.0） |
 | 1 | 现有测试（含 §3.4 修复时加的测试）照旧通过；假 app 改成假 runtime |
-| 2 | 新增：配置兼容改写、被删除的键（按真值判断，拒绝启动 / 警告）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
+| 2 | 新增：配置兼容改写、被删除的键（按真值判断打警告；`CERT_CHAIN` 直接删，§14 第 2 条）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
 | 3 | 新增：用假 `WsConnection` 的单元测试，包括"队列满 + send 卡住"的场景；现有 ws 测试照旧通过 |
 | 4a | 整套 ws 测试在两个栈上都通过；aiohttp 专属测试（§5.4.5） |
 | 4b | 排空测试（只在 aiohttp 栈）：在途的 RPC 回复送达后才收到 1001；没读的消息不执行；总时长不超过预算 |
@@ -854,23 +885,24 @@ abort。所以：
 7. §3.4 的现存问题先单独修，不等迁移；迁移从第 0 步开始，排在修复之后。已由 PR #225 修复。
 8. 不做原型，直接从第 0 步开始。
 
-## 14. 待定问题
+## 14. 审查时的待定问题（2026-11-14 全部定下）
 
-括号里是审查意见（§15）。
+括号里是审查意见（§15），粗体是最终决定。编号保留，供正文引用。
 
-1. 关服排空（第 4b 步）只在 aiohttp 栈上做，单独设一个短预算 `SHUTDOWN_DRAIN_TIMEOUT`。（赞成。）
-2. `CERT_CHAIN` 有值或给了 `--cert` 时拒绝启动，而不是打警告后跑明文；判断看真值。（赞成。）
+1. 关服排空（第 4b 步）只在 aiohttp 栈上做，单独设一个短预算 `SHUTDOWN_DRAIN_TIMEOUT`。（赞成。）**同意。**
+2. `CERT_CHAIN` 有值或给了 `--cert` 时拒绝启动，而不是打警告后跑明文；判断看真值。（赞成。）**不做检查：
+   还没有线上游戏，不需要向前兼容，`CERT_CHAIN` 和 `--cert` 直接删。**
 3. 第 5 步 master 不加载 app 文件，`on_server_setup` 不再在 master 里执行；ready 之前任何退出都算整体失败。
-   （赞成。）
+   （赞成。）**同意。**
 4. DEBUG 自动重载用轮询 mtime 实现，不加依赖，监视范围同 Sanic。（赞成，Sanic 本身就是这么做的，Windows
-   上也能用。）
+   上也能用。）**同意。**
 5. webext 请求体上限：沿用 `REQUEST_MAX_SIZE` 这个键名，默认 100MB，映射到 `client_max_size`。（赞成，上传
-   接口不会悄悄开始返回 413。）
+   接口不会悄悄开始返回 413。）**同意。**
 6. 第 5 步之前，`WORKER_NUM>1` 配上 `HETU_HTTP_SERVER=aiohttp` 时报错退出。（赞成，降级为单进程会让 A/B
-   数据失真。）
+   数据失真。）**同意。**
 7. 默认共享监听 socket，SO_REUSEPORT 实测后作为可选项。（赞成，跨平台，和现在一致，worker 挂掉时不会重置
-   排队中的连接。）
-8. 性能：+20% 只用来触发排查；进入第 5 步的条件是每帧成本和 p99 都不退步。（审查提出的改法。）
+   排队中的连接。）**同意。**
+8. 性能：+20% 只用来触发排查；进入第 5 步的条件是每帧成本和 p99 都不退步。（审查提出的改法。）**同意。**
 9. ~~§3.4 的四个修复放在第 1 步一起做，还是先单独合？~~ 已定：迁移前单独修（§13 第 7 条）。
 10. ~~要不要在第 0 步之前，先做一个不合并的原型，提前拿到 RPC 的收益数字？~~ 已定：不做（§13 第 8 条）。
 

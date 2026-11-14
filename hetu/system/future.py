@@ -583,9 +583,10 @@ async def run_due_calls(tables: list[Table], callers: dict[str, SystemCaller]) -
     return 0.0 if executed else max(0.0, wake - time.time())
 
 
-async def future_call_task(app):
+async def future_call_task(runtime):
     """
-    未来调用的后台task，每个Worker启动时会开一个，执行到期的未来调用。
+    未来调用的后台task，每个Worker开始监听后会开一个（`WorkerRuntime.start_background`），执行
+    到期的未来调用。只用到 runtime 的 `table_managers` 和 `config["NAMESPACE"]`。
     """
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
@@ -595,7 +596,7 @@ async def future_call_task(app):
     )
 
     # 启动时兜底清一次超过7天的call lock：on_start 的锁不参与下面的定期清理，只在这里清
-    for tbl_mgr in app.ctx.table_managers.values():
+    for tbl_mgr in runtime.table_managers.values():
         if deleted := await clean_expired_call_locks(tbl_mgr):
             logger.info(
                 _("🔗 [⚙️Future] 释放了 {deleted} 条过期的 call lock").format(
@@ -620,13 +621,13 @@ async def future_call_task(app):
 
     # 初始化task的执行器
     callers = {
-        instance: SystemCaller(app.config["NAMESPACE"], tbl_mgr, context)
-        for instance, tbl_mgr in app.ctx.table_managers.items()
+        instance: SystemCaller(runtime.config["NAMESPACE"], tbl_mgr, context)
+        for instance, tbl_mgr in runtime.table_managers.items()
     }
 
     # 获取所有未来调用组件
     future_call_tables: list[Table] = []
-    for tbl_mgr in app.ctx.table_managers.values():
+    for tbl_mgr in runtime.table_managers.values():
         main_table = tbl_mgr.get_table(FutureCalls)
         if main_table is not None:  # 可能主组件没人使用
             future_call_tables.append(main_table)
@@ -649,7 +650,7 @@ async def future_call_task(app):
             # timeout=0 的调用会丢失，其余的 timeout 后重投
             if time.monotonic() >= next_clean:
                 next_clean = time.monotonic() + CALL_LOCK_CLEAN_INTERVAL
-                for tbl_mgr in app.ctx.table_managers.values():
+                for tbl_mgr in runtime.table_managers.values():
                     await clean_expired_call_locks(
                         tbl_mgr, lock.CALL_LOCK_RETENTION, skip_on_start=True
                     )

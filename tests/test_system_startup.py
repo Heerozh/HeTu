@@ -178,7 +178,7 @@ async def test_run_startup_systems_per_instance_isolated(
 async def test_run_startup_systems_propagates_failure(
     mod_auto_backend, new_component_env, new_clusters_env
 ):
-    """on_start System 抛出非竞态异常时，run_startup_systems 向上传播（供 worker_start 中止启动）。"""
+    """on_start System 抛出非竞态异常时，run_startup_systems 向上传播（供 runtime.start() 中止启动）。"""
     import pytest
 
     from hetu.manager import ComponentTableManager
@@ -203,29 +203,30 @@ async def test_run_startup_systems_propagates_failure(
         await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-x")
 
 
-def _fake_app(tbl_mgr, **config):
-    """构造一个够 worker_start 用的最小 app 替身（config 用 dict，ctx 持有 table_managers）。"""
-    from types import SimpleNamespace
+def _fake_runtime(tbl_mgr, monkeypatch, start_backends=None, **config):
+    """
+    够 runtime.start() 用的最小 runtime：table_managers 手动备好，start_backends 换成替身
+    （默认什么也不做，即后端、雪花id都已就绪）。
+    """
+    from hetu.server.runtime import WorkerRuntime
 
-    stopped = []
-    app = SimpleNamespace()
-    app.config = {
-        "NAMESPACE": "pytest",
-        "APP_FILE": "x",
-        "INSTANCES": ["server1"],
-        **config,
-    }
-    app.ctx = SimpleNamespace(table_managers={"server1": tbl_mgr})
-    app.stop = lambda: stopped.append(True)
-    app.stopped = stopped
-    return app
+    runtime = WorkerRuntime(
+        {"NAMESPACE": "pytest", "APP_FILE": "x", "INSTANCES": ["server1"], **config},
+        on_lease_lost=lambda: None,
+    )
+    runtime.table_managers = {"server1": tbl_mgr}
+
+    async def noop():
+        pass
+
+    monkeypatch.setattr(runtime, "start_backends", start_backends or noop)
+    return runtime
 
 
-async def test_worker_start_runs_on_start_systems(
+async def test_runtime_start_runs_on_start_systems(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):
-    """worker_start 在 backends 就绪后会执行 on_start System（接线正确）。"""
-    import hetu.server.main as main_mod
+    """runtime.start() 在 backends 就绪后会执行 on_start System（接线正确）。"""
     from hetu.manager import ComponentTableManager
 
     @define_component(namespace="pytest", force=True)
@@ -244,16 +245,10 @@ async def test_worker_start_runs_on_start_systems(
     tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
     tbl_mgr._flush_all(force=True)
 
-    # start_backends 的产物（table_managers/雪花id）我们已手动备好，stub 掉它
-    async def fake_start_backends(_app):
-        pass
+    # start_backends 的产物（table_managers/雪花id）我们已手动备好，换成什么也不做的替身
+    runtime = _fake_runtime(tbl_mgr, monkeypatch)
+    await runtime.start()
 
-    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
-
-    app = _fake_app(tbl_mgr)
-    await main_mod.worker_start(app)
-
-    assert app.stopped == []
     tbl = tbl_mgr.get_table(SeedComp)
     async with tbl.session() as session:
         row = await session.using(SeedComp).get(owner=1)
@@ -261,18 +256,17 @@ async def test_worker_start_runs_on_start_systems(
         assert row.n == 1
 
 
-async def test_worker_start_aborts_on_on_start_failure(
+async def test_runtime_start_aborts_on_on_start_failure(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):
-    """on_start System 启动失败时，worker_start 抛 StartupAborted 中止整个服务器启动。
+    """on_start System 启动失败时，runtime.start() 抛 StartupAborted 中止整个服务器启动。
 
-    必须是抛异常而不是 app.stop()：只有异常能让 Sanic 单/多进程都立刻中止且退出码非0，
+    必须是抛异常而不是让框架停服：只有异常能让 Sanic 单/多进程都立刻中止且退出码非0，
     app.stop() 两种模式下退出码都是0，会被docker/systemd当成正常退出。"""
     import pytest
 
-    import hetu.server.main as main_mod
     from hetu.manager import ComponentTableManager
-    from hetu.server.main import StartupAborted
+    from hetu.server.runtime import StartupAborted
 
     @define_component(namespace="pytest", force=True)
     class SeedComp(BaseComponent):
@@ -289,17 +283,9 @@ async def test_worker_start_aborts_on_on_start_failure(
     tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
     tbl_mgr._flush_all(force=True)
 
-    async def fake_start_backends(_app):
-        pass
-
-    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
-
-    app = _fake_app(tbl_mgr)
+    runtime = _fake_runtime(tbl_mgr, monkeypatch)
     with pytest.raises(StartupAborted, match="boom"):
-        await main_mod.worker_start(app)
-
-    # 不能用 app.stop()（退出码0），必须靠异常中止
-    assert app.stopped == []
+        await runtime.start()
 
 
 async def test_run_startup_systems_timeout_names_stuck_system(
@@ -335,17 +321,16 @@ async def test_run_startup_systems_timeout_names_stuck_system(
         )
 
 
-async def test_worker_start_aborts_on_startup_timeout(
+async def test_runtime_start_aborts_on_startup_timeout(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):
-    """卡住的启动System不会让服务器无限等下去：worker_start 超时后抛 StartupAborted。"""
+    """卡住的启动System不会让服务器无限等下去：runtime.start() 超时后抛 StartupAborted。"""
     import asyncio
 
     import pytest
 
-    import hetu.server.main as main_mod
     from hetu.manager import ComponentTableManager
-    from hetu.server.main import StartupAborted
+    from hetu.server.runtime import StartupAborted
 
     @define_component(namespace="pytest", force=True)
     class SeedComp(BaseComponent):
@@ -362,47 +347,37 @@ async def test_worker_start_aborts_on_startup_timeout(
     tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
     tbl_mgr._flush_all(force=True)
 
-    async def fake_start_backends(_app):
-        pass
-
-    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
-
-    app = _fake_app(tbl_mgr, STARTUP_TIMEOUT=0.2)
+    runtime = _fake_runtime(tbl_mgr, monkeypatch, STARTUP_TIMEOUT=0.2)
     with pytest.raises(StartupAborted, match="seed_hang"):
-        await main_mod.worker_start(app)
-
-    assert app.stopped == []
+        await runtime.start()
 
 
-async def test_worker_start_aborts_on_backend_timeout(monkeypatch):
+async def test_runtime_start_aborts_on_backend_timeout(monkeypatch):
     """连后端/建表卡住同样受启动超时保护（这一步卡死过去也是永久静默挂起）。"""
     import asyncio
 
     import pytest
 
-    import hetu.server.main as main_mod
-    from hetu.server.main import StartupAborted
+    from hetu.server.runtime import StartupAborted
 
-    async def hang_start_backends(_app):
+    async def hang_start_backends():
         await asyncio.sleep(30)
 
-    monkeypatch.setattr(main_mod, "start_backends", hang_start_backends)
-
-    app = _fake_app(None, STARTUP_TIMEOUT=0.2)
+    runtime = _fake_runtime(
+        None, monkeypatch, start_backends=hang_start_backends, STARTUP_TIMEOUT=0.2
+    )
     with pytest.raises(StartupAborted, match="后端"):
-        await main_mod.worker_start(app)
-
-    assert app.stopped == []
+        await runtime.start()
 
 
 def test_resolve_ack_threshold_follows_startup_timeout():
     """ack阈值只由 STARTUP_TIMEOUT 推算（+余量），保证永远比我们自己的超时晚触发。"""
-    from hetu.server.main import (
+    from hetu.server.adapters.sanic_app import (
         ACK_TIMEOUT_MARGIN,
-        DEFAULT_STARTUP_TIMEOUT,
         UNLIMITED_ACK_THRESHOLD,
         resolve_ack_threshold,
     )
+    from hetu.server.runtime import DEFAULT_STARTUP_TIMEOUT
 
     # sanic的THRESHOLD单位是0.1秒
     assert resolve_ack_threshold({"STARTUP_TIMEOUT": 30}) == int(
@@ -526,11 +501,10 @@ def test_make_boot_uuid_unique_and_within_lock_width():
     assert 0 < len(a) <= SystemLock.str_max_len("uuid")
 
 
-async def test_worker_start_dedups_with_shared_boot_uuid(
+async def test_runtime_start_dedups_with_shared_boot_uuid(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):
-    """同次开服的多个 worker（worker_start 用相同 config boot uuid）只 seed 一次。"""
-    import hetu.server.main as main_mod
+    """同次开服的多个 worker（runtime.start() 用相同 config boot uuid）只 seed 一次。"""
     from hetu.manager import ComponentTableManager
     from hetu.system.startup import ON_START_UUID_CONFIG_KEY
 
@@ -550,16 +524,12 @@ async def test_worker_start_dedups_with_shared_boot_uuid(
     tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
     tbl_mgr._flush_all(force=True)
 
-    async def fake_start_backends(_app):
-        pass
-
-    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
-
     # 两个 worker 共享同一 config boot uuid（模拟同次开服的多进程）
     for _ in range(2):
-        app = _fake_app(tbl_mgr)
-        app.config[ON_START_UUID_CONFIG_KEY] = "boot-shared"
-        await main_mod.worker_start(app)
+        runtime = _fake_runtime(
+            tbl_mgr, monkeypatch, **{ON_START_UUID_CONFIG_KEY: "boot-shared"}
+        )
+        await runtime.start()
 
     tbl = tbl_mgr.get_table(SeedCounter)
     async with tbl.session() as session:
