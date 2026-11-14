@@ -37,12 +37,12 @@ async def test_future_call_create(test_app, tbl_mgr, executor: EndpointExecutor)
         assert rows[0].owner == 1020
 
 
-def _task_app(tbl_mgr):
-    """future_call_task 只用到 app.ctx.table_managers 与 app.config["NAMESPACE"]"""
+def _task_runtime(tbl_mgr):
+    """future_call_task 只用到 runtime.table_managers 与 runtime.config["NAMESPACE"]"""
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        ctx=SimpleNamespace(table_managers={"server1": tbl_mgr}),
+        table_managers={"server1": tbl_mgr},
         config={"NAMESPACE": "pytest"},
     )
 
@@ -104,7 +104,7 @@ async def _run_future_task_until(tbl_mgr, done, timeout: float) -> bool:
 
     from hetu.system import future
 
-    task = asyncio.create_task(future.future_call_task(_task_app(tbl_mgr)))
+    task = asyncio.create_task(future.future_call_task(_task_runtime(tbl_mgr)))
     try:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -894,7 +894,7 @@ async def test_future_call_task_backs_off_on_persistent_error(
         raise ConnectionError("连接已关闭，已调用过close")
 
     monkeypatch.setattr(Backend, "servant", property(broken_servant))
-    task = asyncio.create_task(future.future_call_task(_task_app(tbl_mgr)))
+    task = asyncio.create_task(future.future_call_task(_task_runtime(tbl_mgr)))
     await asyncio.sleep(2.5)  # 若循环不让出，这一句永远回不来（timeout 兜底）
     assert calls["n"] <= 4, calls  # 退避 1 s：2.5 s 内最多两三次
     task.cancel()

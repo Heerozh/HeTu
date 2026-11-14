@@ -154,8 +154,8 @@ class ServerHarness:
     """
     一个 HeTu 服务的测试封装，语义见模块说明。
 
-    `config` 是起服时用的配置，可以在调用 `websocket()` / `get()` 之前修改。`runtime` 是服务端
-    的运行时状态（`table_managers`、`snowflake_lease` 等），现在是 Sanic 的 `app.ctx`。
+    `config` 是起服时用的配置，可以在调用 `websocket()` / `get()` 之前修改。`runtime` 是本次（或
+    上一次）起服的 `WorkerRuntime`，每次起服新建一个。
     """
 
     def __init__(self, app: Sanic):
@@ -167,7 +167,7 @@ class ServerHarness:
 
     @property
     def runtime(self) -> Any:
-        return self._app.ctx
+        return self._app.ctx.runtime
 
     def _test_client(self) -> Any:
         # sanic_testing 第一次随机选端口后会记下来，下次照用，刚停的服务还占着它就 bind 失败。
