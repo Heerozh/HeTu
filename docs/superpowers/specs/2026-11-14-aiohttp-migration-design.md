@@ -845,10 +845,11 @@ abort。所以：
 - 关服时置 `stopping` 标记：停止监听之前接进来、关服开始之后才握完手的连接，收不到关服时那一轮 `fail(1001)`，
   由 handler 看到标记自己马上断开。
 - `bind_socket` 照 Sanic 的写：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上不设
-  `SO_REUSEADDR`，那里设了它别的进程就能抢同一个端口。没用 `socket.create_server`，它对 IPv6 会强制只监听 v6。
+  `SO_REUSEADDR`：设了的话端口冲突报 10013，会打出 excludedportrange 的误导提示（见下面"Windows 上的验证"）。没用
+  `socket.create_server`，它对 IPv6 会强制只监听 v6。
 - 关服信号：非 Windows 用 `loop.add_signal_handler`，每个信号都只置一个事件（幂等），之后的信号不打断关服，同
-  Sanic 栈（§5.2 末尾）。Windows 上用 `signal.signal` 转回事件循环，再每 0.1 秒叫醒一次事件循环。Windows 的路径
-  没有自动化测试，要按 §9 的人工清单验证。
+  Sanic 栈（§5.2 末尾）。Windows 上用 `signal.signal` 转回事件循环，再每 0.1 秒叫醒一次事件循环。Windows 上的验证
+  见下面"Windows 上的验证"。
 - `HETU_HTTP_SERVER` 取值不对、aiohttp 栈配了多进程，都以 2 退出；端口被占以 1 退出，不会先开服。
 
 **测试基础设施上发现的问题**：
@@ -927,6 +928,43 @@ abort。所以：
   - 这个文件跑在 uvloop 上，pytest-timeout 改用 thread 方式兜底。
   - 变异检查：审查时存活的 6 个（第二个信号直接退出、删掉 fail(1001) 的循环、`runtime.stop()` 挪到最前、
     删掉关服标记的检查、`_serve` 不接停服请求，以及上面几处修复各自的变异）现在都会被抓到。
+
+**Windows 上的验证（2026-11-15，Windows 11、Python 3.14.7、aiohttp 3.14.5）**：
+
+- 自动化测试：`HETU_TEST_BACKENDS=redis,sqlite` 跑 ws、适配层、CLI 相关的 12 个测试文件，两个栈都通过（272 passed；
+  跳过的 11 个是 POSIX 信号的用例和 aiohttp 栈不支持的 webext）。
+- `test_server_signals.py` 改成在 Windows 上也跑。服务器起在单独一个不显示窗口的控制台里（`CREATE_NO_WINDOW`），
+  从另一个进程 `AttachConsole` 上去发 `CTRL_C_EVENT`，和在终端里按 Ctrl+C 一样。
+  - 坑：父进程以 `CREATE_NEW_PROCESS_GROUP` 起的进程（IDE、agent 的 shell 常这样）带着"不响应 Ctrl+C"的标记，
+    子进程会继承，服务器就收不到 Ctrl+C。起服之前先 `SetConsoleCtrlHandler(NULL, FALSE)` 清掉。
+  - 在 Windows 上跑的用例：
+    - 带着 3 个已登录的连接按 Ctrl+C：aiohttp 栈收到 1001，Sanic 栈是 1000（§6）；断线 System 各跑一次、
+      Connection 行为 0、以 0 退出；
+    - 在途的慢 RPC 被取消，没有提交；
+    - 开服途中按 Ctrl+C：中止开服，以 0 退出；
+    - 端口被占时以 1 退出，不打 excludedportrange 的提示；
+    - 新增：关服途中再按一次 Ctrl+C 是强退，两个栈一样。退出码是 STATUS_CONTROL_C_EXIT（0xC000013A），断线
+      System 没跑完。aiohttp 栈的客户端照样收到 1001（关服一开始就 fail 了）；Sanic 栈的客户端收不到 close 帧；
+    - 新增：控制台的 ANSI 转义支持打开了。读服务器控制台输出缓冲的模式：新控制台默认是 3，开服后是 7。
+  - "第二个信号不打断关服"的两个用例只在 POSIX 上跑：Windows 上第二次 Ctrl+C 就是强退。
+- `test_aiohttp_adapter.py` 新增：事件循环空闲时来一个 SIGINT，0.1 秒内开始关服。不叫醒的话要等下一个定时器：
+  端到端实测，空闲时按 Ctrl+C 要 0.3~1.1 秒才生效；叫醒时稳定在 0.27 秒，大部分是发 Ctrl+C 的辅助进程的开销。
+- 变异检查：去掉 aiohttp 栈的 `enable_windows_console_ansi()`、Windows 上也设 SO_REUSEADDR、第二次 Ctrl+C 不强退、
+  Windows 上不装 Ctrl+C 处理、去掉定时叫醒，都会被抓到。
+- 人工检查（用探针脚本，没有写成测试）：
+  - accept 线程装上了。200 个连接同时握手、登录，0.3 秒内全部成功；按 Ctrl+C 后都收到 1001，断线 200 次，
+    Connection 行为 0；
+  - Redis 后端：正常按 Ctrl+C，租约的 key 删掉了；按两次强退，key 留着，`live_worker_ids` 按
+    `lease_owner_exited` 把它排除。
+- 实测和原来的说法不一样的地方：
+  - SO_REUSEADDR：Win11 上设了它也抢不到别的进程正在监听的同一个地址，bind 报的是 10013（WSAEACCES）而不是
+    10048。不设的理由改成：设了的话，端口冲突会被 `print_port_hint` 当成端口落在 excludedportrange 里，打出
+    "net stop winnat"的误导提示。**Sanic 栈现在就是这样**（它设了 SO_REUSEADDR），Windows 上普通的端口冲突也
+    打这条提示。第 6 步删掉 Sanic 后就没有了，不单独修。
+  - 具体程度不同的地址能同时 bind 上：别的进程占着 127.0.0.1:端口 时，HeTu 照样能 bind 0.0.0.0 的同一个端口，
+    反过来也行；本机连 127.0.0.1 的连接落到更具体的那个上。两个栈都这样，是 Windows 的默认行为，不改。
+  - `[::]` 在 Windows 上只监听 IPv6（`IPV6_V6ONLY` 默认是 1），IPv4 客户端连不上。同 Sanic，"是否双栈按系统
+    默认"在 Windows 上就是这个结果。
 
 ### 5.5 第 4b 步：关服排空（已实施，PR #231，分支 `feat/aiohttp-drain`，叠在第 4a 步的 PR #230 上）
 
