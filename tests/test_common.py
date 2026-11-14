@@ -470,12 +470,29 @@ async def test_restart_resumes_from_snowflake_watermark(
     app = _server_app(mod_backend_config)
     await start_backends(app)
     generator.next_id()
+    # 进程崩了，它的续约、水位预留循环也跟着没了
+    await app.ctx.snowflake_lease.stop_loops()
     await app.ctx.default_backend.close()
 
     app = _server_app(mod_backend_config)
     await start_backends(app)
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
     await close_backends(app)
+
+
+async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
+    """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
+    WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC（45）秒后跳闸，而之后的启动 System 最长能跑
+    STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    loops = list(app.ctx.snowflake_lease._tasks)
+    try:
+        assert len(loops) == 2 and not any(t.done() for t in loops)
+    finally:
+        await close_backends(app)
+    # close_backends 先停两个循环再释放租约
+    assert all(t.done() for t in loops)
 
 
 async def test_snowflake_lease_fence():

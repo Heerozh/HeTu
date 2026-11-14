@@ -41,8 +41,8 @@ class SnowflakeLease:
     只租 id、不接水位的进程正常退出并释放租约后，下一个拿到同一 id 的进程读到的是旧水位，
     会落在它用过的毫秒上；跨机器还有时钟差。所以水位这一步不能省。
 
-    服务器在 `start_backends` 里 `acquire`、开始监听后 `start_loops`，在 `close_backends` 里
-    先 `stop_loops` 再 `release`；工具进程用 ``async with`` 一次拿全（`__aenter__` 起两个循环，
+    服务器在 `start_backends` 里 `acquire` 后立刻 `start_loops`，在 `close_backends` 里先
+    `stop_loops` 再 `release`；工具进程用 ``async with`` 一次拿全（`__aenter__` 起两个循环，
     `__aexit__` 停掉并释放）。
 
     Lifecycle of a process's snowflake lease (worker id + timestamp watermark + the two
@@ -191,7 +191,12 @@ class SnowflakeLease:
             self.on_lost()
 
     def start_loops(self) -> None:
-        """`acquire` 之后起续约和水位预留两个循环；续约发现租约丢失时调用 `on_lost`。"""
+        """
+        `acquire` 之后立刻起续约和水位预留两个循环；续约发现租约丢失时调用 `on_lost`。
+
+        不能晚起：发号围栏在拿到租约 WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC 秒后跳闸，之后的
+        初始化（服务器的启动 System 最长能跑 STARTUP_TIMEOUT 秒）跑久了就会发不出号。
+        """
         assert self.ts_keeper is not None, "acquire() first"
         assert not self._tasks, "loops already started"
         self._tasks = [

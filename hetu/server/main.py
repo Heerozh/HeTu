@@ -45,6 +45,8 @@ ACK_TIMEOUT_MARGIN = 10.0
 # "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
 # 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
 UNLIMITED_ACK_THRESHOLD = 10**9
+# 开服失败时停续约循环、释放租约的限时（秒）：开服失败多半是后端出了问题，释放卡住不能挡住中止
+LEASE_ABANDON_TIMEOUT = 5.0
 
 
 def resolve_ack_threshold(config) -> int:
@@ -131,6 +133,11 @@ async def start_backends(app: Sanic):
     # 反复宕机导致 Worker ID 分配满了时每秒重试，等它们过期
     await lease.acquire(wait=True)
     app.ctx.__setattr__("snowflake_lease", lease)
+    # 拿到租约立刻开始续约、预留水位，不能等开始监听：发号围栏在拿到租约 45 秒后跳闸，
+    # 而之后的启动 System 最长能跑 STARTUP_TIMEOUT（默认 60）秒
+    # app.m 只在丢租约时才去取，和原来的写法一致
+    lease.on_lost = lambda: app.m.restart()
+    lease.start_loops()
 
 
 async def close_backends(app: Sanic):
@@ -152,6 +159,30 @@ async def close_backends(app: Sanic):
 
 
 async def worker_start(app: Sanic):
+    try:
+        await _start_worker(app)
+    except StartupAborted:
+        # 拿到租约之后才失败的：续约、水位预留循环已经起了，停掉并释放租约再中止
+        await abandon_lease(app)
+        raise
+
+
+async def abandon_lease(app: Sanic):
+    """开服失败时停掉续约、水位预留循环并释放租约（拿到租约之后才失败的情况），限时"""
+    lease = getattr(app.ctx, "snowflake_lease", None)
+    if lease is None:
+        return
+    try:
+        async with asyncio.timeout(LEASE_ABANDON_TIMEOUT):
+            await lease.stop_loops()
+            await lease.release()
+    except TimeoutError:
+        logger.warning(
+            _("⚠️ [📡Server] 开服失败后释放 Worker ID 租约超时，等它自己过期")
+        )
+
+
+async def _start_worker(app: Sanic):
     # 连后端、建表、跑启动System共用一个总超时预算，超时中止开服（见StartupAborted）。
     # 没有它的话，任意一步卡住（后端TCP不返回、启动System等一个永远不回的外部服务）在
     # 单进程模式下会让服务器永久静默挂起，多进程模式下则是被管理进程SIGKILL，看不出卡在哪。
@@ -248,14 +279,6 @@ async def worker_close(app):
     # FutureCalls 执行的 System 会发号，要在释放租约之前停掉
     await stop_future_calls(app)
     await close_backends(app)
-
-
-async def start_lease_loops(app: Sanic):
-    """after_server_start：起续约、水位预留两个循环，由 close_backends 停掉"""
-    lease = app.ctx.snowflake_lease
-    # app.m 只在丢租约时才去取，和原来的写法一致
-    lease.on_lost = lambda: app.m.restart()
-    lease.start_loops()
 
 
 def _report_task_death(task: asyncio.Task) -> None:
@@ -374,10 +397,9 @@ def worker_main(app_name, config) -> Sanic:
     if IS_WINDOWS:
         app.before_server_start(threaded_accept_listener)
 
-    # 开始监听之后启动续约、水位预留两个循环和 FutureCalls。不用 app.add_task：loop 启动前加的
-    # 任务不进 Sanic 的任务表，关服时不会被取消，会和释放租约并发；自己持有引用，由 worker_close
-    # 在释放租约之前停掉
-    app.after_server_start(start_lease_loops)
+    # 开始监听之后启动 FutureCalls。不用 app.add_task：loop 启动前加的任务不进 Sanic 的任务表，
+    # 关服时不会被取消，会和释放租约并发；自己持有引用，由 worker_close 在释放租约之前停掉。
+    # 续约、水位预留两个循环在 start_backends 拿到租约时就起了
     app.after_server_start(start_future_calls)
 
     # 启动服务器监听
