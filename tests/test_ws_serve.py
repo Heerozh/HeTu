@@ -648,6 +648,35 @@ async def test_drain_finishes_inflight_rpc_and_skips_unread(monkeypatch, mod_run
     assert calls == [["first"]]
 
 
+async def test_drain_with_full_queue_keeps_all_replies(monkeypatch, mod_runtime):
+    """
+    排空时队列是满的（链路慢）：PUSH_DRAINED 也要等着塞进去，不能丢。丢了的话接收协程带着异常退出、
+    连接直接拆掉，已经执行的调用的回复就都发不出去了
+    """
+    from hetu.server import receiver
+
+    monkeypatch.setattr(websocket_server, "PUSH_QUEUE_SIZE", 2)
+    calls: list[Any] = []
+    rpc = receiver.rpc
+
+    async def counting_rpc(data, *args, **kwargs):
+        calls.append(data[2])
+        return await rpc(data, *args, **kwargs)
+
+    monkeypatch.setattr(receiver, "rpc", counting_rpc)
+    client, task = await _connect(mod_runtime)
+    client.conn.send_delay = 0.2
+    for i in range(6):
+        client.send(["rpc", "echo_response", [i]])
+    await _wait_for(lambda: len(calls) >= 4)  # 队列满着，接收协程卡在塞回复上
+    client.conn.stop_receiving()
+    received = await _received_until_closed(client, timeout=10)
+    await _finished(task, 5)
+    assert len(calls) >= 4
+    assert received == [["rsp", c] for c in calls]
+    assert client.conn.close_code == connection.CLOSE_GOING_AWAY
+
+
 async def test_drain_waits_for_pending_subscription_reply(monkeypatch, mod_runtime):
     """排空时在后台等着的订阅照常做完，订阅的回复发出去之后才以 1001 断开"""
     from hetu.data import sub as sub_module

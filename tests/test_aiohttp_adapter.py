@@ -421,6 +421,7 @@ async def test_stop_receiving_wakes_pending_recv(monkeypatch):
         conn.stop_receiving()
         with pytest.raises(Draining):
             await asyncio.wait_for(waiting, 1)
+        assert waiting.cancelling() == 0  # 叫醒用的取消撤销掉了
         with pytest.raises(Draining):
             await conn.recv()
         await conn.send(b"still sending")
@@ -476,17 +477,48 @@ async def test_stop_receiving_does_not_swallow_a_real_cancel(monkeypatch):
     assert result["cancelled"] is True
 
 
-async def test_wait_failed(monkeypatch):
-    """wait_failed 等到连接被 fail；已经 fail 过就马上返回"""
+async def test_stop_receiving_wakeup_ignores_earlier_swallowed_cancel(monkeypatch):
+    """
+    recv 所在的任务之前吞过一次取消、没撤销（cancelling() 留着 1）：叫醒照样转成 Draining，不当成同时
+    还有别的取消请求
+    """
+    result: dict[str, Any] = {}
+
+    async def body(conn):
+        async def recv_after_swallowed_cancel():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass  # 吞掉取消、不撤销
+            return await conn.recv()
+
+        waiting = asyncio.ensure_future(recv_after_swallowed_cancel())
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        await asyncio.sleep(0.05)  # 这时在 recv 里等着
+        conn.stop_receiving()
+        await asyncio.wait({waiting}, timeout=1)
+        result["exc"] = None if waiting.cancelled() else type(waiting.exception())
+
+    async with (
+        _hetu_app(monkeypatch, body) as (url, _server),
+        connect(url) as _ws,
+    ):
+        assert await _wait_for(lambda: "exc" in result, 3)
+    assert result["exc"] is Draining
+
+
+async def test_wait_closed_after_fail(monkeypatch):
+    """wait_closed 等到连接被 fail；已经关了就马上返回"""
     done: list[str] = []
 
     async def body(conn):
-        waiting = asyncio.ensure_future(conn.wait_failed())
+        waiting = asyncio.ensure_future(conn.wait_closed())
         await asyncio.sleep(0.05)
         assert not waiting.done()
         conn.fail(4002, "rejected")
         await asyncio.wait_for(waiting, 1)
-        await asyncio.wait_for(conn.wait_failed(), 1)
+        await asyncio.wait_for(conn.wait_closed(), 1)
         done.append("ok")
 
     async with (
@@ -496,6 +528,47 @@ async def test_wait_failed(monkeypatch):
         with pytest.raises(ConnectionClosedError):
             await asyncio.wait_for(ws.recv(), 3)
     assert done == ["ok"]
+
+
+@pytest.mark.parametrize("how", ["close", "abort"])
+async def test_wait_closed_when_recv_finds_peer_gone(monkeypatch, how):
+    """recv 发现对端断开（正常关闭、直接断开 TCP）也算关了，不用等到 handler 收尾时 fail"""
+    done: list[str] = []
+
+    async def body(conn):
+        with pytest.raises(ConnectionClosed):
+            await conn.recv()
+        await asyncio.wait_for(conn.wait_closed(), 1)
+        done.append("ok")
+
+    async with _hetu_app(monkeypatch, body) as (url, _server):
+        ws = await connect(url)
+        if how == "close":
+            await ws.close()
+        else:
+            ws.transport.abort()
+        assert await _wait_for(lambda: bool(done), 3)
+
+
+async def test_wait_closed_when_send_finds_peer_gone(monkeypatch):
+    """send 发现连接断了也算关了（关服排空时接收那一边已经停了，只有发送会发现对端断开）"""
+    done: list[str] = []
+    gone = asyncio.Event()
+
+    async def body(conn):
+        await gone.wait()
+        with pytest.raises(ConnectionClosed):
+            for _ in range(200):
+                await conn.send(b"x")
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(conn.wait_closed(), 1)
+        done.append("ok")
+
+    async with _hetu_app(monkeypatch, body) as (url, _server):
+        ws = await connect(url)
+        ws.transport.abort()
+        gone.set()
+        assert await _wait_for(lambda: bool(done), 4)
 
 
 async def test_drain_during_handshake_closes_with_going_away(monkeypatch):
@@ -522,30 +595,77 @@ async def test_drain_during_handshake_closes_with_going_away(monkeypatch):
     assert rcvd is not None and rcvd.code == 1001
 
 
-class _DrainingConn:
-    """AiohttpServer._drain 用的连接替身：停止接收之后过 fails_after 秒被 fail，None 就一直不 fail"""
+async def test_wait_closed_when_send_finds_heartbeat_timed_out(monkeypatch):
+    """
+    没人在 recv（关服排空时接收那一边已经停了）、对端不回 pong：aiohttp 心跳超时自己把 ws 标成关了，
+    send 发现之后也算关了
+    """
+    done: list[str] = []
 
-    def __init__(self, fails_after: float | None):
-        self.fails_after = fails_after
+    async def body(conn):
+        assert await _wait_for(lambda: conn._ws.closed, 5)
+        with pytest.raises(ConnectionClosed):
+            await conn.send(b"x")
+        await asyncio.wait_for(conn.wait_closed(), 1)
+        done.append("ok")
+
+    async with _hetu_app(monkeypatch, body, WEBSOCKET_PING_INTERVAL=0.2) as (
+        url,
+        _server,
+    ):
+        _reader, writer = await _raw_upgrade(url)
+        writer.transport.pause_reading()  # 收不到 ping，也就不回 pong
+        assert await _wait_for(lambda: bool(done), 6)
+        writer.close()
+
+
+async def test_drain_does_not_wait_for_connections_closed_by_peer(monkeypatch):
+    """对端已经断开、还在拆（跑断线 System）的连接没有要发的东西了：排空不等它拆完"""
+    closed, release = asyncio.Event(), asyncio.Event()
+
+    async def body(conn):
+        with pytest.raises(ConnectionClosed):
+            await conn.recv()
+        closed.set()
+        await release.wait()  # 还在拆连接：断线 System 还在跑
+
+    async with _hetu_app(monkeypatch, body, SHUTDOWN_DRAIN_TIMEOUT=2) as (url, server):
+        try:
+            async with connect(url):
+                pass  # 客户端关掉连接
+            await asyncio.wait_for(closed.wait(), 3)
+            assert len(server.connections) == 1
+            start = time.monotonic()
+            await asyncio.wait_for(server._drain(), 5)
+            assert time.monotonic() - start < 1
+        finally:
+            release.set()
+
+
+class _DrainingConn:
+    """AiohttpServer._drain 用的连接替身：停止接收之后过 closes_after 秒关掉，None 就一直不关"""
+
+    def __init__(self, closes_after: float | None):
+        self.closes_after = closes_after
         self.stopped = False
-        self._failed = asyncio.Event()
-        # 在 wait_failed 里等着的任务
+        self._closed = asyncio.Event()
+        # 在 wait_closed 里等着的任务
         self.waiting: list[asyncio.Task] = []
 
     def stop_receiving(self) -> None:
         self.stopped = True
-        if self.fails_after is not None:
-            asyncio.get_running_loop().call_later(self.fails_after, self._failed.set)
+        if self.closes_after is not None:
+            asyncio.get_running_loop().call_later(self.closes_after, self._closed.set)
 
-    async def wait_failed(self) -> None:
+    async def wait_closed(self) -> None:
         task = asyncio.current_task()
         assert task is not None
         self.waiting.append(task)
-        await self._failed.wait()
+        await self._closed.wait()
 
 
 async def test_drain_waits_for_connections_up_to_the_budget():
-    """_drain 让各连接停止接收，等它们都被 fail，最多 SHUTDOWN_DRAIN_TIMEOUT 秒，到点不再等"""
+    """_drain 让各连接停止接收，等它们都关了，最多 SHUTDOWN_DRAIN_TIMEOUT 秒，到点不再等"""
     server = AiohttpServer(HeTuConfig({"SHUTDOWN_DRAIN_TIMEOUT": 0.3}))
     quick, stuck = _DrainingConn(0.05), _DrainingConn(None)
     server.connections.update({cast(Any, quick), cast(Any, stuck)})
@@ -554,13 +674,15 @@ async def test_drain_waits_for_connections_up_to_the_budget():
     took = time.monotonic() - start
     assert quick.stopped and stuck.stopped
     assert 0.25 < took < 1
+    await asyncio.sleep(0)
+    # 到点还没关的：在等它的任务收掉
+    assert stuck.waiting and all(task.done() for task in stuck.waiting)
 
     server = AiohttpServer(HeTuConfig({"SHUTDOWN_DRAIN_TIMEOUT": 5}))
     server.connections.update({cast(Any, _DrainingConn(0.05))})
     start = time.monotonic()
     await asyncio.wait_for(server._drain(), 3)
     assert time.monotonic() - start < 1  # 都排空了就不等满预算
-    assert all(task.done() for task in stuck.waiting)
 
 
 async def test_drain_resumed_waits_only_the_rest_of_the_budget():

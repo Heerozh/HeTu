@@ -1146,13 +1146,16 @@ async def _run_send_loop(
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_send_loop_drained_flushes_pushes_then_goes_away():
+async def test_send_loop_drained_flushes_pushes_then_goes_away(monkeypatch):
     """
     关服排空：取到 PUSH_DRAINED 时排在前面的回复都已发出，再把待发区的推送、sync 发掉，然后以 1001
     断开。这几帧不计发送频率上限（超限断开的话客户端收到的是 4002，别重连）
     """
     from hetu.server.receiver import PUSH_DRAINED
     from hetu.server.websocket import PushQueue, send_loop
+
+    # 推送不会被回复压住太久、在普通轮次里先发出去（机器忙时两轮之间可能隔得久），测的是 PUSH_DRAINED 那一轮
+    monkeypatch.setattr(websocket_server, "PUSH_MAX_HOLD", 60)
 
     ws = _FakeSendWs()
     outbox = _FakeOutbox({"sub_1": {"1": {"v": 1}}}, synced=[7])

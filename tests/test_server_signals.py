@@ -194,6 +194,7 @@ async def login(ctx, user_id):
     namespace="lifecycle", components=(Mark,), permission=hetu.Permission.USER
 )
 async def slow_mark(ctx, seconds):
+    print("[lifecycle] slow_mark started", flush=True)
     await asyncio.sleep(seconds)
     async with ctx.repo[Mark].upsert(owner=ctx.caller) as row:
         row.count += 1
@@ -311,6 +312,17 @@ async def _close_code(ws: Any, timeout: float = 10) -> int | None:
         return None if e.rcvd is None else e.rcvd.code
 
 
+# LIFECYCLE_APP 的 slow_mark 一进来就打这一行（两处要一致）：测试等它出现，确定 RPC 已经在跑了
+SLOW_MARK_STARTED = "[lifecycle] slow_mark started"
+
+
+async def _wait_output(server: _Server, marker: str, timeout: float = 10) -> None:
+    """等服务器进程的输出里出现 marker"""
+    async with asyncio.timeout(timeout):
+        while marker not in server.output():
+            await asyncio.sleep(0.02)
+
+
 @pytest.mark.timeout(90)
 def test_shutdown_with_live_connections(tmp_path, http_server):
     """
@@ -360,7 +372,7 @@ def test_shutdown_cancels_inflight_rpc(tmp_path, http_server):
         async def scenario() -> tuple[int | None, float]:
             ws, pipe, pipe_ctx = await _login(server.port, 21)
             await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 3]))
-            await asyncio.sleep(0.5)  # RPC 已经在跑了
+            await _wait_output(server, SLOW_MARK_STARTED)  # RPC 已经在跑了
             start = time.monotonic()
             server.signal(signal.SIGINT)
             code = await _close_code(ws)
@@ -471,7 +483,7 @@ def test_aiohttp_shutdown_drains_inflight_rpc(tmp_path, http_server):
             ws, pipe, pipe_ctx = await _login(server.port, 41)
             await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 1]))
             await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 0]))
-            await asyncio.sleep(0.3)  # 第一个在跑，第二个还没读
+            await _wait_output(server, SLOW_MARK_STARTED)  # 第一个在跑，第二个还没读
             server.signal(signal.SIGINT)
             return await _messages_until_closed(ws, pipe, pipe_ctx)
 
@@ -501,7 +513,7 @@ def test_aiohttp_drain_budget_cancels_long_rpc(tmp_path, http_server):
         async def scenario() -> tuple[list[Any], int | None, float]:
             ws, pipe, pipe_ctx = await _login(server.port, 51)
             await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 5]))
-            await asyncio.sleep(0.3)
+            await _wait_output(server, SLOW_MARK_STARTED)
             start = time.monotonic()
             server.signal(signal.SIGINT)
             messages, code = await _messages_until_closed(ws, pipe, pipe_ctx)

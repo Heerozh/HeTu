@@ -75,8 +75,9 @@ async def serve_connection(
     处理一个 ws 连接，适配层在 ws 握手（HTTP upgrade）完成之后调用，instance 是路径里的实例名。
 
     握手、建连接上下文之后，收、发各起一个协程，任意一边结束就拆连接（停收发协程、断线 System、
-    删 Connection 行、退订）。返回时连接已经拆完。收发期间本协程被框架取消（Sanic：传输层断开、
-    关服）时照常拆完再返回，取消不往外抛；拆连接的任务受 shield 保护，本协程再被取消也会跑完。
+    删 Connection 行、退订）；关服排空时接收那一边先停，等发送那一边发完回复再拆。返回时连接已经
+    拆完。收发期间本协程被框架取消（Sanic：传输层断开、关服）时照常拆完再返回，取消不往外抛；拆连接的
+    任务受 shield 保护，本协程再被取消也会跑完。
 
     Serve one WebSocket connection after the framework finished the opening handshake.
     Returns once the connection is torn down.
