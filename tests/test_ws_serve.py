@@ -17,7 +17,7 @@ from fixtures.backends import REDIS_BACKENDS, SQLITE_BACKENDS
 from hetu.endpoint import connection
 from hetu.endpoint.connection import Connection
 from hetu.server import websocket as websocket_server
-from hetu.server.conn import ConnectionClosed, next_conn_id
+from hetu.server.conn import ConnectionClosed, Draining, next_conn_id
 from hetu.server.pipeline import JSONBinaryLayer, MessagePipeline, ServerMessagePipeline
 from hetu.server.runtime import WorkerRuntime, setup_message_pipeline
 
@@ -50,26 +50,54 @@ class FakeWsConnection:
         self.close_reason: str | None = None
         # 对端不读数据：send 一直卡在 drain 上，连接关了之后要到 abort 兜底才醒
         self.stuck = False
+        # 每次 send 要花多久（秒），模拟慢链路：发送协程落在接收协程后面
+        self.send_delay = 0.0
         # protocol_error() 的返回值
         self.error: BaseException | None = None
         self._closed = False
         self._aborted = asyncio.Event()
         self._inbox: asyncio.Queue[Any] = asyncio.Queue()
         self._outbox: asyncio.Queue[Any] = asyncio.Queue()
+        # 关服排空，照 AiohttpWsConnection 的做法：stop_receiving 用取消叫醒正在等的 recv
+        self._draining = False
+        self._receiving: asyncio.Task | None = None
+        self._wakeup_pending = False
 
     # ---- WsConnection ----
 
     async def recv(self, timeout: float | None = None) -> str | bytes | None:
         if self._closed:
             raise ConnectionClosed
+        if self._draining:
+            raise Draining
+        task = asyncio.current_task()
+        self._receiving = task
         try:
             async with asyncio.timeout(timeout):
                 item = await self._inbox.get()
         except TimeoutError:
             return None
+        except asyncio.CancelledError:
+            if not self._wakeup_pending:
+                raise
+            self._wakeup_pending = False
+            if task is not None and task.uncancel() > 0:
+                raise
+            raise Draining from None
+        finally:
+            self._receiving = None
         if item is _CLOSED:
             raise ConnectionClosed
         return item
+
+    def stop_receiving(self) -> None:
+        """关服排空：之后不再交出消息（排在 inbox 里的留着不读），正在等的 recv 醒来抛 Draining"""
+        if self._draining:
+            return
+        self._draining = True
+        if self._receiving is not None and not self._wakeup_pending:
+            self._wakeup_pending = True
+            self._receiving.cancel()
 
     async def send(self, data: str | bytes) -> None:
         if self._closed:
@@ -77,6 +105,8 @@ class FakeWsConnection:
         if self.stuck:
             await self._aborted.wait()
             raise ConnectionClosed
+        if self.send_delay:
+            await asyncio.sleep(self.send_delay)
         self._outbox.put_nowait(data)
 
     def fail(self, code: int, reason: str) -> None:
@@ -548,6 +578,129 @@ async def test_anonymous_limit_rejection_does_no_cleanup_work(monkeypatch, mod_r
 
     first.disconnect()
     await _finished(first_task, 5)
+
+
+# ==== 关服排空（第 4b 步）====
+
+
+async def _wait_for(predicate, timeout: float = 5) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+async def _received_until_closed(client: FakeClient, timeout: float = 5) -> list[Any]:
+    """收客户端这边的消息，直到连接被服务端关掉"""
+    received: list[Any] = []
+    async with asyncio.timeout(timeout):
+        while not (client.conn._closed and client.conn._outbox.empty()):
+            try:
+                received.append(await client.recv(timeout=0.05))
+            except TimeoutError:
+                pass
+    return received
+
+
+async def test_drain_idle_connection_closes_with_going_away(mod_runtime):
+    """排空时空闲的连接：正在等的 recv 醒来，马上以 1001 断开，照常拆完（断线 System 以用户身份跑）"""
+    user_id = 299101
+    before = await _connection_rows(mod_runtime)
+    client, task = await _connect(mod_runtime)
+    assert await client.call("login", user_id) == ["rsp", {"id": user_id}]
+    client.conn.stop_receiving()
+    await _finished(task, 2)
+    assert client.conn.close_code == connection.CLOSE_GOING_AWAY
+    await _wait_rows(mod_runtime, before)
+    assert await _disconnect_count(mod_runtime, user_id) == 1
+
+
+async def test_drain_finishes_inflight_rpc_and_skips_unread(monkeypatch, mod_runtime):
+    """
+    排空时正在执行的 RPC 照常执行完、回复发出去，再以 1001 断开；排在后面、还没读的消息不执行（客户端
+    重连后重发也不会重复执行）
+    """
+    from hetu.server import receiver
+
+    calls: list[Any] = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    rpc = receiver.rpc
+
+    async def gated_rpc(data, *args, **kwargs):
+        calls.append(data[2])
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await rpc(data, *args, **kwargs)
+
+    monkeypatch.setattr(receiver, "rpc", gated_rpc)
+    client, task = await _connect(mod_runtime)
+    # 慢链路：回复还在发的时候接收协程就已经停下了，不能这时就拆连接（发送协程会被取消，回复就丢了）
+    client.conn.send_delay = 0.2
+    client.send(["rpc", "echo_response", ["first"]])
+    client.send(["rpc", "echo_response", ["second"]])
+    async with asyncio.timeout(5):
+        await entered.wait()
+    client.conn.stop_receiving()
+    release.set()
+    assert await _received_until_closed(client) == [["rsp", ["first"]]]
+    await _finished(task, 5)
+    assert client.conn.close_code == connection.CLOSE_GOING_AWAY
+    assert calls == [["first"]]
+
+
+async def test_drain_waits_for_pending_subscription_reply(monkeypatch, mod_runtime):
+    """排空时在后台等着的订阅照常做完，订阅的回复发出去之后才以 1001 断开"""
+    from hetu.data import sub as sub_module
+
+    reading, release = asyncio.Event(), asyncio.Event()
+    real_read = sub_module.read_whole_table_
+
+    async def gated_read(*args, **kwargs):
+        reading.set()
+        await release.wait()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    client, task = await _connect(mod_runtime)
+    client.send(["sub", "PublicNames", "table"])
+    async with asyncio.timeout(5):
+        await reading.wait()
+    client.conn.stop_receiving()
+    await asyncio.sleep(0.1)
+    assert not task.done()  # 在等订阅
+    release.set()
+    received = await _received_until_closed(client)
+    await _finished(task, 5)
+    assert [msg[0] for msg in received] == ["sub"]
+    assert client.conn.close_code == connection.CLOSE_GOING_AWAY
+
+
+async def test_drain_before_handshake_ends_quietly(mod_runtime):
+    """握手之前就开始排空：安静地结束，不落 Connection 行（断开由适配层收尾）"""
+    before = await _connection_rows(mod_runtime)
+    conn = FakeWsConnection()
+    conn.stop_receiving()
+    await _finished(_serve(mod_runtime, conn), 2)
+    assert await _connection_rows(mod_runtime) == before
+
+
+async def test_drain_fallback_unblocks_stuck_sender(mod_runtime):
+    """
+    排空时发送卡住（对端不读数据）：serve_connection 一直等发送那一边。适配层的兜底（fail 再取消收发
+    协程，见 AiohttpServer.stop）照样能把它收掉，Connection 行删掉
+    """
+    before = await _connection_rows(mod_runtime)
+    client, task = await _connect(mod_runtime)
+    client.conn.stuck = True
+    client.send(["rpc", "report_ctx_timestamp"])  # 回复卡在发送上
+    await asyncio.sleep(0.1)
+    client.conn.stop_receiving()
+    await asyncio.sleep(0.3)
+    assert not task.done()
+    client.conn.fail(connection.CLOSE_GOING_AWAY, "")
+    await mod_runtime.tasks.cancel_all(2)
+    await _finished(task, 2)
+    await _wait_rows(mod_runtime, before)
 
 
 async def test_protocol_error_is_logged(mod_runtime, caplog):

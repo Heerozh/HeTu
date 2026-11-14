@@ -1081,6 +1081,7 @@ class _FakeSendWs:
         self.frames: list = []
         self.on_send = on_send
         self.delay = delay
+        self.failed: list[tuple[int, str]] = []
 
     async def send(self, frame) -> None:
         self.frames.append(frame)
@@ -1089,7 +1090,7 @@ class _FakeSendWs:
         await asyncio.sleep(self.delay)
 
     def fail(self, code: int, reason: str) -> None:
-        pass
+        self.failed.append((code, reason))
 
 
 class _FakeOutbox:
@@ -1143,6 +1144,73 @@ async def _run_send_loop(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_send_loop_drained_flushes_pushes_then_goes_away():
+    """
+    关服排空：取到 PUSH_DRAINED 时排在前面的回复都已发出，再把待发区的推送、sync 发掉，然后以 1001
+    断开。这几帧不计发送频率上限（超限断开的话客户端收到的是 4002，别重连）
+    """
+    from hetu.server.receiver import PUSH_DRAINED
+    from hetu.server.websocket import PushQueue, send_loop
+
+    ws = _FakeSendWs()
+    outbox = _FakeOutbox({"sub_1": {"1": {"v": 1}}}, synced=[7])
+    queue = PushQueue(8)
+    queue.put_nowait(["rsp", "ok"])
+    queue.put_nowait(PUSH_DRAINED)
+    counted: list[int] = []
+
+    def flooded() -> bool:
+        counted.append(1)
+        return False
+
+    await asyncio.wait_for(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=flooded,
+        ),
+        2,
+    )
+    # 待发区在回复之前就有推送：回复优先，推送排在后面（同 test_send_loop_* 的规则）
+    assert ws.frames == [["rsp", "ok"], ["updt", "sub_1", {"1": {"v": 1}}], ["sync", 7]]
+    assert ws.failed == [(connection.CLOSE_GOING_AWAY, "")]
+    assert counted == [1]
+
+
+async def test_send_loop_drained_takes_pushes_and_syncs_together():
+    """
+    关服排空时待发区和 sync 在同一个同步段里取：发推送的时候 hub 又交来一个 tick（新的推送和它后面的
+    sync），这个 tick 的推送不发，它的 sync 也不能发，否则客户端会以为那次调用引起的推送都到了
+    """
+    from hetu.server.receiver import PUSH_DRAINED
+    from hetu.server.websocket import PushQueue, send_loop
+
+    outbox = _FakeOutbox({"sub_1": {"1": {"v": 1}}}, synced=[7])
+
+    def new_tick(frame):
+        if frame == ["updt", "sub_1", {"1": {"v": 1}}]:
+            outbox.outbox["sub_1"] = {"1": {"v": 2}}
+            outbox.synced.append(8)
+
+    ws = _FakeSendWs(on_send=new_tick)
+    queue = PushQueue(8)
+    queue.put_nowait(PUSH_DRAINED)
+    await asyncio.wait_for(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=lambda: False,
+        ),
+        2,
+    )
+    assert ws.frames == [["updt", "sub_1", {"1": {"v": 1}}], ["sync", 7]]
+    assert ws.failed == [(connection.CLOSE_GOING_AWAY, "")]
 
 
 async def test_send_loop_does_not_hold_pushes_behind_replies_forever():
@@ -1824,9 +1892,7 @@ def test_websocket_setup_failure_deletes_connection_row(
 
 
 @pytest.mark.timeout(30)
-def test_shutdown_waits_for_connection_cleanup(
-    monkeypatch, test_server, ws_redis_url
-):
+def test_shutdown_waits_for_connection_cleanup(monkeypatch, test_server, ws_redis_url):
     """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
     里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
     事务一直占着写锁，同进程之后的测试全部 database is locked"""

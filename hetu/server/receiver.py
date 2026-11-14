@@ -17,7 +17,7 @@ import hetu  # for obtaining __version__
 from ..endpoint import connection
 from ..endpoint.response import RejectResponse, ResponseToClient
 from ..i18n import _
-from .conn import ConnectionClosed
+from .conn import ConnectionClosed, Draining
 from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
 if TYPE_CHECKING:
@@ -33,6 +33,9 @@ replay = logging.getLogger("HeTu.replay")
 # 接收协程结束时塞进 push_queue，让发送循环自己返回（连接已经由接收协程 fail 了）。拆连接不靠它：
 # serve_connection 等收发任意一边结束就拆，队列满、塞不进去也没关系
 PUSH_CLOSE = object()
+# 关服排空：接收协程停下之后塞进 push_queue（await put，不能丢）。发送循环取到它时，排在前面的回复
+# 都已发完，再发掉待发区的推送，然后以 1001 断开
+PUSH_DRAINED = object()
 
 BAD_SUBS = [
     "sub",
@@ -275,11 +278,18 @@ async def client_handler(
     flood_checker: connection.ConnectionFloodChecker,
     debug: int,
 ):
-    """连接的接收协程：逐条收客户端的消息并执行。由 serve_connection 起成单独的 task"""
+    """
+    连接的接收协程：逐条收客户端的消息并执行。由 serve_connection 起成单独的 task。
+
+    关服排空时（recv 抛 Draining）不再收新消息：已经收到的这条照常执行完，在后台跑的订阅后半段等它们
+    做完，再往 push_queue 塞 PUSH_DRAINED，由发送循环发完回复后断开。这时返回 True，其余情况返回 None
+    """
     pipe = ServerMessagePipeline()
     ctx = executor.context
     last_data = None
     cancelled = False
+    # 关服排空：不再收新消息，排着的回复由发送循环发完
+    drained = False
     # 连接已经关了（对端断开，或顶号核查、发送那边已经 fail 了它），不算异常，也不用再 fail
     connection_closed = False
     # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
@@ -364,6 +374,8 @@ async def client_handler(
                             msg_type=last_data[0]
                         )
                     )
+    except Draining:
+        drained = True
     except asyncio.CancelledError:
         # print(ctx, 'client_handler normal canceled')
         # 唯一合法的静默出口：连接本来就在被 serve_connection 拆，别再插手
@@ -394,16 +406,17 @@ async def client_handler(
         replay.info(err_msg)
         logger.exception(err_msg)
     finally:
-        # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）
-        for task in list(deferred):
-            task.cancel()
+        # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）。排空时不取消，等它们做完
+        if not drained:
+            for task in list(deferred):
+                task.cancel()
         # 除了被取消（连接本来就在拆）和连接已经关了，任何退出路径都必须把连接一起 fail 掉并
         # 留下日志。否则连接会变成"半死"：TCP 仍 ESTABLISHED、协议层 ping/pong 照常、客户端
         # socket 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到回应，而且两端
         # 一行错误日志都没有（实测：卡在 WatchRange 上无限等待）。
         # 连接已经关了的不打 INFO：每次正常掉线都会走到这里（aiohttp 上 recv 直接抛
         # ConnectionClosed），拆连接时还会记一条"连接断开"
-        if not cancelled:
+        if not cancelled and not drained:
             if connection_closed:
                 logger.debug("[📡WSReceiver] connection closed, receiver exits")
             else:
@@ -417,3 +430,18 @@ async def client_handler(
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:
                 pass  # serve_connection 等到本协程结束就会取消发送协程，不靠 PUSH_CLOSE
+    if not drained:
+        return None
+    try:
+        # 等在后台跑的订阅后半段做完再塞（顺带持有它们的引用）。它们的占位已经排在队列里，发送循环
+        # 按顺序等占位填好、发出回复
+        if deferred:
+            await asyncio.wait(list(deferred))
+        # 队列满着也要等着塞进去，不能丢：发送循环靠它知道排在前面的回复都发完了
+        await push_queue.put(PUSH_DRAINED)
+    except asyncio.CancelledError:
+        # 排空超时，适配层兜底取消：还在等的订阅一起取消
+        for task in list(deferred):
+            task.cancel()
+        raise
+    return True
