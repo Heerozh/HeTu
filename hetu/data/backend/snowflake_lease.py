@@ -41,8 +41,9 @@ class SnowflakeLease:
     只租 id、不接水位的进程正常退出并释放租约后，下一个拿到同一 id 的进程读到的是旧水位，
     会落在它用过的毫秒上；跨机器还有时钟差。所以水位这一步不能省。
 
-    服务器在 `start_backends` / `close_backends` 与两个 `add_task` 循环里分步调用；工具进程
-    用 ``async with`` 一次拿全（`__aenter__` 起两个循环任务，`__aexit__` 停掉并释放）。
+    服务器在 `start_backends` 里 `acquire`、开始监听后 `start_loops`，在 `close_backends` 里
+    先 `stop_loops` 再 `release`；工具进程用 ``async with`` 一次拿全（`__aenter__` 起两个循环，
+    `__aexit__` 停掉并释放）。
 
     Lifecycle of a process's snowflake lease (worker id + timestamp watermark + the two
     background loops). Shared by server workers and the hetu call / shell tool commands.
@@ -131,9 +132,9 @@ class SnowflakeLease:
                 break
             except Exception as e:
                 # 这个循环是发号围栏的心跳来源：它一旦静默死掉，围栏会在安全期后永久跳闸，
-                # 进程活着但再也发不出ID。而 app.add_task 注册的task被sanic一直持有引用，
-                # 连asyncio那句"Task exception was never retrieved"都不会打印。所以这里必须
-                # 兜住所有异常、打出来、继续下一轮
+                # 进程活着但再也发不出ID。而任务由 self._tasks 一直持有引用，异常要到停循环时
+                # 才会被取出，连asyncio那句"Task exception was never retrieved"都不会打印。
+                # 所以这里必须兜住所有异常、打出来、继续下一轮
                 logger.exception(
                     _("❌ [📡WorkerKeeper] 续约异常，将重试: {err}").format(
                         err=f"{type(e).__name__}:{e}"
@@ -189,19 +190,32 @@ class SnowflakeLease:
         if self.on_lost is not None:
             self.on_lost()
 
-    async def __aenter__(self) -> Self:
-        await self.acquire(wait=False)
-        # 两个循环在调用方设置提交观察钩子（hetu.data.backend.session.commit_observer）之前
-        # 创建，复制的上下文里没有它：水位写入不会被 dry-run / 写保护拦下或记进写集
+    def start_loops(self) -> None:
+        """`acquire` 之后起续约和水位预留两个循环；续约发现租约丢失时调用 `on_lost`。"""
+        assert self.ts_keeper is not None, "acquire() first"
+        assert not self._tasks, "loops already started"
         self._tasks = [
             asyncio.create_task(self.renew_forever(self._lost)),
             asyncio.create_task(self.reserve_forever()),
         ]
-        return self
 
-    async def __aexit__(self, *exc: object) -> None:
+    async def stop_loops(self) -> None:
+        """
+        停掉两个循环并等它们结束，可以重复调用。`release` 之前必须先调：不然续约会对刚释放的
+        id 报租约丢失，水位预留会在精确水位之后再写一次。
+        """
         tasks, self._tasks = self._tasks, []
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def __aenter__(self) -> Self:
+        await self.acquire(wait=False)
+        # 两个循环在调用方设置提交观察钩子（hetu.data.backend.session.commit_observer）之前
+        # 创建，复制的上下文里没有它：水位写入不会被 dry-run / 写保护拦下或记进写集
+        self.start_loops()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.stop_loops()
         await self.release()

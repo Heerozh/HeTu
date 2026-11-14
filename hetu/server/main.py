@@ -134,9 +134,12 @@ async def start_backends(app: Sanic):
 
 
 async def close_backends(app: Sanic):
-    # 关服写精确水位再释放 worker id：sanic 已取消后台任务、连接也拆完了（见 worker_close），
-    # 不会再发号，最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
-    await app.ctx.snowflake_lease.release()
+    # 关服写精确水位再释放 worker id。先停续约、水位预留两个循环：不然续约会对刚释放的 id 报
+    # 租约丢失，水位预留会在精确水位之后再写一次。调用方保证连接已拆完、FutureCalls 已停（见
+    # worker_close），不会再发号，最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
+    lease = app.ctx.snowflake_lease
+    await lease.stop_loops()
+    await lease.release()
 
     # 关闭后端连接池
     for attrib in dir(app.ctx):
@@ -242,27 +245,62 @@ async def worker_close(app):
     # TerminateProcess 硬杀，留下的租约由 live_worker_ids 认出来（见 redis/worker_keeper.py）
     # 先等连接拆完（断线System、删Connection行）再关后端，见 wait_connections_closed
     await wait_connections_closed(app.config.GRACEFUL_SHUTDOWN_TIMEOUT)
+    # FutureCalls 执行的 System 会发号，要在释放租约之前停掉
+    await stop_future_calls(app)
     await close_backends(app)
 
 
-async def snowflake_timestamp_save(app: Sanic):
-    """周期性预留雪花ID的时间戳高水位，防止重启期间时钟回拨导致ID重复。
-    和 worker_keeper_renewal 刻意分成两个task，见 SnowflakeLease.reserve_forever。
-    """
-    await app.ctx.snowflake_lease.reserve_forever()
-
-
-async def worker_keeper_renewal(app: Sanic):
-    """循环每5秒续约一次worker id；租约被抢走（SystemExit）就重启本worker"""
+async def start_lease_loops(app: Sanic):
+    """after_server_start：起续约、水位预留两个循环，由 close_backends 停掉"""
+    lease = app.ctx.snowflake_lease
     # app.m 只在丢租约时才去取，和原来的写法一致
-    await app.ctx.snowflake_lease.renew_forever(on_lost=lambda: app.m.restart())
+    lease.on_lost = lambda: app.m.restart()
+    lease.start_loops()
+
+
+def _report_task_death(task: asyncio.Task) -> None:
+    """后台循环本应一直跑到关服。自己持有引用的 task 异常退出时 asyncio 不会提示，这里马上打出来"""
+    if task.cancelled() or (exc := task.exception()) is None:
+        return
+    logger.error(
+        _("❌ [📡Server] 后台任务 {name} 异常退出：{err}").format(
+            name=task.get_name(), err=f"{type(exc).__name__}:{exc}"
+        ),
+        exc_info=exc,
+    )
+
+
+async def start_future_calls(app: Sanic):
+    """after_server_start：开始执行到期的未来调用，由 stop_future_calls 停掉"""
+    task = asyncio.create_task(future_call_task(app), name="hetu:future_calls")
+    task.add_done_callback(_report_task_death)
+    app.ctx.future_call_task = task
+
+
+async def stop_future_calls(app: Sanic):
+    """
+    关服时在释放租约之前停掉 FutureCalls：它执行的 System 会发号，释放之后再发，就可能和
+    接手这个 worker id 的进程撞号。
+    """
+    task = getattr(app.ctx, "future_call_task", None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    timeout = app.config.GRACEFUL_SHUTDOWN_TIMEOUT
+    _done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        logger.warning(
+            _("⚠️ [⚙️Future] 关服时 FutureCalls 没在{timeout}秒内停下，不再等待").format(
+                timeout=timeout
+            )
+        )
 
 
 def worker_main(app_name, config) -> Sanic:
     """
     此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
-    多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
-    后续Workers进程才会执行app.add_task和注册的listener。
+    多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何注册的listener。
+    后续Workers进程才会执行注册的listener。
     """
 
     # 加载玩家的app文件
@@ -336,12 +374,11 @@ def worker_main(app_name, config) -> Sanic:
     if IS_WINDOWS:
         app.before_server_start(threaded_accept_listener)
 
-    # 启动未来调用worker
-    app.add_task(future_call_task(app))
-    # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
-    app.add_task(worker_keeper_renewal(app))
-    # 启动雪花ID时间戳高水位记录，和上面的续约刻意分开，见函数文档
-    app.add_task(snowflake_timestamp_save(app))
+    # 开始监听之后启动续约、水位预留两个循环和 FutureCalls。不用 app.add_task：loop 启动前加的
+    # 任务不进 Sanic 的任务表，关服时不会被取消，会和释放租约并发；自己持有引用，由 worker_close
+    # 在释放租约之前停掉
+    app.after_server_start(start_lease_loops)
+    app.after_server_start(start_future_calls)
 
     # 启动服务器监听
     app.blueprint(HETU_BLUEPRINT)

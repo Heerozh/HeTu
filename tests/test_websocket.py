@@ -1899,6 +1899,52 @@ def test_shutdown_waits_for_connection_cleanup(
     assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
 
 
+@pytest.mark.timeout(30)
+def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_server):
+    """关服时 FutureCalls、续约、水位预留三个后台循环都要在释放租约之前停掉。以前它们是 loop
+    启动前 app.add_task 的，不进 Sanic 的任务表，Sanic 关服时不取消：release() 写精确水位、
+    释放 worker id 时它们还在跑，FutureCalls 可能在释放之后还在发号，续约可能对刚释放的 id
+    报租约丢失去重启 worker"""
+    import hetu.server.main as main_mod
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    running: set[str] = set()
+
+    def tracked(name, func):
+        async def wrapper(*args, **kwargs):
+            running.add(name)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                running.discard(name)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        main_mod, "future_call_task", tracked("future_calls", main_mod.future_call_task)
+    )
+    monkeypatch.setattr(
+        SnowflakeLease, "renew_forever", tracked("renew", SnowflakeLease.renew_forever)
+    )
+    monkeypatch.setattr(
+        SnowflakeLease,
+        "reserve_forever",
+        tracked("reserve", SnowflakeLease.reserve_forever),
+    )
+    seen_at_release: list[set[str]] = []
+    release = SnowflakeLease.release
+
+    async def spying_release(self):
+        seen_at_release.append(set(running))
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", spying_release)
+
+    _request, response = test_server.test_client.get("/")
+    assert response.status == 200
+    assert seen_at_release == [set()], f"释放租约时还在跑：{seen_at_release}"
+
+
 @pytest.mark.timeout(20)
 def test_websocket_fragmented_rpc_and_following_message(test_server):
     """加密压缩包跨多帧（含事件循环切换），必须完整重组且不打乱后续 nonce。"""
