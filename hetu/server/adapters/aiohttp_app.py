@@ -32,7 +32,7 @@ from ... import webext
 from ...endpoint import connection
 from ...i18n import _
 from ..config import HeTuConfig
-from ..conn import ConnectionClosed, next_conn_id
+from ..conn import ConnectionClosed, Draining, next_conn_id
 from ..forwarded import client_ip
 from ..receiver import close_connection
 from ..runtime import (
@@ -122,13 +122,19 @@ class AiohttpWsConnection:
         recv 都会醒来，都抛 `ConnectionClosed`。
     - fail 不 pause_reading（和设计稿最初写的不同）：close() 要读对端回的 close 帧，暂停读取的话每次都
       要等满 `CLOSE_TIMEOUT` 才关 TCP。fail 之后收到的消息不再交出去（recv 收到后再看一次标记）。
+    - `stop_receiving`（关服排空）：之后的 recv 抛 `Draining`；正在等的 recv 用取消叫醒，转成 `Draining`。
+      aiohttp 的读缓冲对取消是安全的：叫醒时刚到的消息留在缓冲里，不会交出去，也就不会执行。
 
     Adapts an aiohttp WebSocketResponse to `WsConnection`.
     """
 
     __slots__ = (
+        "_draining",
         "_failed",
+        "_failed_event",
         "_protocol_error",
+        "_receiving",
+        "_wakeup_pending",
         "_ws",
         "client_ip",
         "conn_id",
@@ -147,15 +153,35 @@ class AiohttpWsConnection:
         self.request = request
         self._ws = ws
         self._failed = False
+        self._failed_event: asyncio.Event | None = None
         self._protocol_error: BaseException | None = None
+        # 关服排空：不再交出新消息
+        self._draining = False
+        # 正在 recv 里等着的 task，和 stop_receiving 为了叫醒它发的取消还没送到
+        self._receiving: asyncio.Task | None = None
+        self._wakeup_pending = False
 
     async def recv(self, timeout: float | None = None) -> str | bytes | None:
         if self._failed:
             raise ConnectionClosed
+        if self._draining:
+            raise Draining
+        task = asyncio.current_task()
+        self._receiving = task
         try:
             msg = await self._ws.receive(timeout)
         except TimeoutError:
             return None
+        except asyncio.CancelledError:
+            if not self._wakeup_pending:
+                raise
+            # stop_receiving 为了叫醒这里发的取消：不是真的取消，撤销掉。同时还有别的取消请求时照常抛
+            self._wakeup_pending = False
+            if task is not None and task.uncancel() > 0:
+                raise
+            raise Draining from None
+        finally:
+            self._receiving = None
         if self._failed:
             # 等的时候连接被 fail 了：之后才轮到的消息不再交出去
             raise ConnectionClosed
@@ -179,10 +205,33 @@ class AiohttpWsConnection:
             # 卡在 drain 上的时候连接被 fail 了：abort 之后 drain 正常返回，这一帧多半没发出去
             raise ConnectionClosed
 
+    def stop_receiving(self) -> None:
+        """
+        关服排空：不再收新消息。之后的 recv 抛 `Draining`；正在等的 recv 马上醒来抛它。发送不受影响。
+
+        Stop handing out messages; a pending recv raises Draining.
+        """
+        if self._draining:
+            return
+        self._draining = True
+        if self._receiving is not None and not self._wakeup_pending:
+            self._wakeup_pending = True
+            self._receiving.cancel()
+
+    async def wait_failed(self) -> None:
+        """等到这条连接被 fail（已经 fail 过就马上返回）"""
+        if self._failed:
+            return
+        if self._failed_event is None:
+            self._failed_event = asyncio.Event()
+        await self._failed_event.wait()
+
     def fail(self, code: int, reason: str) -> None:
         if self._failed:
             return
         self._failed = True
+        if self._failed_event is not None:
+            self._failed_event.set()
         # ws 已经关了（对端关的、心跳超时直接关了 transport）也要挂 abort 兜底：transport.close() 会一直
         # 等着把写缓冲发完
         self._ws.arm_abort()
@@ -249,6 +298,9 @@ class AiohttpServer:
         # 开始关服了：之后才登记的连接（停止监听之前接进来、还在握手的）由 handler 自己马上 fail
         self.stopping = False
         self.ws_options = ws_response_options(config)
+        self.drain_timeout = float(config["SHUTDOWN_DRAIN_TIMEOUT"])
+        # 排空的截止时刻（事件循环时间），第一次排空时定下
+        self._drain_deadline: float | None = None
         self._on_stop_requested = on_stop_requested
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -293,17 +345,47 @@ class AiohttpServer:
             raise
         self.runtime.start_background()
 
+    async def _drain(self) -> None:
+        """
+        关服排空：各连接停止接收，等它们都被 fail（发送循环发完回复后以 1001 断开），最多 drain_timeout 秒。
+        关服被打断后再调时，只等预算剩下的部分
+        """
+        loop = asyncio.get_running_loop()
+        if self._drain_deadline is None:
+            self._drain_deadline = loop.time() + self.drain_timeout
+        conns = list(self.connections)
+        if not conns:
+            return
+        for conn in conns:
+            conn.stop_receiving()
+        waiters = [asyncio.ensure_future(conn.wait_failed()) for conn in conns]
+        try:
+            _done, pending = await asyncio.wait(
+                waiters, timeout=max(0.0, self._drain_deadline - loop.time())
+            )
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+        if pending:
+            logger.warning(
+                _(
+                    "⚠️ [📡Server] 关服排空：{count}个连接没在{timeout}秒内发完回复，直接断开，"
+                    "在途的调用随之取消"
+                ).format(count=len(pending), timeout=self.drain_timeout)
+            )
+
     async def stop(self) -> None:
         """
         关服，可以重复调用、并发调用，只关一次；关到一半被打断后再调，接着关。顺序：
 
         1. 停止监听；
-        2. 对所有连接 `fail(1001)`，再取消各连接的收发任务：在途的 RPC 随之取消，和 Sanic 栈一样（Sanic
-           关服时取消连接的 handler）。不取消的话 RPC 照样提交，回复却发不出去，客户端重连重试时就重复
-           执行了。关服排空（第 4b 步）之前都这样；
-        3. `runtime.stop()`：等连接拆完（断线 System、删 Connection 行，最多 GRACEFUL_SHUTDOWN_TIMEOUT）、
+        2. 排空（`_drain`，最多 SHUTDOWN_DRAIN_TIMEOUT）：各连接不再收新消息，已经收到的处理完、回复发
+           出去之后以 1001 断开。没读的消息不执行，客户端重连后重发不会重复执行；
+        3. 没在预算内排空的：`fail(1001)`，再取消各连接的收发任务，在途的 RPC 随之取消。不取消的话 RPC
+           照样提交，回复却发不出去，客户端重连重试时就重复执行了；
+        4. `runtime.stop()`：等连接拆完（断线 System、删 Connection 行，最多 GRACEFUL_SHUTDOWN_TIMEOUT）、
            取消后台任务、释放租约、关后端；
-        4. 收掉 aiohttp（这时 ws 的 handler 都已经返回）。`runtime.stop()` 出错也照样收。
+        5. 收掉 aiohttp（这时 ws 的 handler 都已经返回）。`runtime.stop()` 出错也照样收。
         """
         async with self._stop_lock:
             if self._stopped:
@@ -312,6 +394,7 @@ class AiohttpServer:
             if self._site is not None:
                 site, self._site = self._site, None
                 await site.stop()
+            await self._drain()
             for conn in list(self.connections):
                 conn.fail(WSCloseCode.GOING_AWAY, "")
             await self.runtime.tasks.cancel_all(self.runtime.graceful_shutdown_timeout)
@@ -352,9 +435,9 @@ async def _websocket_handler(request: web.Request) -> web.StreamResponse:
     finally:
         server.connections.discard(conn)
         # 不管连接怎么结束的，都保证 TCP 在 ABORT_TIMEOUT 内断开：fail 过的不会再来一次；没 fail 过的
-        # （对端关的、心跳超时的）这里补上 abort 兜底，对端不读数据时 transport.close() 会一直等着把
-        # 缓冲发完
-        conn.fail(WSCloseCode.OK, "")
+        # （对端关的、心跳超时的、关服排空时还没握完手的）这里补上 abort 兜底，对端不读数据时
+        # transport.close() 会一直等着把缓冲发完
+        conn.fail(WSCloseCode.GOING_AWAY if server.stopping else WSCloseCode.OK, "")
     return ws
 
 
