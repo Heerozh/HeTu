@@ -927,6 +927,7 @@ wheels = [
 name = "hetudb"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "babel" },
     { name = "brotli" },
     { name = "cryptography" },
@@ -938,13 +939,13 @@ dependencies = [
     { name = "sanic" },
     { name = "tabulate" },
     { name = "tqdm" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "wcwidth" },
     { name = "websockets" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "aiohttp" },
     { name = "austin-dist" },
     { name = "autolang" },
     { name = "basedpyright" },
@@ -970,6 +971,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = "~=3.14" },
     { name = "babel", specifier = ">=2.18.0" },
     { name = "brotli", specifier = ">=1.2.0" },
     { name = "cryptography", specifier = ">=45.0.0" },
@@ -981,13 +983,13 @@ requires-dist = [
     { name = "sanic", specifier = "~=25.3" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = ">=0.22" },
     { name = "wcwidth", specifier = ">=0.2.13" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "aiohttp", specifier = ">=3.13.1" },
     { name = "austin-dist", specifier = ">=4.0.0" },
     { name = "autolang", git = "https://github.com/Heerozh/autolang.git" },
     { name = "basedpyright", specifier = ">=1.38.1" },
