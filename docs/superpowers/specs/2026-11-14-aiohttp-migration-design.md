@@ -1,8 +1,8 @@
 # 用 aiohttp 替换 Sanic — 设计稿
 
 - 日期：2026-11-14
-- 状态：设计中，已做一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0 步已合并（PR #226），
-  第 1 步在 `refactor/worker-runtime` 分支上做。已定事项见 §13，待定问题见 §14。
+- 状态：设计中，已做一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0、1 步已合并（PR #226、#227），
+  第 2 步在 `refactor/config-logging` 分支上做。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -423,15 +423,18 @@ class WorkerRuntime:
   失败会释放租约，而且只释放一次；Sanic 的 `_runtime_start` 监听器原样抛出 `StartupAborted`；
 - `test_websocket.py`：关服时残留的连接任务在释放租约之前已经取消；每次调用都换一个新 runtime。
 
-### 5.2 第 2 步：配置、日志、worker 序号，删除 TLS / 访问日志 / Inspector
+### 5.2 第 2 步：配置、日志、worker 序号，删除 TLS / 访问日志 / Inspector（已实施，分支 `refactor/config-logging`）
 
-这一步不是纯重构：删配置项是有意的行为变化。
+这一步不是纯重构：删掉了几个配置项。按 §14 第 2 条的原则（还没有线上游戏，不需要向前兼容），所有兼容处理都
+不做（§13 第 9 条）。
 
 **配置**
 
-- 新增 `hetu/server/config.py` 的 `HeTuConfig`：一个 dict，可以按属性读大写键（`config.NAMESPACE`），
-  `update_config()` 只收大写键，和 Sanic 的语义相同。`start.py` 里的 `sanic.config.Config` 换成它。
-- 原来由 Sanic 读取、迁移后还保留的键，由 HeTu 给出默认值，免得 Sanic 一走默认值就悄悄变掉：
+- 新增 `hetu/server/config.py` 的 `HeTuConfig`：一个 dict，可以按属性读（`config.NAMESPACE`），读不到的属性
+  抛 AttributeError。`update_config()` 只收大写键，和 Sanic 的语义相同。CLI 里的 `sanic.config.Config` 换成了
+  它，`worker_main` 收到普通 dict 时（测试、嵌入场景）也先转成它。
+- 原来由 Sanic 读取、迁移后还保留的键，由 HeTu 给出默认值，和 Sanic 25.12 的默认值相同，免得 Sanic 一走
+  默认值就悄悄变掉：
 
   | 键 | 默认值 | 说明 |
   |---|---|---|
@@ -441,43 +444,74 @@ class WorkerRuntime:
   | `WEBSOCKET_PING_TIMEOUT` | 20 | 只对 Sanic 栈生效；aiohttp 上不可配，等 pong 的时间是 heartbeat/2（§6） |
   | `PROXIES_COUNT` / `REAL_IP_HEADER` / `FORWARDED_FOR_HEADER` | 0 / None / `X-Forwarded-For` | 同 Sanic（§3.2 第 7 条） |
   | `REQUEST_MAX_SIZE` | 100MB | 同 Sanic，第 6 步映射到 aiohttp 的 `client_max_size`（§14 第 5 条） |
+  | `DEBUG` | False | 原来配置里没有 DEBUG 时 `worker_main` 会 KeyError |
 
-- Sanic 适配层继续用 `app.update_config(...)` 把这些键交给 Sanic，Sanic 栈的行为不变。
+- Sanic 适配层继续用 `app.update_config(...)` 把整份配置交给 Sanic。Sanic 栈上 `runtime.config` 仍是
+  `app.config`（`HeTuConfig` 的键都已经 update 进去），测试通过 harness 改的配置（如 `WEBSOCKET_MAX_SIZE`）
+  对 Sanic 和 runtime 都生效。aiohttp 栈直接用 `HeTuConfig`。
 - Sanic 的 `Config` 会自动读取 `SANIC_` 前缀的环境变量，换掉之后这个能力就没了。HeTu 的文档没写过它，
   写进发版说明即可。
 
-**删掉的配置**（§13）
+**删掉的配置**
 
-- `CERT_CHAIN`、`--cert` 直接删掉：不做检查，也不留隐藏参数（§14 第 2 条：还没有线上游戏，不需要向前兼容）。
-- `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` 为真：打一条警告，然后忽略。判断看值的真假：CLI 路径总会传
-  `ACCESS_LOG: False`，模板里也有 `ACCESS_LOG: false`，这些都不能触发。按 §14 第 2 条同样的理由，这条警告和
-  下面 LOGGING 的兼容改写也可以不做，第 2 步动手前再确认。
-- Sanic 栈固定 `access_log=False`、`ssl=None`、`auto_tls=False`，`INSPECTOR` 不再传给 Sanic。
-- 模板和文档（`operations.md` 中英文里 `--cert` 那一行）同步删除。
+- `CERT_CHAIN`、`--cert`、`ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` 直接删掉：不做检查，不打警告，也不留
+  隐藏参数。配置里还留着的话，HeTu 不读。
+- Sanic 栈：`app.prepare()` 不再传 `ssl` / `auto_tls`，固定 `access_log=False`；`worker_main` 在
+  `update_config` 之后强制 `ACCESS_LOG = False`、`INSPECTOR = False`。配置里残留的键不会意外打开 Sanic 的
+  访问日志或 Inspector，后者会在 6457 端口开放 reload / shutdown 接口。
+- 启动日志里的监听地址固定显示 `http://`；TLS 由前面的反向代理终止。
+- 模板（`CONFIG_TEMPLATE.yml`，`hetu init` 也用它）、文档（`operations.md` 中英文的 `--cert` 一行）、测试和
+  压测脚本里的配置同步删除。
 
 **日志**
 
-- `hetu/safelogging/formatter.py` 的 `ContextAutoFormatter` 不再继承 Sanic 的类，自己实现带颜色的格式，
-  输出和 Sanic 25.12 的 AutoFormatter 一致。可以移植它的实现（MIT 许可，注明出处）。类名和路径不变，因为
-  用户的配置里写的就是 `hetu.safelogging.formatter.ContextAutoFormatter`。
-- 加 golden test，把 LOG_EXTRA（等于 debug）、`SANIC_NO_COLOR` 这些影响输出的状态固定下来（§3.2 第 9 条）。
-- `DEFAULT_LOGGING_CONFIG` 改用 HeTu 的类。
-- **兼容处理**：
-  - 在 `dictConfig` 之前，把 formatter 里的 `sanic.logging.formatter.AutoFormatter`（包括 `class` 和 `()` 两种
-    写法）改写成 HeTu 的类，并打一次警告。2026-09-07（commit 85958ba2）之前的模板写的就是 Sanic 的类。
-  - LOGGING 里引用的其他 `sanic.*` 类：这一步先打警告，第 6 步改为给出明确报错，不能等到 ImportError。
-- `dictConfig` 改由 HeTu 自己调用，时机和现在一样：`worker_main` 里、建 app 之前。传给 Sanic 的是
+- `hetu/safelogging/formatter.py` 的 `ContextAutoFormatter` 不再继承 Sanic 的类。格式移植自 Sanic 25.12 的
+  AutoFormatter（MIT 许可，已注明出处），类名和路径不变：用户的配置里写的就是
+  `hetu.safelogging.formatter.ContextAutoFormatter`。`DEFAULT_LOGGING_CONFIG` 也改用它。
+- 和原来的差别：
+  - **格式化不改 record**。原来 AutoFormatter 会把颜色码写进 `record.levelname`，QueueListener 把同一条
+    record 交给排在后面的文件 handler 时，文件日志里就带上了颜色码。现在格式化时临时换上、格式化完还原，
+    ident 也一样。
+  - **extra 字段只在深度 Debug（DEBUG > 1）时附加**，由 `worker_main` 设置 `ContextAutoFormatter.LOG_EXTRA`。
+    原来 Sanic 在 `app.prepare()` 里才把它设成 debug 的值，之前一直是 True，所以管理进程开服前打的那几行
+    日志（LOGO、监听地址等）后面会多出一行 `ctx=...`。现在不会了。
+  - **关颜色改用标准的 `NO_COLOR` 环境变量**（https://no-color.org），不再认 `SANIC_NO_COLOR`。
+- golden test（`tests/test_safelogging.py`）：
+  - 不上颜色时和 Sanic 的 AutoFormatter 逐字对照，带不带 extra 字段都比。第 6 步删 Sanic 时，把对照换成
+    固定字符串；
+  - 上颜色时比对固定字符串；
+  - 格式化完 record 不变。
+- 不做兼容改写：LOGGING 里引用了 `sanic.*` 类的老配置，第 6 步删掉 Sanic 后会在 dictConfig 时 ImportError。
+- `dictConfig` 改由 HeTu 自己调用，时机和原来一样：在 `worker_main` 里、建 app 之前。传给 Sanic 的是
   `configure_logging=False`。
 - `sanic` logger 重定向到 `HeTu.root` 的逻辑留在 Sanic 适配层；第 4a 步 aiohttp 适配层对 `aiohttp` 的 logger
   做同样处理。
 
 **worker 序号**
 
-- 改用 HeTu 自己的环境变量 `HETU_WORKER_INDEX`（从 0 开始的整数），第 5 步由 supervisor 设置。读取方有两个：
-  - `ContextFilter.IDENT`：设了就显示 "Srv {n}"，没设显示 "Main "；
-  - `FixedWorkerKeeper`：取 worker 序号。
+- 新增 `hetu.common.helper.worker_index()` / `worker_ident()`，读 HeTu 自己的环境变量 `HETU_WORKER_INDEX`
+  （从 0 开始的整数），第 5 步由 supervisor 设置。读取方有两个：
+  - `ContextFilter.IDENT` 和 formatter 的 `IDENT`：设了就显示 `f"Srv{n:2}"`（和 Sanic 的一样，"Srv 3"、
+    "Srv12"），没设显示 "Main "；
+  - `FixedWorkerKeeper`：取 worker 序号，没有就是 0。
 - 过渡期：没设 `HETU_WORKER_INDEX` 时，照旧解析 `SANIC_WORKER_IDENTIFIER`。这个回退在第 6 步删除。
-  `test_common.py` 两种情况都要测。
+  `test_common.py` 两种情况都测了。
+
+**顺带修的 runtime 问题**：用模板配置真起多 worker 做冒烟测试时发现，Sanic 关服时 after_server_stop 可能跑
+两遍，而且两遍并发：
+
+1. 终端里 Ctrl+C 会把 SIGINT 发给整个进程组，管理进程再转发一次；
+2. 第二个信号到达时 Sanic 已经卸掉了信号处理器，after_stop 里就会抛 KeyboardInterrupt；
+3. Sanic 的 `_run_shutdown_coro` 于是把 after_stop 整个重跑一遍，而第一遍的 task 还挂着，会接着跑。
+
+结果是租约释放、后端关闭都做了两遍。这是 Sanic 原有的、和时序有关的行为，dev 上也会出现。
+
+现在 `WorkerRuntime.stop()` 可以重复调用、并发调用，只真正执行一次（锁加标记）；关到一半被打断时，已经释放
+的租约、已经关掉的后端不再来第二次。新增测试 `test_runtime_stop_runs_once_when_called_twice`。
+
+另外，管理进程收到第二个关服信号时，Sanic 会直接 SIGKILL 整个进程组（`WorkerManager.shutdown_signal`）。
+GNU `timeout` 会把信号发两次（发给子进程一次、发给进程组一次），所以用它来停服务时偶尔会被直接杀掉。这一点
+留给第 5 步自己的 supervisor 处理（§5.7，信号要幂等）。
 
 ### 5.3 第 3 步：ws 连接抽象（仍跑在 Sanic 上）
 
@@ -791,8 +825,9 @@ abort。所以：
 | 变更 | 第几步 | 兼容处理 |
 |---|---|---|
 | 删除 `CERT_CHAIN`、`--cert` | 2 | 无（不需要向前兼容，§14 第 2 条） |
-| 删除 `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` | 2 | 为真时打一条警告，然后忽略 |
-| LOGGING 里的 `sanic.logging.formatter.AutoFormatter` | 2 | 自动改写成 HeTu 的 formatter，并打警告 |
+| 删除 `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` | 2 | 无：直接不读，Sanic 栈强制关掉 |
+| 关颜色改用标准的 `NO_COLOR` 环境变量，`SANIC_NO_COLOR` 不再认 | 2 | 无 |
+| LOGGING 里的 `sanic.logging.formatter.AutoFormatter` 等 `sanic.*` 类 | 2、6 | 无：第 6 步删 Sanic 后 dictConfig 会 ImportError |
 | `SANIC_` 前缀的环境变量配置失效 | 2 | 无 |
 | `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 无（同 §14 第 2 条） |
 | `define_route` / `on_server_setup` 改为 aiohttp 接口 | 6 | 无，发版说明给出对照示例 |
@@ -810,7 +845,7 @@ abort。所以：
 |---|---|
 | 0 | 全部现有测试照旧通过；新增 `test_harness_*` 守住 harness 的语义（§5.0） |
 | 1 | 现有测试（含 §3.4 修复时加的测试）照旧通过；假 app 改成假 runtime |
-| 2 | 新增：配置兼容改写、被删除的键（按真值判断打警告；`CERT_CHAIN` 直接删，§14 第 2 条）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
+| 2 | 新增：`HeTuConfig`；`worker_main` 强制关掉残留的 `ACCESS_LOG` / `INSPECTOR`；`HETU_WORKER_INDEX` 和回退；formatter 的 golden test（和 Sanic 逐字对照、上颜色、record 不变） |
 | 3 | 新增：用假 `WsConnection` 的单元测试，包括"队列满 + send 卡住"的场景；现有 ws 测试照旧通过 |
 | 4a | 整套 ws 测试在两个栈上都通过；aiohttp 专属测试（§5.4.5） |
 | 4b | 排空测试（只在 aiohttp 栈）：在途的 RPC 回复送达后才收到 1001；没读的消息不执行；总时长不超过预算 |
@@ -884,6 +919,7 @@ abort。所以：
 6. 删掉 `INSPECTOR`，以后由 CLI 提供 reload 命令（另立 spec）。
 7. §3.4 的现存问题先单独修，不等迁移；迁移从第 0 步开始，排在修复之后。已由 PR #225 修复。
 8. 不做原型，直接从第 0 步开始。
+9. 第 2 步的兼容处理（LOGGING 里 `sanic.*` 类的改写、删除键的警告）都不做，直接砍掉，理由同 §14 第 2 条。
 
 ## 14. 审查时的待定问题（2026-11-14 全部定下）
 
