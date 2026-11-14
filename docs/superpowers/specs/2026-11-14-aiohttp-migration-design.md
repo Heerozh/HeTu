@@ -317,15 +317,15 @@ class TaskRegistry:
     """HeTu 自己的任务表，两个栈共用。"""
 
     def spawn(self, coro, *, name: str | None = None) -> asyncio.Task: ...  # 重名抛 ValueError
-    async def cancel(self, name: str) -> None: ...  # 按名取消并等它结束；不存在就什么也不做
+    async def cancel(self, target: asyncio.Task | str) -> None: ...  # 按句柄或名字取消并等它结束
     async def cancel_all(self, timeout: float | None) -> bool: ...
 
 class WorkerRuntime:
     """一个服务实例一个：适配层每次开服新建一个。"""
 
     config: Mapping[str, Any]
-    backends: dict[str, Backend]  # 按配置名登记，另有 "default" 指向第一个
-    default_backend: Backend  # 属性，即 backends["default"]
+    backends: dict[str, Backend]  # 按配置名登记，另有 "default" 别名指向第一个
+    default_backend: Backend  # 属性：配置里的第一个后端（和原来一致）
     table_managers: dict[str, ComponentTableManager]
     snowflake_lease: SnowflakeLease | None
     tasks: TaskRegistry  # 连接相关：接收协程、顶号核查
@@ -349,16 +349,27 @@ class WorkerRuntime:
 **每次开服新建一个 runtime**：Sanic 的测试客户端会对同一个 app 反复起停，每次起服各用各的 runtime，连接表
 天然按服务实例隔离。原来 `wait_connections_closed` 里"只算本 loop 的任务"那段过滤删掉了。
 
-**`start()`**：原 `worker_start` 原样搬过来，拿到租约就开始续约（#225）。只有一处不同：迁移检查失败时不再调
-`app.stop()`，直接抛错，由外层包成 `StartupAborted`。
+**`start()`**：原 `worker_start` 原样搬过来，拿到租约就开始续约（#225）。不同之处：
+
+- 迁移检查失败时不再调 `app.stop()`，直接抛错，由外层包成 `StartupAborted`；
+- 任何异常（包括被取消）都会先停续约循环、释放租约再往外抛，原来只在 `StartupAborted` 时这样做。释放之后
+  不再持有租约，之后的 `stop()` 不会再释放一次；
+- 每个后端的 `post_configure` 只做一次。原来 "default" 别名让第一个后端做两次（版本探测、Lua 加载等同步调用）；
+- 没配 `APP_FILE`（嵌入场景）时跳过"加载 xx 完成"那条日志，不再抛 TypeError。
 
 **任务表**：用 HeTu 自己的实现，两个栈共用，不再交给 Sanic。
 
 - 持有强引用，任务结束后自动移除，未处理的异常打 `logger.error`（带堆栈）。
-- 有名字的任务名字唯一，重名抛 ValueError。连接任务仍用 #225 的进程内序号命名。
-- 接收协程由连接清理调 `runtime.tasks.cancel()` 取消。原来它进 Sanic 的任务表，会被 `app.stop()` 开头的
-  `shutdown_tasks(timeout=0)` 先取消；现在改为在 `_cancel_websocket_tasks` 取消 handler、连接清理开始时取消，
-  前后只差几毫秒。
+- 有名字的任务名字唯一，重名抛 ValueError。名字按登记时的算，task 之后被改名也不会留下死条目。连接任务仍用
+  #225 的进程内序号命名。
+- `cancel()` 用 `asyncio.wait` 等任务结束，不直接 `await task`。直接 await 时调用方被取消，asyncio 会把这次
+  取消转给 task；task 吞掉 CancelledError 正常返回的话（`client_handler` 就是这样），调用方的取消就丢了。
+  另外，被取消任务的 CancelledError 也会冒充成调用方自己的取消。第 3 步要在 handler 的 finally 里取消子任务，
+  会踩到这两点。
+- `cancel_all()` 会一直取消，直到表空或超时，等待期间新登记的任务也一起取消。
+- 接收协程由连接清理按句柄取消（`runtime.tasks.cancel(recv_task)`），不按名字找。原来它进 Sanic 的任务表，
+  会被 `app.stop()` 开头的 `shutdown_tasks(timeout=0)` 先取消；现在改为在 `_cancel_websocket_tasks` 取消
+  handler、连接清理开始时取消，前后只差几毫秒。
 - 顶号核查这类无名任务也登记进来，关服时一并取消。原来它们不受任何管理。
 
 **续约和水位预留**：这两个循环仍由 `SnowflakeLease` 自己管（#225 的 `start_loops` / `stop_loops`，CLI 工具
@@ -367,10 +378,14 @@ class WorkerRuntime:
 **`stop()` 的固定顺序**：
 
 1. `wait_connections_closed`，等断线 System 跑完、Connection 行删掉；
-2. 取消残留的连接任务；
-3. 停 FutureCalls；
-4. 停续约和水位预留循环，释放租约并写精确水位；
+2. 取消残留的连接任务，和第 1 步共用一个 `GRACEFUL_SHUTDOWN_TIMEOUT`（那边用完了也至少给 1 秒），停不下来
+   打警告；
+3. 停 FutureCalls，单独一个 `GRACEFUL_SHUTDOWN_TIMEOUT`：它执行的 System 会发号，必须在释放租约之前停掉；
+4. 停续约和水位预留循环，写精确水位并释放 Worker ID；
 5. 关后端。每个后端只关一次；原来 "default" 和第一个后端是同一个对象，会被关两次。
+
+最坏情况是 2 × `GRACEFUL_SHUTDOWN_TIMEOUT` + 1 秒，和原来基本一样，另外还要加上 Sanic 自己 `_cleanup` 里等连接的
+那一段。
 
 **Sanic 适配**（`adapters/sanic_app.py`，即原来的 `worker_main`）只负责接线：
 
@@ -385,14 +400,28 @@ class WorkerRuntime:
 - `websocket.py` 改走 runtime：`table_managers`、`config`、`default_backend`、`tasks`、`live_connections`、
   `cleanup_tasks`。`_cleanup_connection` 的第一个参数从 request 换成 runtime；
 - `future_call_task(app)` 改成 `future_call_task(runtime)`；
-- 测试里的假 app 都换成 runtime（`test_system_startup.py`、`test_system_future.py`、`test_common.py`）；
-- `ServerHarness.runtime` 指向 `app.ctx.runtime`。
+- 测试里的假 app 都换掉：`test_system_startup.py`、`test_common.py` 换成真的 `WorkerRuntime`，
+  `test_system_future.py` 换成只有 `table_managers`、`config` 的 SimpleNamespace；
+- `ServerHarness.runtime` 指向 `app.ctx.runtime`；
+- `hetu.server` 改成按需加载 `worker_main`：只 import `runtime`、`pipeline` 时不加载 Sanic，也不注册 ws 路由。
 
 这一步 `runtime.config` 仍是 Sanic 的 `app.config`。runtime 只用 `config[...]` / `config.get(...)` 读，第 2 步
 换成 HeTuConfig 时不用再改。
 
-**测试**：#225 加的测试照旧通过，只改了两处：monkeypatch 的目标（改为 `hetu.server.runtime.future_call_task`），
-以及读连接表的方式（改为 `runtime.live_connections`）。
+**测试**：#225 加的测试照旧通过，改动有：
+
+- 导入路径；
+- monkeypatch 的目标，改为 `hetu.server.runtime.future_call_task`；
+- `_wait_server_connections` 改为接收 runtime、读 `runtime.live_connections`；
+- `on_lease_lost` 相关测试的签名。
+
+新增的测试：
+
+- `tests/test_server_runtime.py`：`TaskRegistry`，包括调用方被取消、不误抛目标的取消、重名、改名、
+  `cancel_all` 超时和等待期间新登记的任务；
+- `test_common.py`：每个后端只 post_configure、关闭一次；默认后端是第一个；迁移检查失败时中止；拿到租约后
+  失败会释放租约，而且只释放一次；Sanic 的 `_runtime_start` 监听器原样抛出 `StartupAborted`；
+- `test_websocket.py`：关服时残留的连接任务在释放租约之前已经取消；每次调用都换一个新 runtime。
 
 ### 5.2 第 2 步：配置、日志、worker 序号，删除 TLS / 访问日志 / Inspector
 
@@ -459,7 +488,7 @@ class ConnectionClosed(Exception):
     """对端已断开或本端已关闭。替代 sanic.exceptions.WebsocketClosed。"""
 
 class WsConnection(Protocol):
-    conn_id: str  # 本 worker 内唯一，由 runtime 的计数器生成（§5.1）
+    conn_id: str  # 本进程内唯一，用 websocket.py 的进程级计数器 _conn_seq（#225）
     client_ip: str  # 已经按 §3.2 第 7 条解析过
     request: Any  # 框架的原始请求，放进 ctx.request（unsafe）
 
@@ -522,8 +551,9 @@ class WsConnection(Protocol):
   打警告并跳过。
 - 客户端地址按 §3.2 第 7 条完整实现：`REAL_IP_HEADER`、`FORWARDED_FOR_HEADER`、`PROXIES_COUNT`，以及地址
   规范化（丢掉 "unknown"、IPv6 加方括号、转小写）。
-  - `FORWARDED_SECRET` 不实现，aiohttp 栈上配了就拒绝启动，免得静默退回代理地址。不然的话：Caddy 在本机时，
-    地址变成 127.0.0.1 被豁免，匿名连接数限制等于失效；Caddy 在别的机器时，所有匿名用户共用代理的 IP，会被
+  - `FORWARDED_SECRET` 不实现，也不做检查：和 §14 第 2 条同一原则，还没有线上部署，不需要向前兼容。文档里写明
+    只支持 `X-Forwarded-For` 这一套。如果误配成只靠 `Forwarded` 头，会退回代理的地址：Caddy 在本机时，地址
+    变成 127.0.0.1 被豁免，匿名连接数限制等于失效；Caddy 在别的机器时，所有匿名用户共用代理的 IP，会被
     `MAX_ANONYMOUS_CONNECTION_BY_IP` 一起挡掉。
   - 注意：HeTu 如果绕过 Caddy、被直接访问，`X-Forwarded-For` 是可以伪造的，可以借此绕过按 IP 限制的匿名连接
     数。这是现有行为，文档提示用防火墙挡住直连。
@@ -764,9 +794,10 @@ abort。所以：
 | 删除 `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` | 2 | 为真时打一条警告，然后忽略 |
 | LOGGING 里的 `sanic.logging.formatter.AutoFormatter` | 2 | 自动改写成 HeTu 的 formatter，并打警告 |
 | `SANIC_` 前缀的环境变量配置失效 | 2 | 无 |
-| `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 配了就拒绝启动 |
+| `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 无（同 §14 第 2 条） |
 | `define_route` / `on_server_setup` 改为 aiohttp 接口 | 6 | 无，发版说明给出对照示例 |
 | `ctx.request` 变成 aiohttp 的 `web.Request` | 6 | 无（文档本来就标注 unsafe） |
+| Sanic app 的 `app.ctx` 上不再有 `table_managers`、`default_backend` 和各后端名的属性，统一改为放在 `app.ctx.runtime` 上。这些属性没写进文档，但用户的 `on_server_setup` 钩子可能用过 | 1 | 无 |
 | `on_server_setup` 只在 worker 里执行，不再在管理进程执行 | 5（aiohttp 栈）、6 | 无 |
 | 关服时在途的 RPC 先处理完再断开 | 4b（aiohttp 栈）、6 | 无 |
 | ws 心跳超时：客户端看到 1006（aiohttp 直接断开 transport），以前是 1011；`WEBSOCKET_PING_TIMEOUT` 不再可配，等 pong 的时间是 heartbeat/2 | 4a（aiohttp 栈）、6 | 无 |
@@ -779,7 +810,7 @@ abort。所以：
 |---|---|
 | 0 | 全部现有测试照旧通过；新增 `test_harness_*` 守住 harness 的语义（§5.0） |
 | 1 | 现有测试（含 §3.4 修复时加的测试）照旧通过；假 app 改成假 runtime |
-| 2 | 新增：配置兼容改写、被删除的键（按真值判断，拒绝启动 / 警告）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
+| 2 | 新增：配置兼容改写、被删除的键（按真值判断打警告；`CERT_CHAIN` 直接删，§14 第 2 条）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
 | 3 | 新增：用假 `WsConnection` 的单元测试，包括"队列满 + send 卡住"的场景；现有 ws 测试照旧通过 |
 | 4a | 整套 ws 测试在两个栈上都通过；aiohttp 专属测试（§5.4.5） |
 | 4b | 排空测试（只在 aiohttp 栈）：在途的 RPC 回复送达后才收到 1001；没读的消息不执行；总时长不超过预算 |
