@@ -241,7 +241,7 @@ class Sandbox(LocalApp):
             group=group,
             user_data=user_data if user_data is not None else {},
             timestamp=0,
-            request=None,  # type: ignore[arg-type]
+            request=None,
             systems=None,  # type: ignore[arg-type]
         )
         ctx.systems = SystemCaller(self.namespace, self.tbl_mgr, ctx)

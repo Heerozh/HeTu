@@ -1,5 +1,5 @@
 """
-WorkerRuntime 的任务表 TaskRegistry：不依赖后端、不起服务器的单元测试。
+不依赖后端、不起服务器的服务端单元测试：WorkerRuntime 的任务表 TaskRegistry、HeTuConfig 等。
 """
 
 import asyncio
@@ -66,7 +66,7 @@ async def test_cancel_keeps_callers_own_cancellation():
 async def test_cancel_does_not_leak_target_cancellation():
     """
     被取消的 task 以 CancelledError 结束，不能当成调用方自己被取消往外抛。调用方之前被取消过、
-    已经吞掉（cancelling() 仍是 1）时尤其容易误判：websocket_connection 在 send_loop 里就会这样
+    已经吞掉（cancelling() 仍是 1）时尤其容易误判：serve_connection 等收发协程时就会这样
     """
     reg = TaskRegistry()
 
@@ -175,3 +175,31 @@ def test_hetu_config_defaults_and_attribute_access():
     restored = pickle.loads(pickle.dumps(config))
     assert type(restored) is HeTuConfig
     assert restored == config
+
+
+def test_connection_handling_does_not_load_sanic():
+    """
+    处理连接的代码（serve_connection、client_handler、WsConnection）与 Web 框架无关：在干净的子进程
+    里 import 它们不加载 sanic。pytest 主进程早被别的测试 import 过 sanic，只能在子进程里看
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "import hetu.endpoint.context, hetu.server.conn, hetu.server.receiver, "
+        "hetu.server.websocket\n"
+        "print('sanic' in sys.modules)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "False"

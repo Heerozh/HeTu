@@ -1076,7 +1076,7 @@ class _FakeSendWs:
             self.on_send(frame)
         await asyncio.sleep(self.delay)
 
-    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
+    def fail(self, code: int, reason: str) -> None:
         pass
 
 
