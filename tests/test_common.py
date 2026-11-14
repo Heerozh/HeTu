@@ -406,7 +406,7 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
     table = _make_lease_table(backend)
 
     for label in ("首次开服", "重启"):
-        # 完整走一遍 worker_start 的流程：分配id → 读水位 → 初始化发号器
+        # 完整走一遍 WorkerRuntime.start 里租约的流程：分配id → 读水位 → 初始化发号器
         worker_id = await create_worker_keeper(backend, 301).get_worker_id()
         loaded = await SnowflakeTimestampKeeper(table, worker_id).load()
         now_ms = int(time.time() * 1000)
@@ -537,6 +537,145 @@ def test_lease_lost_stops_single_process_with_failure_code(serving):
         assert calls == ["stop"]
     else:
         assert calls == [("add_task", "hetu:stop_on_lease_lost")]
+
+
+async def test_runtime_post_configures_and_closes_each_backend_once(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """ "default" 是第一个后端的别名：post_configure（版本探测、Lua 加载等同步调用）和关闭都只做
+    一次"""
+    from hetu.data.backend import Backend
+
+    calls = {"post_configure": 0, "close": 0}
+    post_configure, close = Backend.post_configure, Backend.close
+
+    def counting_post_configure(self):
+        calls["post_configure"] += 1
+        return post_configure(self)
+
+    async def counting_close(self):
+        calls["close"] += 1
+        return await close(self)
+
+    monkeypatch.setattr(Backend, "post_configure", counting_post_configure)
+    monkeypatch.setattr(Backend, "close", counting_close)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    await runtime.close_backends()
+    assert calls == {"post_configure": 1, "close": 1}
+
+
+def test_runtime_default_backend_is_first_configured(monkeypatch):
+    """配置里的第一个后端是默认后端，另登记一个 "default" 别名。配置里另有一个就叫 "default" 的
+    后端时，backends["default"] 是它，default_backend 仍是第一个（和原来一致）"""
+    import hetu.server.runtime as runtime_mod
+
+    class FakeBackend:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+    monkeypatch.setattr(runtime_mod, "Backend", FakeBackend)
+
+    def make(backends: dict) -> WorkerRuntime:
+        runtime = WorkerRuntime({"BACKENDS": backends}, on_lease_lost=lambda: None)
+        runtime._create_backends()
+        return runtime
+
+    runtime = make({"a": "A", "b": "B"})
+    assert cast(Any, runtime.default_backend).cfg == "A"
+    assert runtime.backends["default"] is runtime.backends["a"]
+    assert [name for name, _ in runtime._unique_backends()] == ["a", "b"]
+
+    runtime = make({"a": "A", "default": "D"})
+    assert cast(Any, runtime.default_backend).cfg == "A"
+    assert cast(Any, runtime.backends["default"]).cfg == "D"
+
+    runtime = make({"default": "D", "b": "B"})
+    assert cast(Any, runtime.default_backend).cfg == "D"
+
+
+async def test_runtime_start_aborts_when_migration_needed(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """表结构需要迁移时开服中止（StartupAborted），提示用 hetu upgrade"""
+    from hetu.manager import ComponentTableManager
+    from hetu.server.runtime import StartupAborted
+
+    monkeypatch.setattr(
+        ComponentTableManager, "check_and_create_new_tables", lambda self: False
+    )
+    runtime = _server_runtime(mod_backend_config)
+    try:
+        with pytest.raises(StartupAborted, match="hetu upgrade"):
+            await runtime.start()
+        assert runtime.snowflake_lease is None
+    finally:
+        await runtime.close_backends()
+
+
+async def test_runtime_start_failure_after_lease_abandons_it(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """拿到租约之后才失败（启动 System 出错）：停掉续约、水位预留循环并释放租约，之后关服不会
+    再释放一次"""
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+    from hetu.server.runtime import StartupAborted
+    from hetu.system import startup
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom in on_start")
+
+    monkeypatch.setattr(startup, "run_startup_systems", boom)
+    released = []
+    release = SnowflakeLease.release
+
+    async def recording_release(self):
+        released.append([t.done() for t in self._tasks])
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", recording_release)
+    runtime = _server_runtime(mod_backend_config)
+    try:
+        with pytest.raises(StartupAborted, match="boom in on_start"):
+            await runtime.start()
+        # stop_loops 已把循环清空，release 时一个都不剩
+        assert released == [[]]
+        assert runtime.snowflake_lease is None
+    finally:
+        await runtime.close_backends()
+    assert released == [[]], "关服又释放了一次租约"
+
+
+async def test_sanic_start_listener_creates_runtime_and_propagates_abort(monkeypatch):
+    """Sanic 的 before_server_start 监听器：每次开服新建 runtime 挂到 app.ctx 上；开服失败的
+    StartupAborted 原样往外抛（Sanic 靠它中止、以非 0 退出），不能吞掉，也不能改成 app.stop()"""
+    from types import SimpleNamespace
+
+    from hetu.server.adapters.sanic_app import _runtime_start
+    from hetu.server.runtime import StartupAborted
+
+    async def aborted(self):
+        raise StartupAborted("boom at start")
+
+    monkeypatch.setattr(WorkerRuntime, "start", aborted)
+    restarts = []
+    # 故意没有 stop：监听器要是去调 app.stop() 会抛 AttributeError
+    app = SimpleNamespace(
+        config={},
+        ctx=SimpleNamespace(),
+        multiplexer=SimpleNamespace(restart=lambda: restarts.append(1)),
+    )
+    with pytest.raises(StartupAborted, match="boom at start"):
+        await _runtime_start(cast(Any, app))
+    runtime = app.ctx.runtime
+    assert isinstance(runtime, WorkerRuntime)
+    # 丢租约的回调接到了这个 app 上：多进程时只重启本 worker
+    runtime.on_lease_lost()
+    assert restarts == [1]
+    # 再开一次服就是新的 runtime
+    with pytest.raises(StartupAborted):
+        await _runtime_start(cast(Any, app))
+    assert app.ctx.runtime is not runtime
 
 
 async def test_snowflake_lease_fence():

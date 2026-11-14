@@ -130,16 +130,20 @@ def test_harness_swallows_connection_closed_ok(test_server):
 
 @pytest.mark.timeout(30)
 def test_harness_each_call_restarts_server(test_server):
-    """每次调用都完整起停一次服务：启动钩子每次都重新跑，拿到的是新租约"""
+    """每次调用都完整起停一次服务：每次一个新的 runtime（连接表因此按服务实例隔离），启动钩子
+    每次都重新跑，拿到的是新租约"""
+    runtimes = []
     leases = []
 
     async def routine(connect):
+        runtimes.append(test_server.runtime)
         leases.append(test_server.runtime.snowflake_lease)
         await connect()
 
     test_server.websocket("/hetu/pytest_1", mimic=routine)
     test_server.websocket("/hetu/pytest_1", mimic=routine)
-    assert len(leases) == 2
+    assert len(runtimes) == 2
+    assert runtimes[0] is not runtimes[1]
     assert leases[0] is not leases[1]
 
 
@@ -1885,6 +1889,33 @@ def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_
     response = test_server.get("/")
     assert response.status == 200
     assert seen_at_release == [set()], f"释放租约时还在跑：{seen_at_release}"
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_cancels_leftover_connection_tasks_before_lease_release(
+    monkeypatch, test_server
+):
+    """关服时还没结束的连接相关任务（顶号核查之类）要在释放租约之前取消掉：它们会读写库，
+    不能活过后端"""
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    leftover: list[asyncio.Task] = []
+    seen_at_release: list[list[bool]] = []
+    release = SnowflakeLease.release
+
+    async def spying_release(self):
+        seen_at_release.append([task.done() for task in leftover])
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", spying_release)
+
+    async def routine(connect):
+        await connect()
+        leftover.append(test_server.runtime.tasks.spawn(asyncio.Event().wait()))
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert seen_at_release == [[True]]
+    assert leftover[0].cancelled()
 
 
 @pytest.mark.timeout(30)

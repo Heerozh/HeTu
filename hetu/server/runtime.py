@@ -14,6 +14,7 @@ any web framework; each framework adapter only wires it into its own lifecycle.
 """
 
 import asyncio
+import functools
 import logging
 import os
 from collections.abc import Callable, Coroutine, Mapping
@@ -44,6 +45,9 @@ DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = 15.0
 LEASE_LOST_EXIT_CODE = 1
 # 开服失败时停续约循环、释放租约的限时（秒）：开服失败多半是后端出了问题，释放卡住不能挡住中止
 LEASE_ABANDON_TIMEOUT = 5.0
+# 关服时取消残留的连接任务，和等连接拆完共用 GRACEFUL_SHUTDOWN_TIMEOUT；那边用完了也至少给这么
+# 多秒（取消通常立刻生效）
+LEFTOVER_TASK_CANCEL_FLOOR = 1.0
 
 
 class StartupAborted(Exception):
@@ -115,11 +119,11 @@ class TaskRegistry:
     """
     HeTu 自己的任务表，不交给 Web 框架：持有强引用（asyncio 只弱引用 task），结束后自动移除，
     异常退出时马上打日志（自己持有引用的 task 异常退出时 asyncio 不会提示）。有名字的 task
-    名字唯一，可以按名取消。
+    名字唯一。
 
     HeTu's own task registry instead of the web framework's: keeps strong references,
     drops finished tasks, logs tasks that die with an exception, and supports cancelling
-    by name.
+    by handle or by name.
     """
 
     def __init__(self) -> None:
@@ -140,47 +144,55 @@ class TaskRegistry:
         self._tasks.add(task)
         if name is not None:
             self._named[name] = task
-        task.add_done_callback(self._on_done)
+        # 按登记时的名字移除：task 之后被 set_name 改名也不会在 _named 里留下死条目
+        task.add_done_callback(functools.partial(self._on_done, name))
         return task
 
-    def _on_done(self, task: asyncio.Task) -> None:
+    def _on_done(self, name: str | None, task: asyncio.Task) -> None:
         self._tasks.discard(task)
-        name = task.get_name()
-        if self._named.get(name) is task:
+        if name is not None and self._named.get(name) is task:
             del self._named[name]
         if task.cancelled() or (exc := task.exception()) is None:
             return
         logger.error(
             _("❌ [📡Server] 后台任务 {name} 异常退出：{err}").format(
-                name=name, err=f"{type(exc).__name__}:{exc}"
+                name=task.get_name(), err=f"{type(exc).__name__}:{exc}"
             ),
             exc_info=exc,
         )
 
-    async def cancel(self, name: str) -> None:
-        """按名取消并等它结束；没有这个名字（已经结束或从没起过）就什么也不做"""
-        task = self._named.get(name)
-        if task is None:
+    async def cancel(self, target: asyncio.Task | str) -> None:
+        """
+        取消一个 task（句柄，或登记时的名字）并等它结束；已经结束、或没有这个名字就什么也不做。
+        task 自己的异常和取消不往外抛（异常已由 _on_done 打出），调用方自己被取消时照常抛
+        CancelledError。
+        """
+        task = self._named.get(target) if isinstance(target, str) else target
+        if task is None or task.done():
             return
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise  # 是调用方自己被取消了，往外传
-        except Exception:  # noqa: BLE001, S110 异常已由 _on_done 打出
-            pass
+        # 用 wait 而不是 await task：await 时调用方被取消，asyncio 会把这次取消转给 task，task
+        # 吞掉 CancelledError 正常返回的话，调用方的取消就丢了；wait 只等它结束，调用方的取消
+        # 照常从这里抛出，task 以 CancelledError 结束也不会被当成调用方自己被取消
+        await asyncio.wait({task})
 
     async def cancel_all(self, timeout: float | None) -> bool:
-        """取消全部并等它们结束，至多 timeout 秒。返回是否都结束了"""
-        tasks = list(self._tasks)
-        if not tasks:
-            return True
-        for task in tasks:
-            task.cancel()
-        _done, pending = await asyncio.wait(tasks, timeout=timeout)
-        return not pending
+        """
+        取消全部并等它们结束，至多 timeout 秒；等的期间新登记的 task 也一起取消。返回是否都
+        结束了。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        while tasks := [task for task in self._tasks if not task.done()]:
+            for task in tasks:
+                task.cancel()
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                return False
+            _done, pending = await asyncio.wait(tasks, timeout=remaining)
+            if pending:
+                return False
+        return True
 
 
 class WorkerRuntime:
@@ -204,8 +216,10 @@ class WorkerRuntime:
     ) -> None:
         self.config = config
         self.on_lease_lost = on_lease_lost
-        # 按配置名登记的后端，另有 "default" 指向配置里的第一个
+        # 按配置名登记的后端，另有 "default" 指向配置里的第一个（配置里有叫 "default" 的后端时
+        # 以它为准，但 default_backend 仍是第一个，和原来一致）
         self.backends: dict[str, Backend] = {}
+        self._default_backend: Backend | None = None
         self.table_managers: dict[str, ComponentTableManager] = {}
         self.snowflake_lease: SnowflakeLease | None = None
         # 连接相关的任务：各连接的接收协程、顶号核查
@@ -221,7 +235,9 @@ class WorkerRuntime:
 
     @property
     def default_backend(self) -> Backend:
-        return self.backends["default"]
+        """配置里的第一个后端"""
+        assert self._default_backend is not None, "backends not started"
+        return self._default_backend
 
     @property
     def graceful_shutdown_timeout(self) -> float:
@@ -236,11 +252,12 @@ class WorkerRuntime:
     async def start(self) -> None:
         """
         开服：连后端、建表、拿租约（拿到就开始续约）、跑启动 System，共用一个 STARTUP_TIMEOUT
-        预算。失败或超时抛 StartupAborted；拿到租约之后才失败的，先停续约循环并释放租约。
+        预算。失败或超时抛 StartupAborted。拿到租约之后才失败的（包括被取消），先停续约循环并
+        释放租约再往外抛。
         """
         try:
             await self._start()
-        except StartupAborted:
+        except BaseException:
             await self.abandon_lease()
             raise
 
@@ -287,13 +304,13 @@ class WorkerRuntime:
                 _("后端启动失败: {err}").format(err=f"{type(e).__name__}:{e}")
             ) from e
 
-        # 打印信息
-        logger.info(
-            _("ℹ️ 进程[{pid}] 加载 {app_file} 完成").format(
-                pid=os.getpid(),
-                app_file=Path(self.config.get("APP_FILE", None)).resolve(strict=False),
+        # 打印信息。没配 APP_FILE（嵌入场景）就不打加载哪个文件
+        if (app_file := self.config.get("APP_FILE", None)) is not None:
+            logger.info(
+                _("ℹ️ 进程[{pid}] 加载 {app_file} 完成").format(
+                    pid=os.getpid(), app_file=Path(app_file).resolve(strict=False)
+                )
             )
-        )
         logger.info(
             _("ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服").format(
                 pid=os.getpid(),
@@ -335,13 +352,8 @@ class WorkerRuntime:
     async def start_backends(self) -> None:
         """创建后端连接池、建表，拿 Worker ID 租约并马上开始续约、预留水位"""
         # 创建后端连接池
+        self._create_backends()
         backends = self.backends
-        for name, db_cfg in self.config["BACKENDS"].items():
-            backend = Backend(db_cfg)
-            backends[name] = backend
-            # 把config第一个设置为default后端
-            if "default" not in backends:
-                backends["default"] = backend
 
         # 初始化所有ComponentTable
         for instance_name in self.config["INSTANCES"]:
@@ -366,7 +378,7 @@ class WorkerRuntime:
                 raise RuntimeError(msg)
 
         # 最后调用 backend config, 以防configure中需要之前初始化的东西
-        for backend in backends.values():
+        for _name, backend in self._unique_backends():
             backend.post_configure()
 
         # 在backend初始化完毕后，租 Worker ID、接上时间戳高水位、初始化雪花ID生成器（见
@@ -388,6 +400,25 @@ class WorkerRuntime:
         lease.on_lost = lambda: self.on_lease_lost()
         lease.start_loops()
 
+    def _create_backends(self) -> None:
+        """按配置创建各后端（只建对象，不连接）。配置里的第一个是默认后端，另登记一个 "default" 别名"""
+        for name, db_cfg in self.config["BACKENDS"].items():
+            backend = Backend(db_cfg)
+            self.backends[name] = backend
+            if self._default_backend is None:
+                self._default_backend = backend
+                self.backends.setdefault("default", backend)
+
+    def _unique_backends(self) -> list[tuple[str, Backend]]:
+        """按配置名列出后端；"default" 这类指向同一个对象的别名只列一次"""
+        seen: set[int] = set()
+        unique = []
+        for name, backend in self.backends.items():
+            if id(backend) not in seen:
+                seen.add(id(backend))
+                unique.append((name, backend))
+        return unique
+
     def start_background(self) -> None:
         """开始监听之后调用：开始执行到期的未来调用（FutureCalls），由 stop() 在释放租约之前停掉"""
         self.background.spawn(future_call_task(self), name="hetu:future_calls")
@@ -397,6 +428,8 @@ class WorkerRuntime:
         lease = self.snowflake_lease
         if lease is None:
             return
+        # 之后适配层要是再走 stop()，close_backends 不会再释放一次
+        self.snowflake_lease = None
         try:
             async with asyncio.timeout(LEASE_ABANDON_TIMEOUT):
                 await lease.stop_loops()
@@ -444,18 +477,22 @@ class WorkerRuntime:
         关服。调用方（适配层）保证此时已停止监听、框架已经开始拆连接。顺序：
 
         1. 等连接拆完（断线 System、删 Connection 行）；
-        2. 取消还没结束的连接相关任务；
+        2. 取消还没结束的连接相关任务（顶号核查等），和第 1 步共用一个预算；
         3. 停 FutureCalls：它执行的 System 会发号，释放租约之后再发，就可能和接手这个
-           Worker ID 的进程撞号；
-        4. 停续约、水位预留循环，释放租约并写精确水位；
+           Worker ID 的进程撞号，所以单独给一个预算；
+        4. 停续约、水位预留循环，写精确水位并释放 Worker ID；
         5. 关后端。
 
         Shut down in a fixed order: wait for connections, cancel leftover connection
         tasks, stop FutureCalls, release the lease, close backends.
         """
         timeout = self.graceful_shutdown_timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
         await self.wait_connections_closed(timeout)
-        await self.tasks.cancel_all(timeout)
+        leftover_budget = max(deadline - loop.time(), LEFTOVER_TASK_CANCEL_FLOOR)
+        if not await self.tasks.cancel_all(leftover_budget):
+            logger.warning(_("⚠️ [📡Server] 关服时还有连接相关的任务没停下，不再等待"))
         if not await self.background.cancel_all(timeout):
             logger.warning(
                 _(
@@ -475,11 +512,7 @@ class WorkerRuntime:
             await lease.release()
 
         # 关闭后端连接池。"default" 和第一个后端是同一个，只关一次
-        closed: set[int] = set()
-        for name, backend in self.backends.items():
-            if id(backend) in closed:
-                continue
-            closed.add(id(backend))
+        for name, backend in self._unique_backends():
             logger.info(
                 _("⌚ [📡Server] Closing backend {attrib}...").format(attrib=name)
             )

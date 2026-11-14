@@ -165,6 +165,8 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     conn_seq = next(_conn_seq)
     recv_task_id = f"client_handler:{conn_seq}"
     broker: SubscriptionBroker | None = None
+    # 接收协程的句柄：拆连接时按句柄取消，不按名字找（名字万一重复会取消到别的连接）
+    recv_task: asyncio.Task | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
     # 关服时要等本连接拆完再关后端，见 WorkerRuntime.wait_connections_closed
     runtime.live_connections.add(current_task)
@@ -246,7 +248,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             flood_checker,
             int(runtime.config.get("DEBUG", 0)),
         )
-        runtime.tasks.spawn(receiver_task, name=recv_task_id)
+        recv_task = runtime.tasks.spawn(receiver_task, name=recv_task_id)
 
         # 订阅推送不另开协程：hub 交到门面的待发区时，发送循环空闲就塞 PUSH_UPDATES 叫醒它，由它
         # 直接取走发送。队列满时不塞：那时发送循环不会等在 get() 上，发完队列会回来取待发区
@@ -317,7 +319,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             _cleanup_connection(
                 runtime,
                 current_task.get_name(),
-                recv_task_id,
+                recv_task,
                 system_caller,
                 context,
                 endpoint_executor,
@@ -421,7 +423,7 @@ async def send_loop(
 async def _cleanup_connection(
     runtime: WorkerRuntime,
     task_name: str,
-    recv_task_id: str,
+    recv_task: asyncio.Task | None,
     system_caller: SystemCaller,
     context: SystemContext,
     endpoint_executor: EndpointExecutor,
@@ -431,7 +433,8 @@ async def _cleanup_connection(
     close_msg = _("⛓️ [📡WSConnect] 连接断开：{task_name}").format(task_name=task_name)
     replay.info(close_msg)
     logger.info(close_msg)
-    await runtime.tasks.cancel(recv_task_id)
+    if recv_task is not None:
+        await runtime.tasks.cancel(recv_task)
     # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
     # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
     # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
