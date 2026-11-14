@@ -29,10 +29,12 @@ from aiohttp import WebSocketError, WSCloseCode, WSMsgType, web
 import hetu
 
 from ... import webext
+from ...endpoint import connection
 from ...i18n import _
 from ..config import HeTuConfig
 from ..conn import ConnectionClosed, next_conn_id
 from ..forwarded import client_ip
+from ..receiver import close_connection
 from ..runtime import (
     LEASE_LOST_EXIT_CODE,
     WorkerRuntime,
@@ -45,8 +47,12 @@ from ..websocket import serve_connection
 
 logger = logging.getLogger("HeTu.root")
 
-# 关闭握手时等对端回 close 帧的时间（秒），也是 fail() 之后 abort 兜底的延迟。aiohttp 默认等 10 秒
+# 关闭握手时等对端回 close 帧的时间（秒）。aiohttp 默认等 10 秒。等不到就 transport.close()，写缓冲里
+# 剩下的数据（包括 close 帧）照常发完
 CLOSE_TIMEOUT = 2.0
+# 开始关闭之后，最多再过多久直接 abort（秒），同 Sanic 的 close_timeout。abort 会丢掉写缓冲里还没发出的
+# 数据，太短的话链路慢、积压多的客户端收不到 close 帧（比如顶号的 4001）
+ABORT_TIMEOUT = 10.0
 # HTTP keep-alive 的空闲超时（秒），对应 Sanic 的 REQUEST_TIMEOUT。aiohttp 默认 3630 秒
 KEEPALIVE_TIMEOUT = 60.0
 # runner.cleanup() 等还在处理的 HTTP 请求的时间（秒）。ws 连接在那之前已经由 HeTu 自己拆完
@@ -66,6 +72,42 @@ def _discard_closing_task(task: asyncio.Task) -> None:
         task.exception()  # close() 自己出的错不用管，别在 gc 时报 "never retrieved"
 
 
+class HeTuWebSocketResponse(web.WebSocketResponse):
+    """
+    close() 一进来就挂上 abort 兜底（`arm_abort`）。aiohttp 自己发起的关闭（收到协议错误的帧、对端的
+    close 帧、handler 返回时的 write_eof）也在 ABORT_TIMEOUT 内断开：aiohttp 的 close() 等 drain 不受
+    任何超时约束，心跳也已经停了，对端不读数据时会一直卡着。
+
+    A WebSocketResponse whose close() always arms an abort fallback.
+    """
+
+    _hetu_request: web.BaseRequest | None = None
+    _hetu_abort: asyncio.TimerHandle | None = None
+
+    async def prepare(self, request: web.BaseRequest) -> Any:
+        self._hetu_request = request
+        return await super().prepare(request)
+
+    async def close(
+        self, *, code: int = WSCloseCode.OK, message: bytes = b"", drain: bool = True
+    ) -> bool:
+        self.arm_abort()
+        return await super().close(code=code, message=message, drain=drain)
+
+    def arm_abort(self) -> None:
+        """ABORT_TIMEOUT 秒后 abort 这条连接的 transport（已经断开的什么也不做）。重复调用只挂一次"""
+        if self._hetu_abort is None:
+            self._hetu_abort = asyncio.get_running_loop().call_later(
+                ABORT_TIMEOUT, self._abort_transport
+            )
+
+    def _abort_transport(self) -> None:
+        request = self._hetu_request
+        transport = request.transport if request is not None else None
+        if transport is not None:
+            transport.abort()
+
+
 class AiohttpWsConnection:
     """
     把 aiohttp 的 WebSocketResponse 包成 `WsConnection`（契约见 hetu/server/conn.py）。
@@ -76,8 +118,8 @@ class AiohttpWsConnection:
       - 同步置标记，之后的收发立即抛 `ConnectionClosed`；
       - 关闭任务 eager 启动，带码的 close 帧在 fail 返回前就写出去，handler 返回时 aiohttp 的
         `write_eof()` 不会把它盖成 1000；正在等的 recv 由 aiohttp 的 close() 塞一条 CLOSING 叫醒；
-      - `CLOSE_TIMEOUT` 秒后 abort 兜底：aiohttp 的 close() 等 drain 不受任何超时约束，对端不读数据时
-        会一直卡着。abort 之后，卡住的 send、在等的 recv 都会醒来。
+      - `ABORT_TIMEOUT` 秒后 abort 兜底（见 `HeTuWebSocketResponse`）。abort 之后，卡住的 send、在等的
+        recv 都会醒来，都抛 `ConnectionClosed`。
     - fail 不 pause_reading（和设计稿最初写的不同）：close() 要读对端回的 close 帧，暂停读取的话每次都
       要等满 `CLOSE_TIMEOUT` 才关 TCP。fail 之后收到的消息不再交出去（recv 收到后再看一次标记）。
 
@@ -96,7 +138,7 @@ class AiohttpWsConnection:
     def __init__(
         self,
         request: web.Request,
-        ws: web.WebSocketResponse,
+        ws: HeTuWebSocketResponse,
         conn_id: str,
         client_ip: str,
     ) -> None:
@@ -133,28 +175,26 @@ class AiohttpWsConnection:
                 await self._ws.send_bytes(data)
         except ConnectionError as e:  # 含 aiohttp 的 ClientConnectionResetError
             raise ConnectionClosed from e
+        if self._failed:
+            # 卡在 drain 上的时候连接被 fail 了：abort 之后 drain 正常返回，这一帧多半没发出去
+            raise ConnectionClosed
 
     def fail(self, code: int, reason: str) -> None:
         if self._failed:
             return
         self._failed = True
-        loop = asyncio.get_running_loop()
+        # ws 已经关了（对端关的、心跳超时直接关了 transport）也要挂 abort 兜底：transport.close() 会一直
+        # 等着把写缓冲发完
+        self._ws.arm_abort()
         if not self._ws.closed:
             # 用 Task 构造而不是 create_task(..., eager_start=True)：uvloop 的 create_task 不收这个参数
             task = asyncio.Task(
                 self._ws.close(code=code, message=reason.encode()),
-                loop=loop,
+                loop=asyncio.get_running_loop(),
                 eager_start=True,
             )
             _closing_tasks.add(task)
             task.add_done_callback(_discard_closing_task)
-        loop.call_later(CLOSE_TIMEOUT, self._abort)
-
-    def _abort(self) -> None:
-        # 已经断开的 transport 再 abort 什么也不做
-        transport = self.request.transport
-        if transport is not None:
-            transport.abort()
 
     def protocol_error(self) -> BaseException | None:
         if self._protocol_error is not None:
@@ -169,7 +209,7 @@ def ws_response_options(config: Mapping[str, Any]) -> dict[str, Any]:
 
     - 不协商 permessage-deflate：HeTu 自己有 zlib 层，浏览器又一定会请求压缩；
     - 消息上限是 `WEBSOCKET_MAX_SIZE`：aiohttp 判超限用的是 `>=`，所以加 1，刚好等于上限的消息能收；
-      超限以 1009 关闭。没配（0 / None）就不限；
+      超限以 1009 关闭。None 不限；0 和 Sanic 一样，只收空消息；
     - 每 `WEBSOCKET_PING_INTERVAL` 秒发一次 ping，等 pong 的时间是它的一半，超时直接关 transport（不发
       close 帧）。没配就不发；
     - 关闭时等对端回 close 帧 `CLOSE_TIMEOUT` 秒。
@@ -178,7 +218,7 @@ def ws_response_options(config: Mapping[str, Any]) -> dict[str, Any]:
     ping_interval = config.get("WEBSOCKET_PING_INTERVAL")
     return {
         "compress": False,
-        "max_msg_size": int(max_size) + 1 if max_size else 0,
+        "max_msg_size": int(max_size) + 1 if max_size is not None else 0,
         "heartbeat": float(ping_interval) if ping_interval else None,
         "autoping": True,
         "timeout": CLOSE_TIMEOUT,
@@ -255,26 +295,33 @@ class AiohttpServer:
 
     async def stop(self) -> None:
         """
-        关服，可以重复调用，只关一次。顺序：
+        关服，可以重复调用、并发调用，只关一次；关到一半被打断后再调，接着关。顺序：
 
         1. 停止监听；
-        2. 对所有连接 `fail(1001)`，在途的 RPC 随之取消（和 Sanic 栈一样，这一步还不排空）；
+        2. 对所有连接 `fail(1001)`，再取消各连接的收发任务：在途的 RPC 随之取消，和 Sanic 栈一样（Sanic
+           关服时取消连接的 handler）。不取消的话 RPC 照样提交，回复却发不出去，客户端重连重试时就重复
+           执行了。关服排空（第 4b 步）之前都这样；
         3. `runtime.stop()`：等连接拆完（断线 System、删 Connection 行，最多 GRACEFUL_SHUTDOWN_TIMEOUT）、
            取消后台任务、释放租约、关后端；
-        4. 收掉 aiohttp（这时 ws 的 handler 都已经返回）。
+        4. 收掉 aiohttp（这时 ws 的 handler 都已经返回）。`runtime.stop()` 出错也照样收。
         """
         async with self._stop_lock:
             if self._stopped:
                 return
-            self._stopped = True
             self.stopping = True
             if self._site is not None:
-                await self._site.stop()
+                site, self._site = self._site, None
+                await site.stop()
             for conn in list(self.connections):
                 conn.fail(WSCloseCode.GOING_AWAY, "")
-            await self.runtime.stop()
-            if self._runner is not None:
-                await self._runner.cleanup()
+            await self.runtime.tasks.cancel_all(self.runtime.graceful_shutdown_timeout)
+            try:
+                await self.runtime.stop()
+            finally:
+                if self._runner is not None:
+                    runner, self._runner = self._runner, None
+                    await runner.cleanup()
+            self._stopped = True
 
 
 SERVER_KEY = web.AppKey("hetu_server", AiohttpServer)
@@ -283,7 +330,7 @@ SERVER_KEY = web.AppKey("hetu_server", AiohttpServer)
 async def _websocket_handler(request: web.Request) -> web.StreamResponse:
     """ws 路由 /hetu/{db_name}：做完 ws 握手，把连接交给 serve_connection"""
     server = request.app[SERVER_KEY]
-    ws = web.WebSocketResponse(**server.ws_options)
+    ws = HeTuWebSocketResponse(**server.ws_options)
     await ws.prepare(request)
     conn = AiohttpWsConnection(
         request,
@@ -297,9 +344,14 @@ async def _websocket_handler(request: web.Request) -> web.StreamResponse:
         conn.fail(WSCloseCode.GOING_AWAY, "")
     try:
         await serve_connection(server.runtime, conn, request.match_info["db_name"])
+    except Exception:
+        # serve_connection 不该抛异常。真抛了，aiohttp 走它的出错处理，不会再调 close()，客户端连
+        # close 帧都收不到：先给一个服务端出错的码（客户端可以重连）
+        close_connection(conn, connection.CLOSE_INTERNAL_ERROR)
+        raise
     finally:
         server.connections.discard(conn)
-        # 不管连接怎么结束的，都保证 TCP 在 CLOSE_TIMEOUT 内断开：fail 过的不会再来一次；没 fail 过的
+        # 不管连接怎么结束的，都保证 TCP 在 ABORT_TIMEOUT 内断开：fail 过的不会再来一次；没 fail 过的
         # （对端关的、心跳超时的）这里补上 abort 兜底，对端不读数据时 transport.close() 会一直等着把
         # 缓冲发完
         conn.fail(WSCloseCode.OK, "")
@@ -383,28 +435,55 @@ def new_event_loop() -> asyncio.AbstractEventLoop:
     return uvloop.new_event_loop()
 
 
+def _ignore_shutdown_signals() -> None:
+    for sig in SHUTDOWN_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+
+
 def _install_stop_signals(
     loop: asyncio.AbstractEventLoop, request_stop: Callable[[], None]
 ) -> Callable[[], None]:
     """
-    装上关服信号（SIGINT / SIGTERM）的处理，返回卸载用的函数。每个信号都只调 request_stop（幂等），
-    所以之后再来的信号不会打断关服；代价是第二次 Ctrl+C 不能强退，同 Sanic 栈（设计稿 §5.2）。
+    装上关服信号（SIGINT / SIGTERM）的处理，返回卸载用的函数。
+
+    非 Windows：关服信号只认第一个，同 Sanic 栈（设计稿 §5.2 末尾）。第一个一到就把两种信号都忽略掉，
+    之后再来的不会打断关服；卸载之后也继续忽略，免得关完服、进程退出前的收尾（关事件循环、刷日志）
+    被它直接杀掉。代价是第二次 Ctrl+C 不能强退。
+
+    Windows：事件循环不支持 add_signal_handler，在 Python 的信号处理里转回事件循环，再定时叫醒事件循环，
+    信号才能及时处理；第二次 Ctrl+C 强退。都同 Sanic 的 ctrlc_workaround_for_windows。
     """
     if not IS_WINDOWS:
+        signalled = False
+
+        def on_signal() -> None:
+            nonlocal signalled
+            signalled = True
+            _ignore_shutdown_signals()
+            request_stop()
+
         for sig in SHUTDOWN_SIGNALS:
-            loop.add_signal_handler(sig, request_stop)
+            loop.add_signal_handler(sig, on_signal)
 
         def restore() -> None:
+            # remove_signal_handler 会把信号恢复成默认处理
             for sig in SHUTDOWN_SIGNALS:
                 loop.remove_signal_handler(sig)
+            if signalled:
+                _ignore_shutdown_signals()
 
         return restore
 
-    # Windows 的事件循环不支持 add_signal_handler：在 Python 的信号处理里转回事件循环，再定时叫醒
-    # 事件循环，信号才能及时处理（同 Sanic 的 ctrlc_workaround_for_windows）
-    previous = signal.signal(
-        signal.SIGINT, lambda *_args: loop.call_soon_threadsafe(request_stop)
-    )
+    pressed = False
+
+    def on_ctrl_c(*_args: Any) -> None:
+        nonlocal pressed
+        if pressed:
+            raise KeyboardInterrupt("Non-graceful Ctrl+C")
+        pressed = True
+        loop.call_soon_threadsafe(request_stop)
+
+    previous = signal.signal(signal.SIGINT, on_ctrl_c)
 
     async def wake_periodically() -> None:
         while True:
@@ -430,7 +509,21 @@ async def _serve(config: HeTuConfig, sock: socket.socket) -> int:
     server = AiohttpServer(config, on_stop_requested=stop_requested.set)
     restore_signals = _install_stop_signals(loop, stop_requested.set)
     try:
-        await server.start(sock)
+        # 开服（连后端、拿租约、跑启动 System）可能要很久，期间收到关服信号就不等了：取消开服，已经拿到
+        # 的租约随之放弃（见 WorkerRuntime.start），再把开到一半的关掉
+        starting = asyncio.ensure_future(server.start(sock))
+        signalled = asyncio.ensure_future(stop_requested.wait())
+        await asyncio.wait((starting, signalled), return_when=asyncio.FIRST_COMPLETED)
+        signalled.cancel()
+        if not starting.done():
+            logger.info(_("⌚ [📡Server] 开服途中收到关服信号，中止开服"))
+            starting.cancel()
+            await asyncio.wait((starting,))
+            if not starting.cancelled() and starting.exception() is not None:
+                starting.result()  # 被取消之前就已经失败了：照常抛出
+            await server.stop()
+            return server.runtime.exit_code
+        starting.result()  # 开服失败：StartupAborted 等照常抛出
         logger.info(_("✅ [📡Server] 服务器已就绪，开始接受连接"))
         await stop_requested.wait()
         logger.info(_("⌚ [📡Server] 开始关服..."))

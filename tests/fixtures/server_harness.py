@@ -344,4 +344,3 @@ def make_harness(
     from hetu.server import worker_main
 
     return SanicHarness(worker_main(app_name, config), routine_timeout)
-

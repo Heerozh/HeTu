@@ -293,7 +293,8 @@ class StartCommand(CommandInterface):
         if workers != 1:
             print(
                 _(
-                    "{name}=aiohttp 目前只支持单进程，请把 WORKER_NUM 设为 1（现在是 {workers}）"
+                    "{name}=aiohttp 目前只支持单进程，请把 WORKER_NUM（命令行参数是 --workers）"
+                    "设为 1，现在是 {workers}"
                 ).format(name=HTTP_SERVER_ENV, workers=workers)
             )
             sys.exit(2)
@@ -317,12 +318,11 @@ class StartCommand(CommandInterface):
             logger.error(
                 _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
             )
-            log_handlers.stop_all_logging_handlers()
-            sys.exit(1)
+            exit_code = 1
         finally:
             sock.close()
-        # 退出log listener
-        log_handlers.stop_all_logging_handlers()
+            # 退出log listener，run() 抛别的异常时也要
+            log_handlers.stop_all_logging_handlers()
         if exit_code:
             sys.exit(exit_code)
 
