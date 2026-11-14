@@ -1899,6 +1899,82 @@ def test_shutdown_waits_for_connection_cleanup(
     assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
 
 
+@pytest.mark.timeout(30)
+def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_server):
+    """关服时 FutureCalls、续约、水位预留三个后台循环都要在释放租约之前停掉。以前它们是 loop
+    启动前 app.add_task 的，不进 Sanic 的任务表，Sanic 关服时不取消：release() 写精确水位、
+    释放 worker id 时它们还在跑，FutureCalls 可能在释放之后还在发号，续约可能对刚释放的 id
+    报租约丢失去重启 worker"""
+    import hetu.server.main as main_mod
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    running: set[str] = set()
+
+    def tracked(name, func):
+        async def wrapper(*args, **kwargs):
+            running.add(name)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                running.discard(name)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        main_mod, "future_call_task", tracked("future_calls", main_mod.future_call_task)
+    )
+    monkeypatch.setattr(
+        SnowflakeLease, "renew_forever", tracked("renew", SnowflakeLease.renew_forever)
+    )
+    monkeypatch.setattr(
+        SnowflakeLease,
+        "reserve_forever",
+        tracked("reserve", SnowflakeLease.reserve_forever),
+    )
+    seen_at_release: list[set[str]] = []
+    release = SnowflakeLease.release
+
+    async def spying_release(self):
+        seen_at_release.append(set(running))
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", spying_release)
+
+    _request, response = test_server.test_client.get("/")
+    assert response.status == 200
+    assert seen_at_release == [set()], f"释放租约时还在跑：{seen_at_release}"
+
+
+@pytest.mark.timeout(30)
+def test_lease_lost_in_single_process_stops_with_failure_code(monkeypatch, test_server):
+    """单进程模式没有管理进程（没有 app.multiplexer）。以前续约发现租约丢了就调
+    app.m.restart()，抛 AttributeError，续约任务死掉，服务器照常跑却再也发不出号。现在停服并
+    记下非 0 退出码，交给 docker/systemd/k8s 重启（app.stop() 自己的退出码是 0）"""
+    from hetu.data.backend import snowflake_lease
+    from hetu.server.main import LEASE_LOST_EXIT_CODE
+
+    monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
+
+    async def lost_keep_alive():
+        raise SystemExit("lease lost")
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        # 模拟租约过期后被别人拿走：下一次续约就会发现
+        lease = test_server.ctx.snowflake_lease
+        monkeypatch.setattr(lease.keeper, "keep_alive", lost_keep_alive)
+        for _ in range(100):
+            if getattr(test_server.ctx, "exit_code", 0):
+                return
+            await asyncio.sleep(0.05)
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert test_server.ctx.snowflake_lease.lost
+    assert getattr(test_server.ctx, "exit_code", 0) == LEASE_LOST_EXIT_CODE
+
+
 @pytest.mark.timeout(20)
 def test_websocket_fragmented_rpc_and_following_message(test_server):
     """加密压缩包跨多帧（含事件循环切换），必须完整重组且不打乱后续 nonce。"""
@@ -1944,6 +2020,27 @@ def test_websocket_streaming_close_mid_fragment(test_server):
         pytest.fail("Connection 行未随分片中的断线清理")
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_same_request_id_connections_independent(test_server):
+    """连接的任务名不能用 Sanic 的 request.id：它取自客户端给的 X-Request-ID 头。两个连接同名
+    时任务表互相覆盖，一个连接拆掉时会把另一个连接的接收协程取消掉，后者之后发的请求再也没人收"""
+
+    async def routine(connect):
+        client1 = await connect()
+        client2 = await connect()
+        for client, tag in ((client1, "c1"), (client2, "c2")):
+            await client.send(["rpc", "echo_response", [tag]])
+            assert await client.recv() == ["rsp", [tag]]
+        await client1.close()
+        await asyncio.sleep(0.3)  # 等 client1 的清理跑完
+        await client2.send(["rpc", "echo_response", ["still alive"]])
+        assert await asyncio.wait_for(client2.recv(), 5) == ["rsp", ["still alive"]]
+
+    test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=routine, extra_headers={"X-Request-ID": "dup"}
+    )
 
 
 @pytest.mark.timeout(20)

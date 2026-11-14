@@ -45,6 +45,11 @@ ACK_TIMEOUT_MARGIN = 10.0
 # "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
 # 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
 UNLIMITED_ACK_THRESHOLD = 10**9
+# 单进程模式丢租约后 hetu start 的退出码（见 on_lease_lost）。app.stop() 自己的退出码是 0，
+# docker/systemd/k8s 会当成正常退出、不重启
+LEASE_LOST_EXIT_CODE = 1
+# 开服失败时停续约循环、释放租约的限时（秒）：开服失败多半是后端出了问题，释放卡住不能挡住中止
+LEASE_ABANDON_TIMEOUT = 5.0
 
 
 def resolve_ack_threshold(config) -> int:
@@ -131,12 +136,19 @@ async def start_backends(app: Sanic):
     # 反复宕机导致 Worker ID 分配满了时每秒重试，等它们过期
     await lease.acquire(wait=True)
     app.ctx.__setattr__("snowflake_lease", lease)
+    # 拿到租约立刻开始续约、预留水位，不能等开始监听：发号围栏在拿到租约 45 秒后跳闸，
+    # 而之后的启动 System 最长能跑 STARTUP_TIMEOUT（默认 60）秒
+    lease.on_lost = lambda: on_lease_lost(app)
+    lease.start_loops()
 
 
 async def close_backends(app: Sanic):
-    # 关服写精确水位再释放 worker id：sanic 已取消后台任务、连接也拆完了（见 worker_close），
-    # 不会再发号，最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
-    await app.ctx.snowflake_lease.release()
+    # 关服写精确水位再释放 worker id。先停续约、水位预留两个循环：不然续约会对刚释放的 id 报
+    # 租约丢失，水位预留会在精确水位之后再写一次。调用方保证连接已拆完、FutureCalls 已停（见
+    # worker_close），不会再发号，最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
+    lease = app.ctx.snowflake_lease
+    await lease.stop_loops()
+    await lease.release()
 
     # 关闭后端连接池
     for attrib in dir(app.ctx):
@@ -149,6 +161,30 @@ async def close_backends(app: Sanic):
 
 
 async def worker_start(app: Sanic):
+    try:
+        await _start_worker(app)
+    except StartupAborted:
+        # 拿到租约之后才失败的：续约、水位预留循环已经起了，停掉并释放租约再中止
+        await abandon_lease(app)
+        raise
+
+
+async def abandon_lease(app: Sanic):
+    """开服失败时停掉续约、水位预留循环并释放租约（拿到租约之后才失败的情况），限时"""
+    lease = getattr(app.ctx, "snowflake_lease", None)
+    if lease is None:
+        return
+    try:
+        async with asyncio.timeout(LEASE_ABANDON_TIMEOUT):
+            await lease.stop_loops()
+            await lease.release()
+    except TimeoutError:
+        logger.warning(
+            _("⚠️ [📡Server] 开服失败后释放 Worker ID 租约超时，等它自己过期")
+        )
+
+
+async def _start_worker(app: Sanic):
     # 连后端、建表、跑启动System共用一个总超时预算，超时中止开服（见StartupAborted）。
     # 没有它的话，任意一步卡住（后端TCP不返回、启动System等一个永远不回的外部服务）在
     # 单进程模式下会让服务器永久静默挂起，多进程模式下则是被管理进程SIGKILL，看不出卡在哪。
@@ -242,27 +278,86 @@ async def worker_close(app):
     # TerminateProcess 硬杀，留下的租约由 live_worker_ids 认出来（见 redis/worker_keeper.py）
     # 先等连接拆完（断线System、删Connection行）再关后端，见 wait_connections_closed
     await wait_connections_closed(app.config.GRACEFUL_SHUTDOWN_TIMEOUT)
+    # FutureCalls 执行的 System 会发号，要在释放租约之前停掉
+    await stop_future_calls(app)
     await close_backends(app)
 
 
-async def snowflake_timestamp_save(app: Sanic):
-    """周期性预留雪花ID的时间戳高水位，防止重启期间时钟回拨导致ID重复。
-    和 worker_keeper_renewal 刻意分成两个task，见 SnowflakeLease.reserve_forever。
+def on_lease_lost(app: Sanic) -> None:
     """
-    await app.ctx.snowflake_lease.reserve_forever()
+    续约发现 worker id 已经不属于本进程：再发号就可能和接手的进程撞号（发号围栏会拦住，但
+    本进程从此发不出号），必须换一个新进程重新租。
+
+    多进程交给 Sanic 管理进程只重启本 worker。单进程没有管理进程（没有 app.multiplexer，
+    app.m 会抛 AttributeError）：停服并记下非 0 退出码，由 hetu start 退出时带出，交给
+    docker/systemd/k8s 重启。
+    """
+    if hasattr(app, "multiplexer"):
+        app.multiplexer.restart()
+        return
+    logger.error(
+        _(
+            "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
+        )
+    )
+    app.ctx.exit_code = LEASE_LOST_EXIT_CODE
+    if app.state.is_running:
+        app.stop()
+    else:
+        # 还在开服：Sanic 用 run_until_complete 跑各个启动钩子，这时 app.stop() 停掉 loop 会让
+        # 开服报错。进入正常服务再停；登记进 Sanic 的任务表，没等到就关服时由它取消
+        app.add_task(_stop_when_serving(app), name="hetu:stop_on_lease_lost")
 
 
-async def worker_keeper_renewal(app: Sanic):
-    """循环每5秒续约一次worker id；租约被抢走（SystemExit）就重启本worker"""
-    # app.m 只在丢租约时才去取，和原来的写法一致
-    await app.ctx.snowflake_lease.renew_forever(on_lost=lambda: app.m.restart())
+async def _stop_when_serving(app: Sanic):
+    while not app.state.is_running:
+        await asyncio.sleep(0.1)
+    app.stop()
+
+
+def _report_task_death(task: asyncio.Task) -> None:
+    """后台循环本应一直跑到关服。自己持有引用的 task 异常退出时 asyncio 不会提示，这里马上打出来"""
+    if task.cancelled() or (exc := task.exception()) is None:
+        return
+    logger.error(
+        _("❌ [📡Server] 后台任务 {name} 异常退出：{err}").format(
+            name=task.get_name(), err=f"{type(exc).__name__}:{exc}"
+        ),
+        exc_info=exc,
+    )
+
+
+async def start_future_calls(app: Sanic):
+    """after_server_start：开始执行到期的未来调用，由 stop_future_calls 停掉"""
+    task = asyncio.create_task(future_call_task(app), name="hetu:future_calls")
+    task.add_done_callback(_report_task_death)
+    app.ctx.future_call_task = task
+
+
+async def stop_future_calls(app: Sanic):
+    """
+    关服时在释放租约之前停掉 FutureCalls：它执行的 System 会发号，释放之后再发，就可能和
+    接手这个 worker id 的进程撞号。
+    """
+    task = getattr(app.ctx, "future_call_task", None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    timeout = app.config.GRACEFUL_SHUTDOWN_TIMEOUT
+    _done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        logger.warning(
+            _("⚠️ [⚙️Future] 关服时 FutureCalls 没在{timeout}秒内停下，不再等待").format(
+                timeout=timeout
+            )
+        )
 
 
 def worker_main(app_name, config) -> Sanic:
     """
     此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
-    多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
-    后续Workers进程才会执行app.add_task和注册的listener。
+    多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何注册的listener。
+    后续Workers进程才会执行注册的listener。
     """
 
     # 加载玩家的app文件
@@ -336,12 +431,10 @@ def worker_main(app_name, config) -> Sanic:
     if IS_WINDOWS:
         app.before_server_start(threaded_accept_listener)
 
-    # 启动未来调用worker
-    app.add_task(future_call_task(app))
-    # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
-    app.add_task(worker_keeper_renewal(app))
-    # 启动雪花ID时间戳高水位记录，和上面的续约刻意分开，见函数文档
-    app.add_task(snowflake_timestamp_save(app))
+    # 开始监听之后启动 FutureCalls。不用 app.add_task：loop 启动前加的任务不进 Sanic 的任务表，
+    # 关服时不会被取消，会和释放租约并发；自己持有引用，由 worker_close 在释放租约之前停掉。
+    # 续约、水位预留两个循环在 start_backends 拿到租约时就起了
+    app.after_server_start(start_future_calls)
 
     # 启动服务器监听
     app.blueprint(HETU_BLUEPRINT)

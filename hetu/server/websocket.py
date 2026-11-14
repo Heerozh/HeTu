@@ -7,6 +7,7 @@
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
 from collections.abc import Callable
@@ -33,6 +34,9 @@ DISCONNECT_SYSTEM = "on_disconnect"
 PUSH_UPDATES = object()
 # 订阅推送最多被排着的回复压住多久（秒，约一个合批间隔），见 send_loop
 PUSH_MAX_HOLD = 0.1
+# 本进程的连接序号，连接相关的任务名用它。不能用 Sanic 的 request.id：它取自客户端给的
+# X-Request-ID 头，两个连接同名时任务表互相覆盖，一个连接拆掉时会取消掉另一个连接的接收协程
+_conn_seq = itertools.count(1)
 
 
 class PushQueue(asyncio.Queue[Any]):
@@ -154,7 +158,8 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 断线、pubsub 订阅失败……），都必须走到 finally 里的 terminate() 把它删掉。这行没有 TTL
     # 也没有清理任务，漏掉就永远留在库里，而匿名连接数是按 IP 计数的，攒够几次同一出口的
     # 客户端就再也连不上了
-    recv_task_id = f"client_handler:{request.id}"
+    conn_seq = next(_conn_seq)
+    recv_task_id = f"client_handler:{conn_seq}"
     broker: SubscriptionBroker | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
     # 关服时要等本连接拆完再关后端，见 wait_connections_closed
@@ -316,7 +321,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 endpoint_executor,
                 broker,
             ),
-            name=f"ws_cleanup:{request.id}",
+            name=f"ws_cleanup:{conn_seq}",
         )
         _cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
         cleanup_task.add_done_callback(_cleanup_tasks.discard)

@@ -470,12 +470,75 @@ async def test_restart_resumes_from_snowflake_watermark(
     app = _server_app(mod_backend_config)
     await start_backends(app)
     generator.next_id()
+    # 进程崩了，它的续约、水位预留循环也跟着没了
+    await app.ctx.snowflake_lease.stop_loops()
     await app.ctx.default_backend.close()
 
     app = _server_app(mod_backend_config)
     await start_backends(app)
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
     await close_backends(app)
+
+
+async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
+    """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
+    WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC（45）秒后跳闸，而之后的启动 System 最长能跑
+    STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    loops = list(app.ctx.snowflake_lease._tasks)
+    try:
+        assert len(loops) == 2 and not any(t.done() for t in loops)
+    finally:
+        await close_backends(app)
+    # close_backends 先停两个循环再释放租约
+    assert all(t.done() for t in loops)
+
+
+def test_lease_lost_restarts_only_this_worker_in_multi_process():
+    """多进程模式丢租约：交给 Sanic 管理进程只重启本 worker，新进程会重新租 id"""
+    from types import SimpleNamespace
+
+    from hetu.server.main import on_lease_lost
+
+    calls = []
+    app = SimpleNamespace(
+        ctx=SimpleNamespace(),
+        multiplexer=SimpleNamespace(restart=lambda: calls.append("restart")),
+        stop=lambda: calls.append("stop"),
+    )
+    on_lease_lost(app)
+    assert calls == ["restart"]
+    assert not hasattr(app.ctx, "exit_code")
+
+
+@pytest.mark.parametrize("serving", [True, False])
+def test_lease_lost_stops_single_process_with_failure_code(serving):
+    """单进程模式丢租约：没有管理进程可以重启 worker，停服并记下非 0 退出码。已在正常服务就
+    马上停；还在开服（Sanic 用 run_until_complete 跑启动钩子，这时停 loop 会让开服报错）就
+    登记一个任务，等进入正常服务再停"""
+    from types import SimpleNamespace
+
+    from hetu.server.main import LEASE_LOST_EXIT_CODE, on_lease_lost
+
+    calls = []
+
+    def add_task(coro, *, name):
+        coro.close()
+        calls.append(("add_task", name))
+
+    app = SimpleNamespace(
+        ctx=SimpleNamespace(),
+        state=SimpleNamespace(is_running=serving),
+        stop=lambda: calls.append("stop"),
+        add_task=add_task,
+    )
+    on_lease_lost(app)
+    assert app.ctx.exit_code == LEASE_LOST_EXIT_CODE != 0
+    if serving:
+        assert calls == ["stop"]
+    else:
+        assert calls == [("add_task", "hetu:stop_on_lease_lost")]
 
 
 async def test_snowflake_lease_fence():
