@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from fixtures.backends import ALL_BACKENDS, backend_config_by_name
-from test_websocket import setup_websocket_proxy  # noqa: F401  ws 代理 fixture
+from fixtures.server_harness import ServerHarness
 
 from hetu import headless, webext
 from hetu.endpoint.definer import EndpointDefines
@@ -45,7 +45,7 @@ def _preserve_loggers():
 
 
 @pytest.fixture(params=["redis", "sqlite"])
-def hl_server(request, setup_websocket_proxy):  # noqa: F811
+def hl_server(request):
     backend_name = request.param
     if backend_name not in ALL_BACKENDS:
         pytest.skip(f"HETU_TEST_BACKENDS 未包含 {backend_name}")
@@ -81,10 +81,11 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
                 "ACCESS_LOG": False,
             },
         )
+        harness = ServerHarness(server)
         try:
-            yield server, config
+            yield harness, config
         finally:
-            server.stop()
+            harness.stop()
             webext.clear()
 
 
@@ -202,7 +203,7 @@ def test_headless_writes_push_to_ws_subscribers(hl_server):
         writer.join(30)
         collected["writer_alive"] = writer.is_alive()
 
-    server.test_client.websocket("/hetu/headless_ws", mimic=routine)
+    server.websocket("/hetu/headless_ws", mimic=routine)
 
     assert not errors, errors
     assert collected["writer_alive"] is False
