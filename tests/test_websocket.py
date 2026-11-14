@@ -1947,6 +1947,27 @@ def test_websocket_streaming_close_mid_fragment(test_server):
 
 
 @pytest.mark.timeout(20)
+def test_websocket_same_request_id_connections_independent(test_server):
+    """连接的任务名不能用 Sanic 的 request.id：它取自客户端给的 X-Request-ID 头。两个连接同名
+    时任务表互相覆盖，一个连接拆掉时会把另一个连接的接收协程取消掉，后者之后发的请求再也没人收"""
+
+    async def routine(connect):
+        client1 = await connect()
+        client2 = await connect()
+        for client, tag in ((client1, "c1"), (client2, "c2")):
+            await client.send(["rpc", "echo_response", [tag]])
+            assert await client.recv() == ["rsp", [tag]]
+        await client1.close()
+        await asyncio.sleep(0.3)  # 等 client1 的清理跑完
+        await client2.send(["rpc", "echo_response", ["still alive"]])
+        assert await asyncio.wait_for(client2.recv(), 5) == ["rsp", ["still alive"]]
+
+    test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=routine, extra_headers={"X-Request-ID": "dup"}
+    )
+
+
+@pytest.mark.timeout(20)
 def test_websocket_fragmented_message_size_limit(test_server):
     """流式接收也必须遵守消息总长上限，而非仅检查单个分片。"""
     test_server.config.WEBSOCKET_MAX_SIZE = 128
