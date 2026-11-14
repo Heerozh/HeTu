@@ -23,8 +23,15 @@ from fixtures.testdata import *
 def pytest_asyncio_loop_factories(config, item):
     """
     所有异步用例跑在 create_task 签名同 uvloop 的事件循环上：生产在 Linux / macOS 上跑 uvloop，
-    它不收 eager_start 这类参数，标准事件循环收，本机测试发现不了
+    它不收 eager_start 这类参数，标准事件循环收，本机测试发现不了。
+
+    aiohttp 适配层的用例例外，直接跑在生产用的事件循环上（Linux / macOS 是 uvloop）：aiohttp 在
+    3.14 上看到标准事件循环就给 create_task 传 eager_start，签名改过的标准循环会让它报错
     """
+    if item.path.name == "test_aiohttp_adapter.py":
+        from hetu.server.adapters.aiohttp_app import new_event_loop
+
+        return {"production": new_event_loop}
     return {"uvloop_signature": UvloopSignatureLoop}
 
 

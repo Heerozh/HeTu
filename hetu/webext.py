@@ -159,6 +159,11 @@ def apply_to(app: Sanic) -> None:
         setup(app)
 
 
+def registered() -> list[str]:
+    """注册表里的声明：各路由的 uri、各配置回调的全限定名。aiohttp 栈用它提示这些声明被跳过。"""
+    return [uri for uri, _kwargs, _func in _ROUTES.values()] + list(_SETUPS)
+
+
 def clear() -> None:
     """清空注册表，单元测试用。"""
     _ROUTES.clear()
