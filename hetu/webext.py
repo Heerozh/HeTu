@@ -7,7 +7,7 @@ Registry for plain HTTP endpoints served by HeTu's built-in web server.
 不经过客户端Endpoint的权限体系，也不提供数据库访问。
 
 本模块刻意不在顶层import sanic，只保存"声明"；真正的注册由
-`hetu.server.main.worker_main` 在创建Sanic app之后重放（见 `apply_to`）。这样app文件
+`hetu.server.adapters.sanic_app.worker_main` 在创建Sanic app之后重放（见 `apply_to`）。这样app文件
 在同一进程内被重复exec时（单元测试、嵌入场景）不会重复注册路由——Sanic的Blueprint
 一旦注册到某个app上，之后再往它加路由会立刻抛RouteExists。
 

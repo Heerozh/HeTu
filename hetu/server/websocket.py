@@ -11,7 +11,7 @@ import itertools
 import logging
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
@@ -25,6 +25,9 @@ from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
 from .receiver import PUSH_CLOSE, client_handler, close_connection
 from .web import HETU_BLUEPRINT
+
+if TYPE_CHECKING:
+    from .runtime import WorkerRuntime
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -65,6 +68,7 @@ class PushQueue(asyncio.Queue[Any]):
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")
 async def websocket_connection(request: Request, ws: Websocket, db_name: str) -> None:
     """ws连接处理器，运行在worker主协程下"""
+    runtime: WorkerRuntime = request.app.ctx.runtime
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
@@ -103,7 +107,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
 
     # 在客户端握手后，才返回实例是否存在的错误，防止暴露实例信息给扫描器
     instance = db_name
-    if instance not in request.app.ctx.table_managers:
+    if instance not in runtime.table_managers:
         logger.info(
             _("New Connect Error: 错误的路径，实例名不存在: {instance}").format(
                 instance=instance
@@ -111,7 +115,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         close_connection(ws, connection.CLOSE_REJECTED)
         return
-    tbl_mgr = request.app.ctx.table_managers[instance]
+    tbl_mgr = runtime.table_managers[instance]
 
     # 返回握手结果
     try:
@@ -138,15 +142,15 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     )
     default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
     context.configure(
-        client_limits=request.app.config.get("CLIENT_SEND_LIMITS", default_limits),
-        server_limits=request.app.config.get("SERVER_SEND_LIMITS", default_limits),
-        max_row_sub=request.app.config.get("MAX_ROW_SUBSCRIPTION", 1000),
-        max_index_sub=request.app.config.get("MAX_INDEX_SUBSCRIPTION", 50),
-        max_table_sub=request.app.config.get("MAX_TABLE_SUBSCRIPTION", 20),
+        client_limits=runtime.config.get("CLIENT_SEND_LIMITS", default_limits),
+        server_limits=runtime.config.get("SERVER_SEND_LIMITS", default_limits),
+        max_row_sub=runtime.config.get("MAX_ROW_SUBSCRIPTION", 1000),
+        max_index_sub=runtime.config.get("MAX_INDEX_SUBSCRIPTION", 50),
+        max_table_sub=runtime.config.get("MAX_TABLE_SUBSCRIPTION", 20),
     )
 
     # 初始化System执行器，一个连接一个执行器
-    namespace = request.app.config["NAMESPACE"]
+    namespace = runtime.config["NAMESPACE"]
     system_caller = SystemCaller(namespace, tbl_mgr, context)
     context.systems = system_caller
 
@@ -162,16 +166,14 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     recv_task_id = f"client_handler:{conn_seq}"
     broker: SubscriptionBroker | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
-    # 关服时要等本连接拆完再关后端，见 wait_connections_closed
-    _live_connections.add(current_task)
-    current_task.add_done_callback(_live_connections.discard)
+    # 关服时要等本连接拆完再关后端，见 WorkerRuntime.wait_connections_closed
+    runtime.live_connections.add(current_task)
+    current_task.add_done_callback(runtime.live_connections.discard)
     try:
         # 初始化订阅管理器，一个连接一个订阅管理器
         broker = SubscriptionBroker(
-            request.app.ctx.default_backend,
-            max_table_rows=request.app.config.get(
-                "MAX_TABLE_SUBSCRIPTION_ROWS", 100_000
-            ),
+            runtime.default_backend,
+            max_table_rows=runtime.config.get("MAX_TABLE_SUBSCRIPTION_ROWS", 100_000),
         )
 
         # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道（owner 声明了
@@ -184,7 +186,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         # 不会有通知，要等下次调用时按 CONNECTION_ALIVE_RECHECK_INTERVAL 兜底重查。
         # 频道名与 hub 必须是同一个后端，否则保持每次都查
         conn_tbl = tbl_mgr.get_table(connection.Connection)
-        if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
+        if conn_tbl is not None and conn_tbl.backend is runtime.default_backend:
             alive_checker = endpoint_executor.alive_checker
             mark_dirty = alive_checker.enable_notify_mode()
 
@@ -213,7 +215,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             def on_owner_changed():
                 # 在 hub 的监听协程里同步调用：只置标记 + 起短任务，不能 await
                 mark_dirty()
-                request.app.add_task(recheck_alive())
+                runtime.tasks.spawn(recheck_alive())
 
             async def watch_owner(user_id: int):
                 # 登录的那次调用返回前订上；订阅生效之前就被顶号的话收不到通知，订上后主动核一次
@@ -242,9 +244,9 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             broker,
             push_queue,
             flood_checker,
-            int(request.app.config.get("DEBUG", 0)),
+            int(runtime.config.get("DEBUG", 0)),
         )
-        _forget = request.app.add_task(receiver_task, name=recv_task_id)
+        runtime.tasks.spawn(receiver_task, name=recv_task_id)
 
         # 订阅推送不另开协程：hub 交到门面的待发区时，发送循环空闲就塞 PUSH_UPDATES 叫醒它，由它
         # 直接取走发送。队列满时不塞：那时发送循环不会等在 get() 上，发完队列会回来取待发区
@@ -308,12 +310,12 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         # 清理放进独立 task 并 shield：ws.fail_connection() 之后传输层一关，Sanic 会取消本协程
         # （connection_lost → 取消连接 task），要是正落在清理里的某个 await 上，后面的
         # terminate() 就跑不到，Connection 行同样泄漏；shield 让本协程被取消时清理照常跑完。
-        # 不登记进 app 的任务表：关服时 shutdown_tasks 会取消表里的任务，loop 却已经不转了，
-        # 没法结束的任务会让它空转不退出。关服由 wait_connections_closed 等它跑完
+        # 不登记进任务表，关服时不能被取消：runtime.stop() 先等它跑完（wait_connections_closed）
+        # 再关后端
         closing = True
         cleanup_task = asyncio.create_task(
             _cleanup_connection(
-                request,
+                runtime,
                 current_task.get_name(),
                 recv_task_id,
                 system_caller,
@@ -323,8 +325,8 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             ),
             name=f"ws_cleanup:{conn_seq}",
         )
-        _cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
-        cleanup_task.add_done_callback(_cleanup_tasks.discard)
+        runtime.cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
+        cleanup_task.add_done_callback(runtime.cleanup_tasks.discard)
         await asyncio.shield(cleanup_task)
 
 
@@ -416,48 +418,8 @@ async def send_loop(
             return
 
 
-# 拆连接的清理任务：保持引用免得被 gc，跑完自动移除
-_cleanup_tasks: set[asyncio.Task] = set()
-# Connection 行已落库的连接协程，协程结束自动移除
-_live_connections: set[asyncio.Task] = set()
-
-
-async def wait_connections_closed(timeout: float) -> bool:
-    """
-    关服时等本进程的连接都拆完：连接协程结束、清理任务（断线 System、删 Connection 行）
-    跑完。超时返回 False。
-
-    清理任务没登记进 app 的任务表（见 websocket_connection 的 finally），Sanic 关服不等它；
-    直接关后端的话，它可能正停在写库事务中途，loop 一关就永远挂住：断线 System 没跑完、
-    Connection 行漏删。
-
-    Wait until every connection of this process is torn down (on_disconnect called,
-    Connection row deleted) before the backends are closed. Returns False on timeout.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    # 连接协程被 Sanic 强关后才进 finally 建清理任务，所以每轮重新收集，直到两边都空。
-    # 别的 loop 上的任务（测试里之前起过的服务器）永远等不到，不算
-    while pending := {
-        task
-        for task in (*_live_connections, *_cleanup_tasks)
-        if not task.done() and task.get_loop() is loop
-    }:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            logger.warning(
-                _(
-                    "⚠️ [📡Server] 关服时还有{count}个连接没拆完，已等待{timeout}秒，"
-                    "不再等待直接关闭后端"
-                ).format(count=len(pending), timeout=timeout)
-            )
-            return False
-        await asyncio.wait(pending, timeout=remaining)
-    return True
-
-
 async def _cleanup_connection(
-    request: Request,
+    runtime: WorkerRuntime,
     task_name: str,
     recv_task_id: str,
     system_caller: SystemCaller,
@@ -469,7 +431,7 @@ async def _cleanup_connection(
     close_msg = _("⛓️ [📡WSConnect] 连接断开：{task_name}").format(task_name=task_name)
     replay.info(close_msg)
     logger.info(close_msg)
-    await request.app.cancel_task(recv_task_id, raise_exception=False)
+    await runtime.tasks.cancel(recv_task_id)
     # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
     # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
     # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
@@ -499,7 +461,4 @@ async def _cleanup_connection(
             ).format(system=DISCONNECT_SYSTEM, err=f"{type(e).__name__}:{e}")
             replay.info(err_msg)
             logger.exception(err_msg)
-    try:
-        await endpoint_executor.terminate()
-    finally:
-        request.app.purge_tasks()
+    await endpoint_executor.terminate()

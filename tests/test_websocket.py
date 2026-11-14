@@ -649,13 +649,12 @@ def test_websocket_disconnect_system_missing_skip(monkeypatch, test_server):
     test_server.websocket("/hetu/pytest_1", mimic=disconnect_routine)
 
 
-async def _wait_server_connections(count: int, timeout: float = 5) -> None:
+async def _wait_server_connections(runtime, count: int, timeout: float = 5) -> None:
     """等服务端只剩 count 条连接：其余的都拆完了（连接协程、拆连接的清理任务都跑完）"""
-    loop = asyncio.get_running_loop()
 
     def pending() -> int:
-        tasks = (*websocket_server._live_connections, *websocket_server._cleanup_tasks)
-        return sum(1 for t in tasks if not t.done() and t.get_loop() is loop)
+        tasks = (*runtime.live_connections, *runtime.cleanup_tasks)
+        return sum(1 for t in tasks if not t.done())
 
     async with asyncio.timeout(timeout):
         while pending() > count:
@@ -682,13 +681,13 @@ def test_websocket_kicked_disconnect_system_not_as_user(test_server):
         with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
             async with asyncio.timeout(3):
                 await client1.recv()
-        await _wait_server_connections(1)
+        await _wait_server_connections(test_server.runtime, 1)
         await client2.send(["rpc", "get_disconnect_count", user_id])
         counts["kicked"] = (await client2.recv())[1]
 
         # 新连接正常断开，断线 System 照常以用户身份跑
         await client2.close()
-        await _wait_server_connections(0)
+        await _wait_server_connections(test_server.runtime, 0)
         client3 = await connect()
         await client3.send(["rpc", "get_disconnect_count", user_id])
         counts["logout"] = (await client3.recv())[1]
@@ -723,7 +722,7 @@ def test_websocket_kicked_unnoticed_disconnect_system_not_as_user(
 
         # client1 没发觉自己被顶号，自己断开
         await client1.close()
-        await _wait_server_connections(1)
+        await _wait_server_connections(test_server.runtime, 1)
         await client2.send(["rpc", "get_disconnect_count", user_id])
         counts["kicked"] = (await client2.recv())[1]
 
@@ -1846,7 +1845,7 @@ def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_
     启动前 app.add_task 的，不进 Sanic 的任务表，Sanic 关服时不取消：release() 写精确水位、
     释放 worker id 时它们还在跑，FutureCalls 可能在释放之后还在发号，续约可能对刚释放的 id
     报租约丢失去重启 worker"""
-    import hetu.server.main as main_mod
+    import hetu.server.runtime as runtime_mod
     from hetu.data.backend.snowflake_lease import SnowflakeLease
 
     running: set[str] = set()
@@ -1862,7 +1861,9 @@ def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_
         return wrapper
 
     monkeypatch.setattr(
-        main_mod, "future_call_task", tracked("future_calls", main_mod.future_call_task)
+        runtime_mod,
+        "future_call_task",
+        tracked("future_calls", runtime_mod.future_call_task),
     )
     monkeypatch.setattr(
         SnowflakeLease, "renew_forever", tracked("renew", SnowflakeLease.renew_forever)
@@ -1892,7 +1893,7 @@ def test_lease_lost_in_single_process_stops_with_failure_code(monkeypatch, test_
     app.m.restart()，抛 AttributeError，续约任务死掉，服务器照常跑却再也发不出号。现在停服并
     记下非 0 退出码，交给 docker/systemd/k8s 重启（app.stop() 自己的退出码是 0）"""
     from hetu.data.backend import snowflake_lease
-    from hetu.server.main import LEASE_LOST_EXIT_CODE
+    from hetu.server.runtime import LEASE_LOST_EXIT_CODE
 
     monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
 
@@ -1907,13 +1908,13 @@ def test_lease_lost_in_single_process_stops_with_failure_code(monkeypatch, test_
         lease = test_server.runtime.snowflake_lease
         monkeypatch.setattr(lease.keeper, "keep_alive", lost_keep_alive)
         for _ in range(100):
-            if getattr(test_server.runtime, "exit_code", 0):
+            if test_server.runtime.exit_code:
                 return
             await asyncio.sleep(0.05)
 
     test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert test_server.runtime.snowflake_lease.lost
-    assert getattr(test_server.runtime, "exit_code", 0) == LEASE_LOST_EXIT_CODE
+    assert test_server.runtime.exit_code == LEASE_LOST_EXIT_CODE
 
 
 @pytest.mark.timeout(20)

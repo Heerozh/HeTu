@@ -4,14 +4,14 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fixtures.backends import raw_hset, use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 # 导入即注册 core 组件 WorkerLease，必须赶在 mod_test_app 建簇之前，不然簇里没有它
-from hetu.server.main import close_backends, start_backends
+from hetu.server.runtime import WorkerRuntime
 
 
 async def test_snowflake_id(monkeypatch):
@@ -425,21 +425,16 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
         )
 
 
-def _server_app(backend_config: dict) -> Any:
-    """够 start_backends/close_backends 用的最小 app 替身（config 要能按属性读）"""
-    from types import SimpleNamespace
-
-    class Config(dict):
-        __getattr__ = dict.__getitem__
-
-    config = Config(
-        NAMESPACE="pytest",
+def _server_runtime(backend_config: dict) -> WorkerRuntime:
+    """只连后端、拿租约的 runtime（不跑启动 System），测 start_backends/close_backends 用"""
+    config = {
+        "NAMESPACE": "pytest",
         # 独立 instance：别的模块在 server1 等 instance 上按各自的簇建过表，同名会撞
         # cluster_mismatch
-        INSTANCES=["snowflake_restart"],
-        BACKENDS={"main": backend_config},
-    )
-    return SimpleNamespace(config=config, ctx=SimpleNamespace(), stop=lambda: None)
+        "INSTANCES": ["snowflake_restart"],
+        "BACKENDS": {"main": backend_config},
+    }
+    return WorkerRuntime(config, on_lease_lost=lambda: None)
 
 
 async def test_restart_resumes_from_snowflake_watermark(
@@ -457,40 +452,42 @@ async def test_restart_resumes_from_snowflake_watermark(
 
     generator = SnowflakeID()
     for label in ("首次开服", "正常关服后重启", "再次重启"):
-        app = _server_app(mod_backend_config)
-        await start_backends(app)
+        runtime = _server_runtime(mod_backend_config)
+        await runtime.start_backends()
         ahead = generator.last_timestamp - int(time.time() * 1000)
         assert ahead < 1000, f"{label}时发号器起始时间戳超前了 {ahead} 毫秒"
         generator.next_id()
-        await close_backends(app)
+        await runtime.close_backends()
 
     # 崩溃：不走 close_backends 直接断开。开服时预留的水位盖住了崩溃前发出的所有ID，
     # 重启必须从它接着发，停机期间时钟被拨回也不会重复
     boot_ms = int(time.time() * 1000)
-    app = _server_app(mod_backend_config)
-    await start_backends(app)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
     generator.next_id()
     # 进程崩了，它的续约、水位预留循环也跟着没了
-    await app.ctx.snowflake_lease.stop_loops()
-    await app.ctx.default_backend.close()
+    assert runtime.snowflake_lease is not None
+    await runtime.snowflake_lease.stop_loops()
+    await runtime.default_backend.close()
 
-    app = _server_app(mod_backend_config)
-    await start_backends(app)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
-    await close_backends(app)
+    await runtime.close_backends()
 
 
 async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
     """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
     WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC（45）秒后跳闸，而之后的启动 System 最长能跑
     STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
-    app = _server_app(mod_backend_config)
-    await start_backends(app)
-    loops = list(app.ctx.snowflake_lease._tasks)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    assert runtime.snowflake_lease is not None
+    loops = list(runtime.snowflake_lease._tasks)
     try:
         assert len(loops) == 2 and not any(t.done() for t in loops)
     finally:
-        await close_backends(app)
+        await runtime.close_backends()
     # close_backends 先停两个循环再释放租约
     assert all(t.done() for t in loops)
 
@@ -499,17 +496,17 @@ def test_lease_lost_restarts_only_this_worker_in_multi_process():
     """多进程模式丢租约：交给 Sanic 管理进程只重启本 worker，新进程会重新租 id"""
     from types import SimpleNamespace
 
-    from hetu.server.main import on_lease_lost
+    from hetu.server.adapters.sanic_app import on_lease_lost
 
     calls = []
     app = SimpleNamespace(
-        ctx=SimpleNamespace(),
         multiplexer=SimpleNamespace(restart=lambda: calls.append("restart")),
         stop=lambda: calls.append("stop"),
     )
-    on_lease_lost(app)
+    runtime = WorkerRuntime({}, on_lease_lost=lambda: None)
+    on_lease_lost(cast(Any, app), runtime)
     assert calls == ["restart"]
-    assert not hasattr(app.ctx, "exit_code")
+    assert runtime.exit_code == 0
 
 
 @pytest.mark.parametrize("serving", [True, False])
@@ -519,7 +516,8 @@ def test_lease_lost_stops_single_process_with_failure_code(serving):
     登记一个任务，等进入正常服务再停"""
     from types import SimpleNamespace
 
-    from hetu.server.main import LEASE_LOST_EXIT_CODE, on_lease_lost
+    from hetu.server.adapters.sanic_app import on_lease_lost
+    from hetu.server.runtime import LEASE_LOST_EXIT_CODE
 
     calls = []
 
@@ -528,13 +526,13 @@ def test_lease_lost_stops_single_process_with_failure_code(serving):
         calls.append(("add_task", name))
 
     app = SimpleNamespace(
-        ctx=SimpleNamespace(),
         state=SimpleNamespace(is_running=serving),
         stop=lambda: calls.append("stop"),
         add_task=add_task,
     )
-    on_lease_lost(app)
-    assert app.ctx.exit_code == LEASE_LOST_EXIT_CODE != 0
+    runtime = WorkerRuntime({}, on_lease_lost=lambda: None)
+    on_lease_lost(cast(Any, app), runtime)
+    assert runtime.exit_code == LEASE_LOST_EXIT_CODE != 0
     if serving:
         assert calls == ["stop"]
     else:

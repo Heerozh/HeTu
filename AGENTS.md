@@ -115,9 +115,13 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ### Server Layer (`hetu/server/`)
 
-- 基于 Sanic（async web framework）。每个 worker process 独立运行。
-- `main.py`：worker 入口 —— 初始化 backends、SnowflakeID、
-  ComponentTableManagers、SystemClusters。
+- 基于 Sanic（async web framework），正在换成 aiohttp（设计见
+  `docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md`）。每个 worker process 独立运行。
+- `runtime.py`：与框架无关的 `WorkerRuntime` —— 每次开服新建一个，持有 backends、
+  ComponentTableManagers、雪花号租约、任务表、连接表，管开服 / 关服的先后顺序；
+  `prepare_worker` 加载 app 文件、建 SystemClusters。
+- `adapters/sanic_app.py`：Sanic 适配（`worker_main`），只把 `WorkerRuntime` 接到 Sanic 的
+  生命周期上。
 - `websocket.py`：WebSocket handler —— 为每个连接创建 `EndpointExecutor`、
   `SystemCaller`、`SubscriptionBroker`。
 - `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`sel` 命令。
