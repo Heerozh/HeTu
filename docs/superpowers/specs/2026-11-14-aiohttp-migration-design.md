@@ -698,7 +698,9 @@ def next_conn_id() -> str: ...
   `test_websocket.py`），第一次 `import app` 会撞"Endpoint重复定义"。这是现存问题，全量跑时一般有别的模块
   先导入过 `app` 所以碰不到；新加的 `test_ws_serve.py` 排在 `test_websocket.py` 后面，xdist 下更容易撞上。
 
-### 5.4 第 4a 步：aiohttp 单进程，与 Sanic 并存
+### 5.4 第 4a 步：aiohttp 单进程，与 Sanic 并存（已实施，分支 `feat/aiohttp-server`）
+
+下面 5.4.1~5.4.5 是设计，和实现不一致的地方已经改过来；和原计划的出入、实施中发现的问题见 §5.4.6。
 
 #### 5.4.1 app、路由与客户端地址
 
@@ -739,7 +741,8 @@ def next_conn_id() -> str: ...
 abort。所以：
 
 1. 同步设置 `_failed` 标志，此后 `send` / `recv` 立即抛 `ConnectionClosed`；
-2. `transport.pause_reading()`；
+2. ~~`transport.pause_reading()`~~ 不做：close() 要读对端回的 close 帧，暂停读取的话每次都要等满 `timeout` 才关
+   TCP。fail 之后到的消息不再交出去（recv 收到后再看一次标记）；
 3. 起一个关闭任务调用 `ws.close(code, message)`，并持有它的强引用。这个任务要 eager 启动（`eager_start=True`），
    让带码的 close 帧在 `fail()` 返回前就写出去；或者适配层等关闭任务结束后再返回 ws。否则 handler 一返回，
    aiohttp 的 `write_eof()` 就会抢在这个任务运行之前以 1000 关闭，盖掉 close 码（审查实测：不 eager 时被拒的
@@ -808,6 +811,68 @@ abort。所以：
   - 各个 close 码确实送到了客户端；
   - 带尾斜杠的路径能连上；不打访问日志；
   - 关服顺序：断线 System 的提交早于关后端，释放租约时后台任务都已结束。
+
+#### 5.4.6 实施记录
+
+**代码**：
+
+- `hetu/server/forwarded.py`：客户端地址，和框架无关。测试直接拿 Sanic 的 `parse_xforwarded` 逐条对照。
+- `hetu/server/adapters/aiohttp_app.py`：`AiohttpWsConnection`、`AiohttpServer`（一次开服到关服，`hetu start`
+  和测试 harness 共用）、`run()`、`prepare()`（同 `worker_main` 里与框架无关的那几步）、`bind_socket()`、
+  `new_event_loop()`。
+- `hetu/cli/start.py`：按 `HETU_HTTP_SERVER` 分两条路，aiohttp 栈不加载 sanic。开服信息抽成
+  `log_server_info()`，两个栈共用，多打一行用的是哪个 Web 服务器。
+- `webext.registered()`：aiohttp 栈据此打警告，说明哪些声明被跳过。
+- `common/helper.py` 的 `enable_windows_console_ansi()`：aiohttp 栈不 import sanic，Windows 控制台的 ANSI 支持
+  要自己打开（§3.2 第 14 条）。
+
+**和原计划的出入**：
+
+- fail 不 pause_reading，见 §5.4.2。
+- handler 结束时（不管连接怎么结束的）都补一次 `fail(1000)`：fail 过的不会再来一次；没 fail 过的（对端关的、心跳
+  超时的）补上 abort 兜底。对端不读数据时 `transport.close()` 会一直等着把缓冲发完。
+- recv 收到 ERROR 消息时自己记下里面的 `WebSocketError`：aiohttp 的 `receive()` 处理协议错误时不把它存进
+  `ws.exception()`。
+- 关服时置 `stopping` 标记：停止监听之前接进来、关服开始之后才握完手的连接，收不到关服时那一轮 `fail(1001)`，
+  由 handler 看到标记自己马上断开。
+- `bind_socket` 照 Sanic 的写：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上不设
+  `SO_REUSEADDR`，那里设了它别的进程就能抢同一个端口。没用 `socket.create_server`，它对 IPv6 会强制只监听 v6。
+- 关服信号：非 Windows 用 `loop.add_signal_handler`，每个信号都只置一个事件（幂等），之后的信号不打断关服，同
+  Sanic 栈（§5.2 末尾）。Windows 上用 `signal.signal` 转回事件循环，再每 0.1 秒叫醒一次事件循环。Windows 的路径
+  没有自动化测试，要按 §9 的人工清单验证。
+- `HETU_HTTP_SERVER` 取值不对、aiohttp 栈配了多进程，都以 2 退出；端口被占以 1 退出，不会先开服。
+
+**测试基础设施上发现的问题**：
+
+- **两个栈共用 session 级的 Redis**：用例会在库里留下数据，同一个用例在两个栈上各跑一遍时，后跑的会看到先跑的
+  留下的数据（`test_websocket_call_system` 因此一直等一条不会来的推送）。改成两个栈各用一个 Redis 库
+  （`ws_redis_url`，sanic 0 号、aiohttp 1 号）；keyspace 频道名本来就带库号。直接读 Redis 的用例改用同一个地址。
+  headless 的用例每次开头都会把数据重置到同一个起点，不受影响。
+- **pytest-timeout 打断不了 uvloop**：它靠 SIGALRM，而信号处理函数里抛的异常会被 uvloop 的回调处理吞掉，事件循环
+  照转（实测）。Sanic 的测试同样跑在 uvloop 上，这是原来就有的隐患，只是以前没卡过。harness 改成在服务器的事件
+  循环里按用例 timeout 标记的八成给 routine 限时（没标就 120 秒），卡住时以 TimeoutError 失败。
+- **aiohttp 和测试用的事件循环不兼容**：conftest 让异步用例跑在 `UvloopSignatureLoop` 上（`create_task` 签名同
+  uvloop 的标准循环），而 aiohttp 在 3.14 上看到标准循环就会给 `create_task` 传 `eager_start`。在 pytest 的事件
+  循环里起 aiohttp 的用例（`test_aiohttp_adapter.py`）改成跑在生产用的事件循环上（Linux / macOS 是 uvloop）。
+  harness 自己建事件循环，不受影响。
+- xdist 的分组键加上栈，`test_websocket.py` 的两个栈分成两个组。CI 不设 `HETU_TEST_HTTP_SERVERS`，两个栈都跑。
+
+**测试**：
+
+- 整套 ws 测试（`test_websocket.py`、`test_headless_ws.py`）在两个栈上各跑一遍；webext 路由的用例在 aiohttp 栈上
+  跳过。两个栈都要满足的新用例：带尾斜杠的路径能连上；不打访问日志（做过变异：打开 aiohttp 的访问日志，用例失败）。
+- `test_forwarded.py`：客户端地址和 Sanic 逐条对照，多个头、条目不够、没有这个头、IPv6、unknown、大小写等 18 种
+  情况；对端地址原样返回。
+- `test_aiohttp_adapter.py`（不需要后端）：
+  - fail 之后 handler 马上返回，客户端收到的仍是 fail 的码（不 eager 时会被盖成 1000）；
+  - 不读数据的对端被 fail 之后约 2 秒断开，卡住的发送醒来；
+  - 不回 pong 的对端被心跳断开；
+  - 协议错误（消息超长，客户端收到 1009）记下来，对端正常关闭、直接断开不算；
+  - 不协商压缩；收发和 fail 的语义；租约丢失时要求停服。
+- `test_server_signals.py`：关服时第二个 SIGINT 不打断关服流程，两个栈各跑一遍；aiohttp 栈端口被占时在开服之前就
+  以 1 退出。`test_cli_start.py`：多进程、取值不对时以 2 退出。
+- 冒烟测试：`HETU_HTTP_SERVER=aiohttp hetu start`（SQLite），6 个客户端握手并各自登录后发 SIGINT，连跑 3 次：
+  0.1 秒左右关完服，客户端都收到 1001，Connection 行为 0，断线 System 以各自的用户身份各跑一次。
 
 ### 5.5 第 4b 步：关服排空（单独的 PR，只在 aiohttp 栈上做）
 
@@ -972,6 +1037,7 @@ abort。所以：
 | LOGGING 里的 `sanic.logging.formatter.AutoFormatter` 等 `sanic.*` 类 | 2、6 | 无：第 6 步删 Sanic 后 dictConfig 会 ImportError |
 | `SANIC_` 前缀的环境变量配置失效 | 2 | 无 |
 | `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 无（同 §14 第 2 条） |
+| `@hetu.define_route` / `@hetu.on_server_setup` 在 aiohttp 栈上被跳过（打警告），第 6 步改成 aiohttp 接口 | 4a（aiohttp 栈） | 无 |
 | `define_route` / `on_server_setup` 改为 aiohttp 接口 | 6 | 无，发版说明给出对照示例 |
 | `ctx.request` 变成 aiohttp 的 `web.Request` | 6 | 无（文档本来就标注 unsafe） |
 | Sanic app 的 `app.ctx` 上不再有 `table_managers`、`default_backend` 和各后端名的属性，统一改为放在 `app.ctx.runtime` 上。这些属性没写进文档，但用户的 `on_server_setup` 钩子可能用过 | 1 | 无 |

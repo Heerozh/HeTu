@@ -21,7 +21,9 @@ uv run scripts/gen_api_docs.py # 重新生成 docs/api：只在发版前跑，�
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey 容器；SQLite 后端无需 Docker）。
 `HETU_TEST_BACKENDS` 接受逗号分隔的子集，取值范围：`redis`、`valkey`、`redis_cluster`、`sqlite`。
-未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`）。CI 只在 PR 上跑（全部
+未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`）。换 aiohttp 的过渡期里，ws
+相关的测试在 Sanic、aiohttp 两个 Web 服务器栈上各跑一遍，`HETU_TEST_HTTP_SERVERS` 取 `sanic,aiohttp`
+的子集，写法同上。CI 只在 PR 上跑（全部
 后端 + 上传覆盖率），直接 `push` 到任何分支都不跑，推送前请在本地跑过测试。
 
 `docs/api/` 由 `scripts/gen_api_docs.py` 从 docstring 生成，条目带源码行号。功能 PR **不提交**
@@ -122,6 +124,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `prepare_worker` 加载 app 文件、建 SystemClusters。
 - `adapters/sanic_app.py`：Sanic 适配（`worker_main`），只把 `WorkerRuntime` 接到 Sanic 的
   生命周期上，把 ws 连接包成 `SanicWsConnection` 交给 `serve_connection`。
+- `adapters/aiohttp_app.py`：aiohttp 适配，目前只支持单进程。`AiohttpServer` 管一次开服到关服，
+  `hetu start` 和测试 harness 共用。过渡期由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用，默认仍是 Sanic。
+- `forwarded.py`：从反向代理头取客户端地址，规则同 Sanic。
 - `conn.py`：`WsConnection` 接口（recv / send / fail / protocol_error）和 `ConnectionClosed`，
   处理连接的代码只经它收发，不碰 Web 框架。
 - `websocket.py`：`serve_connection` —— 为每个连接创建 `EndpointExecutor`、
