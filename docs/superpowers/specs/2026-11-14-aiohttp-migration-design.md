@@ -1,7 +1,8 @@
 # 用 aiohttp 替换 Sanic — 设计稿
 
 - 日期：2026-11-14
-- 状态：设计中，已做一轮独立审查（§15）；先修 §3.4 的现存问题，迁移暂缓。已定事项见 §13，待定问题见 §14。
+- 状态：设计中，已做一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0 步在 `test/server-harness`
+  分支上做。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -176,6 +177,8 @@ Sanic 慢在收包，和 `benchmark/hello_world_optimization_report.md` 里 `rec
   - 直接读 `websocket_server._live_connections` / `_cleanup_tasks`（716）；
   - monkeypatch 了 `DISCONNECT_SYSTEM`（694）、`SubscriptionBroker`（1849）、`_cleanup_connection`（1880-1886）。
     这几个名字必须在 `websocket.py` 模块级保留、能被替换，第 1、3 步挪代码时受这条约束。
+  - PR #225 之后又多了 2 处 `websocket`（其中一处给客户端传 `extra_headers`）、1 处 `.get()`，并用到
+    `test_server.ctx` 上的 `snowflake_lease`、`exit_code`。第 0 步按合并后的代码改。
 - `test_headless_ws.py`：`worker_main` + `test_client.websocket`。
 - `test_webext.py`：不需要数据库（`BACKENDS: {}`，只建 app、不起服务），直接检查 Sanic 的路由对象。它的 app
   文本里写的是 `from sanic import ...`（`:38`、165）。
@@ -188,7 +191,7 @@ Sanic 慢在收包，和 `benchmark/hello_world_optimization_report.md` 里 `rec
 - CI 只在 Linux 上跑（`ci.yml`，超时 20 分钟）。xdist 按（文件，backend_name）分组（`conftest.py:59-65`），
   `test_websocket.py` 只有一个组。Windows 没有 CI。
 
-### 3.4 迁移中发现的现存问题（迁移前单独修，§13 第 7 条）
+### 3.4 迁移中发现的现存问题（已由 PR #225 修复）
 
 1. **关服时后台任务和释放租约并发**。FutureCalls、续约、水位不受 Sanic 管理（§3.2 第 2 条）。`worker_close`
    释放租约、写精确水位、关后端的时候它们还在跑：FutureCalls 可能在释放之后还在发号；续约可能对已释放的 id
@@ -199,6 +202,16 @@ Sanic 慢在收包，和 `benchmark/hello_world_optimization_report.md` 里 `rec
 3. **连接的任务名可以被客户端控制**。`client_handler:{request.id}`（`websocket.py:157`）里的 id 来自 `X-Request-ID`
    头。同名任务会覆盖登记，一个连接的清理会取消另一个连接的接收协程，被覆盖的那个则泄漏。
 4. **单进程模式下丢租约会抛异常**。单进程没有 `app.m`，`app.m.restart()` 抛 AttributeError。
+
+四条依次由 PR #225 的 `11b50349`、`f605e92a`、`820a0cc9`、`6b5e58da` 修复。修复之后：
+
+- FutureCalls 改由 `after_server_start` 启动，`worker_close` 在释放租约之前停掉它；
+- 续约、水位预留两个循环在 `start_backends` 拿到租约时就启动（`SnowflakeLease.start_loops`），释放租约前
+  停掉（`stop_loops`）；
+- 连接的任务名改用进程内序号；
+- 单进程模式丢租约时，记下 `app.ctx.exit_code` 并停服，`hetu start` 以非 0 退出。
+
+第 1 步把这些逻辑原样搬进 runtime（§5.1）。
 
 ## 4. 总体思路
 
@@ -222,7 +235,7 @@ hetu/server/
 
 ### 4.2 顺序：先抽象，后替换
 
-- §3.4 的现存问题在第 0 步之前单独修掉（§13 第 7 条）。
+- §3.4 的现存问题已在第 0 步之前单独修掉（PR #225，§13 第 7 条）。
 - 第 0~3 步都在 Sanic 上做。其中第 2 步删掉几个配置项，是有意的行为变化；其余都是纯重构，由现有测试
   （只改调用方式）验证。
 - aiohttp 的代码从第 4a 步才出现，通过开关和 Sanic 并存，同一套测试在两边各跑一遍（§4.3）。
@@ -249,22 +262,32 @@ hetu/server/
 class ServerHarness:
     """起停一次 HeTu 服务、跑客户端 routine。第 0 步内部用 sanic_testing，第 4a 步加 aiohttp 实现。"""
 
-    config: dict  # 起服前可以改（如 WEBSOCKET_MAX_SIZE）
+    config: MutableMapping[str, Any]  # 起服前可以改（如 WEBSOCKET_MAX_SIZE）
+    runtime: Any  # 服务端运行时状态：第 0 步是 Sanic 的 app.ctx，第 1 步换成 WorkerRuntime
 
-    def websocket(self, path: str, mimic) -> WsResult: ...  # .client_sent / .client_received
+    def websocket(self, path: str, mimic, **connect_kwargs) -> WsResult: ...  # .client_sent / .client_received
     def get(self, path: str) -> HttpResult: ...  # .status / .text
     def stop(self) -> None: ...
 ```
 
-**必须保留的 sanic_testing 语义**。下面每一条都要写成 harness 的规格，并在两个实现上都测：
+`connect_kwargs` 原样传给客户端的 `connect()`，比如 `extra_headers`。
 
-1. routine 跑在服务器的同一个 loop 里，是一个 `after_server_start` 监听器，排在后台任务派发之后
-   （`sanic_testing/testing.py:69`）。测试依赖这一点：routine 和服务端的 monkeypatch 共享 `asyncio.Event`
-   （`test_websocket.py:1374` 等），而且会在 routine 里读服务端状态（716、1925）。
-2. routine 抛出的 `ConnectionClosedOK` 会被吞掉（`test_websocket.py:124`）；其他异常包成 ValueError 抛回
-   （`testing.py:243`）。
-3. routine 结束后，先关掉所有客户端 ws，再停服务。
-4. 每次调用 `websocket()` / `get()` 都完整起停一次服务（包括启动和关服钩子）；Linux 上跑 uvloop。
+**harness 的语义**，写在 `tests/fixtures/server_harness.py` 的模块说明里，两个实现都必须满足：
+
+1. 每次调用 `websocket()` / `get()` 都完整起停一次服务（包括启动和关服钩子），每次一个新的事件循环。
+   每次都用新的随机端口：sanic_testing 会记住第一次随机到的端口，同一个测试里第二次调用会 bind 失败，
+   harness 每次把它清掉。
+2. routine 跑在服务器的同一个事件循环里，服务开始监听、后台任务起来之后才开始（sanic_testing 里它是
+   `after_server_start` 监听器，`testing.py:69`）。测试依赖这一点：routine 和服务端的 monkeypatch 共享
+   `asyncio.Event`（`test_websocket.py:1374` 等），而且会在 routine 里读服务端状态（716、1925）。
+3. routine 抛出的 `ConnectionClosedOK` 被吞掉；其他异常等服务停下之后**原样**抛给测试。sanic_testing
+   原本会包成 ValueError（`testing.py:243`），harness 改成原样抛出：失败信息更清楚，aiohttp 实现也不用
+   模仿这层包装。
+4. routine 返回后，先关掉它开的所有客户端连接，再停服务。
+5. Linux / macOS 上跑 uvloop。
+
+第 1、3 条由新增的 `test_harness_*` 守住；第 2、4 条由依赖它们的现有用例守住
+（`test_lease_lost_in_single_process_stops_with_failure_code`、`test_shutdown_waits_for_connection_cleanup` 等）。
 
 第 4a 步的 aiohttp 实现：每次调用都新建 loop、runtime 和 `web.Application`。一个 Application 只能绑定一个
 loop（`web_app.py:264-270`）。
@@ -273,14 +296,17 @@ loop（`web_app.py:264-270`）。
 
 - `setup_websocket_proxy` 里客户端 pipeline 的逻辑（握手、编解码、分片发送）搬进 harness，两个实现共用。
 - `test_server` 和 headless 的 fixture 改为返回 harness。测试里需要改的写法：
-  - `test_server.test_client.websocket(` 改成 `test_server.websocket(`；
-  - `response.body.decode()` 改成 `response.text`；
+  - `test_server.test_client.websocket(` 改成 `test_server.websocket(`，返回值不再是 `(request, response)`
+    元组，直接是结果；
+  - `response.body.decode()` 改成 `response.text`；对框架 request 对象的断言删掉；
   - `test_server.config.X = ...` 改成 `test_server.config["X"] = ...`；
-  - `test_server.ctx.table_managers` 暂时由 harness 透传，第 1 步改成走 runtime。
+  - `test_server.ctx.*` 改成 `test_server.runtime.*`。第 0 步它就是 Sanic 的 `app.ctx`，第 1 步换成
+    WorkerRuntime，测试不用再改。
 - `test_webext.py` **留到第 6 步再改**：它现在不需要数据库，app 文本里写的是 `from sanic import ...`，
   第 6 步之前改不掉。
 
-验收：全部测试照旧通过；`test_websocket.py`、`test_headless_ws.py` 里不再出现 `sanic` 和 `test_client`。
+验收：全部测试照旧通过；`test_websocket.py`、`test_headless_ws.py` 不再 import sanic / sanic_testing，
+也不再用 `test_client`（docstring 里讲服务端行为时提到 Sanic 的不算）。
 
 ### 5.1 第 1 步：WorkerRuntime
 
@@ -363,8 +389,8 @@ class WorkerRuntime:
 - 两个连接带相同的 `X-Request-ID` 时互不影响；
 - 单进程模式下丢租约，以非 0 退出。
 
-§3.4 的四个修复已决定在迁移之前单独修（§13 第 7 条）。第 1 步在修好的代码上做，上面列的修复点到那时已经
-存在，这一步只把它们搬进 runtime。
+§3.4 的四个修复已由 PR #225 先行合并（§13 第 7 条）。上面列的修复点和测试都已存在，这一步只把它们搬进
+runtime。
 
 ### 5.2 第 2 步：配置、日志、worker 序号，删除 TLS / 访问日志 / Inspector
 
@@ -751,7 +777,7 @@ abort。所以：
 
 | 步 | 验证方式 |
 |---|---|
-| 0 | 全部现有测试照旧通过；harness 满足 §5.0 列出的 sanic_testing 语义 |
+| 0 | 全部现有测试照旧通过；新增 `test_harness_*` 守住 harness 的语义（§5.0） |
 | 1 | 现有测试（含 §3.4 修复时加的测试）照旧通过；假 app 改成假 runtime |
 | 2 | 新增：配置兼容改写、被删除的键（按真值判断，拒绝启动 / 警告）、`HETU_WORKER_INDEX` 和回退、formatter 的 golden test |
 | 3 | 新增：用假 `WsConnection` 的单元测试，包括"队列满 + send 卡住"的场景；现有 ws 测试照旧通过 |
@@ -825,7 +851,8 @@ abort。所以：
 4. 删掉 `CERT_CHAIN`，TLS 交给 Caddy。
 5. 删掉 `ACCESS_LOG`，访问日志交给 Caddy。
 6. 删掉 `INSPECTOR`，以后由 CLI 提供 reload 命令（另立 spec）。
-7. §3.4 的现存问题先单独修，不等迁移；迁移从第 0 步开始，排在修复之后。
+7. §3.4 的现存问题先单独修，不等迁移；迁移从第 0 步开始，排在修复之后。已由 PR #225 修复。
+8. 不做原型，直接从第 0 步开始。
 
 ## 14. 待定问题
 
@@ -845,7 +872,7 @@ abort。所以：
    排队中的连接。）
 8. 性能：+20% 只用来触发排查；进入第 5 步的条件是每帧成本和 p99 都不退步。（审查提出的改法。）
 9. ~~§3.4 的四个修复放在第 1 步一起做，还是先单独合？~~ 已定：迁移前单独修（§13 第 7 条）。
-10. 要不要在第 0 步之前，先做一个不合并的原型，提前拿到 RPC 的收益数字？（审查提出的可选项。）
+10. ~~要不要在第 0 步之前，先做一个不合并的原型，提前拿到 RPC 的收益数字？~~ 已定：不做（§13 第 8 条）。
 
 ## 15. 审查记录
 
