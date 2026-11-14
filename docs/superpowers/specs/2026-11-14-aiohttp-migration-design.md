@@ -368,8 +368,8 @@ class WorkerRuntime:
   #225 的进程内序号命名。
 - `cancel()` 用 `asyncio.wait` 等任务结束，不直接 `await task`。直接 await 时调用方被取消，asyncio 会把这次
   取消转给 task；task 吞掉 CancelledError 正常返回的话（`client_handler` 就是这样），调用方的取消就丢了。
-  另外，被取消任务的 CancelledError 也会冒充成调用方自己的取消。第 3 步要在 handler 的 finally 里取消子任务，
-  会踩到这两点。
+  另外，被取消任务的 CancelledError 也会冒充成调用方自己的取消。第 3 步在连接清理里取消收发两个子任务
+  （§5.3），正好会踩到这两点。
 - `cancel_all()` 会一直取消，直到表空或超时，等待期间新登记的任务也一起取消。
 - 接收协程由连接清理按句柄取消（`runtime.tasks.cancel(recv_task)`），不按名字找。原来它进 Sanic 的任务表，
   会被 `app.stop()` 开头的 `shutdown_tasks(timeout=0)` 先取消；现在改为在 `_cancel_websocket_tasks` 取消
@@ -547,16 +547,18 @@ False），第二个信号照样调用 `loop.stop()`，正在跑的关服步骤�
 `timeout` 会把信号发两次（发给子进程一次、发给进程组一次），用它停服务时偶尔会被直接杀掉。这一点留给第 5 步
 自己的 supervisor（§5.7）。
 
-### 5.3 第 3 步：ws 连接抽象（仍跑在 Sanic 上）
+### 5.3 第 3 步：ws 连接抽象（已实施，分支 `refactor/ws-connection`）
 
-新增 `hetu/server/conn.py`：
+纯重构，仍跑在 Sanic 上。只有两处细小的行为变化，见下面"和原来行为的差别"。
+
+**接口**（新增 `hetu/server/conn.py`）
 
 ```python
 class ConnectionClosed(Exception):
-    """对端已断开或本端已关闭。替代 sanic.exceptions.WebsocketClosed。"""
+    """对端已断开，或本端已经 fail 了连接。替代 sanic.exceptions.WebsocketClosed。"""
 
 class WsConnection(Protocol):
-    conn_id: str  # 本进程内唯一，用 websocket.py 的进程级计数器 _conn_seq（#225）
+    conn_id: str  # next_conn_id() 分配，本进程内唯一
     client_ip: str  # 已经按 §3.2 第 7 条解析过
     request: Any  # 框架的原始请求，放进 ctx.request（unsafe）
 
@@ -564,44 +566,90 @@ class WsConnection(Protocol):
     async def send(self, data: str | bytes) -> None: ...
     def fail(self, code: int, reason: str) -> None: ...
     def protocol_error(self) -> BaseException | None: ...
+
+def next_conn_id() -> str: ...
 ```
 
 接口语义：
 
 - `recv`：返回一整条消息；超时返回 None。连接断开后的行为**两个栈不同**：
   - aiohttp：立即抛 `ConnectionClosed`；
-  - Sanic：可能一直挂着（§3.2 第 1 条），靠取消 handler 兜底。
-- `send`：连接已断开时抛 `ConnectionClosed`。
-- `fail`：同步调用，尽力发出 close 帧后断开；可以重复调用；保证在有限时间内断开，不受对端配合与否影响
-  （aiohttp 的实现见 §5.4.2）。
+  - Sanic：可能一直挂着（§3.2 第 1 条），靠取消 handler 兜底；对端在 `recv(timeout)` 期间断开时，Sanic 会
+    让它抛 CancelledError。
+- `send`：连接已断开、或已经 fail 过时抛 `ConnectionClosed`。
+- `fail`：同步调用，尽力发出 close 帧后断开；可以重复调用，只有第一次的 code 生效；保证在有限时间内断开，不受
+  对端配合与否影响（aiohttp 的实现见 §5.4.2）。
 - `protocol_error`：只返回协议层错误，替代 `ws.ws_proto.parser_exc`。对端正常掉线不算。
 
-改动：
+和原计划的出入：连接序号 `_conn_seq`（#225）从 websocket.py 挪到了 conn.py，由 `next_conn_id()` 分配。这样
+适配层只依赖 conn.py 和 `serve_connection`。
 
-- `websocket_connection` 的函数体改名为 `serve_connection(runtime, conn, instance)`，不再依赖框架。Sanic 的
-  路由 handler 只负责包装：
-  `await serve_connection(request.app.ctx.runtime, SanicWsConnection(request, ws, conn_id), db_name)`。ws 路由
-  改由适配层显式注册，不再在 import 时注册。
-- **显式管住收发两边**：
-  - `serve_connection` 把 `send_loop` 也作为任务启动，用 `asyncio.wait({send_task, recv_task},
-    return_when=FIRST_COMPLETED)` 等任意一边结束，再取消另一边。
-  - `asyncio.wait` 自己被取消时，不会取消它在等的任务。所以 handler 被取消时（Sanic 上仍会发生），finally 里
-    要显式 cancel 并 await 收发两个子任务，而且要在 `broker.close()` / `terminate()` 之前完成，保持现在
-    "先等接收协程结束、再退订"的顺序。shield 包住的清理流程保持不变。
-  - 动机：aiohttp 上真实存在的卡死。接收协程退出时，如果队列已满，PUSH_CLOSE 会被 `put_nowait` 丢掉
-    （`receiver.py:427-430`）；与此同时发送循环卡在 send 的 drain 上（对端不读数据，见 §5.4.2）。两件事叠在
-    一起，清理就永远不会执行，Connection 行会漏删。
+**改动**
+
+- `websocket_connection` 改成 `serve_connection(runtime, conn, instance)`，不再依赖框架。
+- ws 路由由 Sanic 适配层显式注册，不再在 import 时注册：
+  - `worker_main` 用 `app.add_websocket_route` 注册；路由 handler 只建
+    `SanicWsConnection(request, ws, next_conn_id())`，再调 `serve_connection`；
+  - `HETU_BLUEPRINT` 删掉了；
+  - 路由的路径、strict_slashes、方法等属性和原来逐项对过，完全相同。
+- `SanicWsConnection` 也放在适配层：
+  - `recv(None)` 走 `recv_streaming` 自己重组消息。这是原来 `receiver.py` 的 `receive_messages`：Sanic 的
+    `recv()` 每条消息都要建一个 Task 再 `asyncio.wait`，慢。`recv(timeout)` 用 Sanic 的 `recv`；
+  - `WebsocketClosed` 转成 `ConnectionClosed`；
+  - `fail` 调 `fail_connection`；`protocol_error` 读 `ws_proto.parser_exc`，EOFError 不算。
+- **收发两边各一个任务**：
+  - `serve_connection` 把发送循环也起成任务（`ws_send:{conn_id}`），和接收协程（`client_handler:{conn_id}`）
+    一样登记进 `runtime.tasks`，用 `asyncio.wait(..., return_when=FIRST_COMPLETED)` 等任意一边结束。
+  - handler 被框架取消时（Sanic：传输层断开、关服），吞掉取消、照常拆连接，和原来一样（原来是在 send_loop
+    外面 `except CancelledError` 吞掉）。
+  - `asyncio.wait` 被取消时不会取消它在等的任务，所以 `_cleanup_connection` 一开始先取消收发两个任务，并等
+    它们都结束，然后才退订、跑断线 System、删行，保持"收发都停了再退订"的顺序。清理仍是 shield 包住的独立
+    任务。
+  - 动机是 aiohttp 上真实存在的卡死：接收协程退出时如果队列已满，PUSH_CLOSE 会被 `put_nowait` 丢掉；与此
+    同时发送循环卡在 send 的 drain 上（对端不读数据，见 §5.4.2）。只等发送循环的话，两件事叠在一起，清理就
+    永远不会执行，Connection 行会漏删。Sanic 上靠传输层关闭后取消 handler 兜底，所以碰不到。
+  - PUSH_CLOSE 保留：接收协程结束时照旧塞，发送循环取到就自己返回；塞不进去也不影响拆连接。第 4b 步的排空
+    要用它。
   - 订阅回复的占位 future 不会造成卡死：deferred 任务一结束，`settle` 回调就会把它取消
-    （`receiver.py:166-170`）。
-- `close_connection(ws, code)` 改成 `conn.fail(code, reason)`；`WebsocketClosed` 改成 `ConnectionClosed`；
-  `receiver.py` 里 `except (SanicException, BaseException)` 去掉 `SanicException`（`BaseException` 已经能接住）；
-  motd 改成 `conn.send(str)`。
+    （`receiver.py` 的 `defer_sub_reply_`）。
+- 协议错误的日志改在等收发结束之后打，不管是 handler 被取消、还是收发某一边先结束。原来只在 handler 被取消的
+  那条路径上打。
+- `close_connection(conn, code)` 改调 `conn.fail(code, CLOSE_REASONS[code])`；`WebsocketClosed` 改成
+  `ConnectionClosed`；`receiver.py` 里 `except (SanicException, BaseException)` 去掉 `SanicException`；motd 改成
+  `conn.send(str)`。
 - `ctx.request` 的类型标注改成 `Any`（框架的原始请求）。在 Sanic 栈上仍是 Sanic 的 Request，对外不变。
-- 新增单元测试：用一个内存里的假 `WsConnection`，不走网络，覆盖：
-  - 握手超时、握手格式错误；
-  - 收发频率超限、被顶号、初始化失败时各自的 close 码；
-  - 收发途中断开；
-  - 上面那种"队列满 + send 卡住"的场景：断开后清理必须执行完，Connection 行要删掉。
+- 握手：
+  - 等握手消息的时间提成模块常量 `HANDSHAKE_TIMEOUT = 10`，超时单独记一条日志；
+  - 握手之前、回复握手时对端就断开，安静地结束。原来 `WebsocketClosed` 冒到 Sanic，由它静默处理。
+- 新连接、连接断开两条日志里的标识，从 Sanic handler 的任务名（`Task-123`）改成 conn_id，和
+  `client_handler:` / `ws_send:` / `ws_cleanup:` 这几个任务名对得上。
+- `push_queue` 的容量提成模块常量 `PUSH_QUEUE_SIZE = 1024`（测试要调小它）。
+- websocket.py、receiver.py、conn.py、endpoint/context.py 都不再 import sanic，§4.1 的说法成立。
+
+**和原来行为的差别**
+
+1. 发送循环出了意外的异常时，以 1011（`CLOSE_INTERNAL_ERROR`）断开，和接收协程兜底时用的码一样。原来不
+   fail，等拆完连接后由 Sanic 以 1000 关闭，客户端会当成服务端正常下线。
+2. 协议错误在发送那边先被发现时（send 抛 `ConnectionClosed`）也会打日志，原来这种情况漏掉了。这条日志的
+   标签从 `[📡WSSender]` 改成 `[📡WSConnect]`。
+
+**测试**
+
+- 新增 `tests/test_ws_serve.py`：用内存里的假 `WsConnection`，不走网络，Redis、SQLite 各跑一遍。假连接按
+  aiohttp 的语义实现：fail 之后、对端断开之后，收发立即抛 `ConnectionClosed`，不靠框架取消 handler。覆盖：
+  - 握手超时、四种格式错误、实例名不存在、握手之前断开；
+  - 收发频率超限（4002）、被顶号（4001）、初始化失败（1011）、发送异常（1011）各自的 close 码，Connection
+    行都要删掉；
+  - 收的途中、发的途中对端断开：清理跑完，断线 System 以用户身份跑；
+  - "队列满 + send 卡住"：接收协程结束后清理照常执行，Connection 行删掉。改回只等发送循环（原来的结构）时，
+    这个用例超时失败；
+  - handler 被框架取消：取消不往外抛，退订之前收发两个任务都已结束；
+  - 协议错误打日志，对端正常掉线不打；motd 是文本帧。
+- 等 `serve_connection` 结束要用 `asyncio.wait`，不能用 `asyncio.wait_for`：后者超时会取消它，而它被取消时
+  会照常拆完、正常返回，卡死就测不出来。
+- `test_server_runtime.py`：在干净的子进程里 import websocket / receiver / conn / endpoint.context，不加载
+  sanic。
+- `test_websocket.py` 只改了 send_loop 用的连接替身（`fail_connection` 改成 `fail`），其余原样通过。
 
 ### 5.4 第 4a 步：aiohttp 单进程，与 Sanic 并存
 
@@ -874,6 +922,7 @@ abort。所以：
 | `on_server_setup` 只在 worker 里执行，不再在管理进程执行 | 5（aiohttp 栈）、6 | 无 |
 | 关服时在途的 RPC 先处理完再断开 | 4b（aiohttp 栈）、6 | 无 |
 | ws 心跳超时：客户端看到 1006（aiohttp 直接断开 transport），以前是 1011；`WEBSOCKET_PING_TIMEOUT` 不再可配，等 pong 的时间是 heartbeat/2 | 4a（aiohttp 栈）、6 | 无 |
+| 发送数据时出了意外的异常：客户端收到的 close 码从 1000 变成 1011 | 3 | 无 |
 | Windows 开发环境关服时，客户端收到的 close 码从 1000（清理完才发）变成 1001。C# SDK 对 1000 会把 reason 置为 null（`WebSocketTransport.cs:62-65`），按 reason 判断"正常关闭"的代码会受影响 | 4a（aiohttp 栈）、6 | 无 |
 | 崩溃的 worker 会被自动重启（Sanic 不会） | 5（aiohttp 栈）、6 | 无 |
 
