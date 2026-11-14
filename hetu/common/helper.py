@@ -1,7 +1,15 @@
 import itertools
 import os
+import re
 import sys
 import uuid
+
+from ..i18n import _
+
+# 本进程在本机内的 worker 序号（从 0 开始），由多进程管理进程在启动 worker 时设置（设计稿
+# docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.7）。单进程模式、管理进程、
+# 工具进程都没有
+WORKER_INDEX_ENV = "HETU_WORKER_INDEX"
 
 # OpenProcess 查询进程状态所需的最小权限
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -47,6 +55,37 @@ def is_container_env():
         pass
 
     return False
+
+
+def worker_index() -> int | None:
+    """
+    本进程在本机内的 worker 序号；单进程模式、管理进程、工具进程没有，返回 None。
+
+    过渡期（Sanic 还没删掉时）没设 HETU_WORKER_INDEX，就照旧从 Sanic 给 worker 设的
+    SANIC_WORKER_IDENTIFIER（形如 "Srv 0"、"Srv12"）里取。
+
+    This process's worker index on this machine, or None outside a multi-worker server.
+    """
+    # 空串当作没设
+    if value := os.environ.get(WORKER_INDEX_ENV):
+        if not value.isdecimal():
+            raise ValueError(
+                _("环境变量 {name} 必须是非负整数，现在是 {value!r}").format(
+                    name=WORKER_INDEX_ENV, value=value
+                )
+            )
+        return int(value)
+    match = re.search(r"(\d+)", os.environ.get("SANIC_WORKER_IDENTIFIER", ""))
+    return int(match.group(1)) if match else None
+
+
+def worker_ident() -> str:
+    """日志里的进程标识：worker 是 "Srv 0"、"Srv12" 这样（两位宽，和原来 Sanic 的一样），其他进程是 "Main "。"""
+    index = worker_index()
+    if index is not None:
+        return f"Srv{index:2}"
+    # 过渡期：Sanic 给 Reloader 等进程的标识里没有序号，原样显示
+    return os.environ.get("SANIC_WORKER_IDENTIFIER") or "Main "
 
 
 def get_machine_id():

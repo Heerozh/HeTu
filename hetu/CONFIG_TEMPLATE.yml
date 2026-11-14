@@ -29,22 +29,10 @@ CLI_ALLOW_WRITE: true
 # hetu call / hetu shell 的审计日志（JSONL，只追加不轮转）：谁、在哪台机器、什么命令、每次提交
 # 改了哪些行。相对路径按本配置文件所在目录解析；设为 "" 关闭。
 CLI_AUDIT_LOG: logs/hetu_cli_audit.jsonl
-# 开启web控制后台，GET /获得信息 POST /reload重载代码 POST /shutdown关闭服务器
-#INSPECTOR: true
-#INSPECTOR_PORT: 6457
 
-# 前置反向代理的数量。用于获取真实IP，host等，一般为1，除非是多级代理
+# 前置反向代理的数量。用于获取真实IP，host等，一般为1，除非是多级代理。
+# HeTu 不处理 TLS 和访问日志，都交给前面的反向代理（推荐 Caddy）
 PROXIES_COUNT: 1
-
-# SSL配置，推荐用反向代理caddy，而不要这里弄
-#CERT_CHAIN:
-#  - null  # 第一个设null禁止通过IP查看证书
-#  - cert: /path/to/example.com/fullchain.pem
-#    key: /path/to/example.com/privkey.pem
-#    password: 可选，如果密钥有密码的话
-#  - cert: /path/to/example2.cn/fullchain.pem
-#    key: /path/to/example2.cn/privkey.pem
-#    password: 可选，如果密钥有密码的话
 
 # 服务器Websocket监听地址
 LISTEN: 0.0.0.0:2466
@@ -56,9 +44,6 @@ WORKER_NUM: 4
 # 执行所有 @define_system(on_start=True) 的启动System，超过则打印卡在哪一步并中止开服
 # （退出码非0），避免服务器静默挂起起不来。如果首次开服建表、播种数据本来就慢，请调大
 STARTUP_TIMEOUT: 60
-
-# 反正是Websocket，可以关了加性能
-ACCESS_LOG: false
 
 # 传入消息的最大字节、ping间隔秒、ping无响应关闭连接秒
 # !eval表示返回后面中括号内的代码执行结果
@@ -241,8 +226,8 @@ LOGGING:
 
   formatters:
     colour: # 彩色格式
-      # 不能用 sanic 的 AutoFormatter：它会把 record.ident 覆写成本进程的编号，而这个
-      # handler 跑在管理进程的 QueueListener 里，会导致所有 worker 的日志都显示 Main
+      # 这个 handler 跑在管理进程的 QueueListener 里：formatter 要用 record 上由 ContextFilter
+      # 打好的 ident，不能用格式化所在进程的编号，否则所有 worker 的日志都显示 Main
       class: hetu.safelogging.formatter.ContextAutoFormatter
     generic: # 文本格式
       format: "%(ident)s %(asctime)s %(levelname)-8s %(name)-12s %(ctx)-27s %(message)s"

@@ -113,15 +113,6 @@ class StartCommand(CommandInterface):
             metavar="0/1/2",
         )
         cli_group.add_argument(
-            "--cert",
-            metavar="/etc/letsencrypt/live/example.com/",
-            help=_(
-                "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。"
-                "填入auto会生成自签https证书。"
-            ),
-            default="",
-        )
-        cli_group.add_argument(
             "--authkey",
             metavar="your-auth-key",
             help=_("默认crypto层的auth_key，用于握手签名校验。留空则不启用。"),
@@ -141,18 +132,23 @@ class StartCommand(CommandInterface):
     @classmethod
     def execute(cls, args):
         from sanic import Sanic
-        from sanic.config import Config
         from sanic.worker.loader import AppLoader
 
+        from ..common.helper import WORKER_INDEX_ENV
         from ..safelogging import handlers as log_handlers
         from ..server import StartupAborted, worker_main
+        from ..server.config import HeTuConfig
         from ..server.pipeline import CryptoLayer
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
+
+        # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能传给 worker：它比 Sanic 给的
+        # 序号优先，所有 worker 会拿到同一个，SQLite 后端上 Worker ID 就重了
+        os.environ.pop(WORKER_INDEX_ENV, None)
 
         # 命令行转配置文件
         config_file = locate_config_file(args)
         if config_file:
-            config = Config()
+            config = HeTuConfig()
             try:
                 config_dict = read_config_file(config_file)
             except ConfigError as e:
@@ -196,11 +192,9 @@ class StartCommand(CommandInterface):
                     },
                 },
                 "WORKER_NUM": args.workers,
-                "CERT_CHAIN": args.cert,
                 "DEBUG": args.debug,
-                "ACCESS_LOG": False,
             }
-            config = Config(config_for_factory)
+            config = HeTuConfig(config_for_factory)
 
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
@@ -214,7 +208,7 @@ class StartCommand(CommandInterface):
             factory=partial(worker_main, f"Hetu-{config.NAMESPACE}", config_for_factory)
         )
         app = loader.load()
-        # 配置log，上面app.load()会自动调用logging.config.dictConfig(config.LOGGING)
+        # 配置log，上面 loader.load() 跑 worker_main 时会 dictConfig(config.LOGGING)
         # 把dictConfig生成的queue实例存到config里，好传递到子进程
         if "LOGGING" in config:
             for hdl_name, handler_dict in config.LOGGING["handlers"].items():
@@ -228,7 +222,6 @@ class StartCommand(CommandInterface):
 
         # 显示服务器信息
         host, port = config.LISTEN.rsplit(":", 1)
-        ssl = ("CERT_CHAIN" in config) and config.CERT_CHAIN or None
 
         logger.info(FULL_COLOR_LOGO)
         logger.info(
@@ -244,10 +237,9 @@ class StartCommand(CommandInterface):
                 version=sys.version, platform=sys.platform
             )
         )
+        # TLS 由前面的反向代理（推荐 Caddy）终止，HeTu 自己只监听明文
         logger.info(
-            _("📡 监听地址： http{s}://{host}:{port}").format(
-                s="s" if ssl else "", host=host, port=port
-            )
+            _("📡 监听地址： http://{host}:{port}").format(host=host, port=port)
         )
         layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
         logger.info(
@@ -280,13 +272,12 @@ class StartCommand(CommandInterface):
         os.environ["SANIC_IGNORE_PRODUCTION_WARNING"] = "1"
         app.prepare(
             debug=int(config.DEBUG) > 1,
-            access_log=config.ACCESS_LOG,
+            # 访问日志交给前面的反向代理（推荐 Caddy）
+            access_log=False,
             motd=False,
             host=host,
             port=int(port),
-            auto_tls=ssl == "auto",
             auto_reload=config.DEBUG and workers > 1,
-            ssl=ssl if ssl != "auto" else None,
             workers=workers,
             single_process=workers == 1,
         )

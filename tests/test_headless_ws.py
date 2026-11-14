@@ -26,7 +26,7 @@ logger = logging.getLogger("HeTu.root")
 
 @contextmanager
 def _preserve_loggers():
-    """worker_main 建 Sanic app 时会 dictConfig(LOGGING)，把 HeTu.replay 改成 ERROR 且
+    """worker_main 会 dictConfig(LOGGING)，把 HeTu.replay 改成 ERROR 且
     不 propagate；本模块按字母序排在别的依赖 caplog 抓 replay 日志的测试之前，退出时把
     被改过的 logger 恢复原样，不把污染留给后面的测试。"""
     names = (None, "HeTu.root", "HeTu.replay")
@@ -78,7 +78,6 @@ def hl_server(request):
                 "LOGGING": DEFAULT_LOGGING_CONFIG,
                 "DEBUG": False,
                 "WORKER_NUM": 1,
-                "ACCESS_LOG": False,
             },
         )
         harness = ServerHarness(server)

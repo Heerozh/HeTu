@@ -67,7 +67,6 @@ def test_server(ses_redis_service):
             "LOGGING": logging_cfg,
             "DEBUG": False,
             "WORKER_NUM": 4,
-            "ACCESS_LOG": False,
         },
     )
 
