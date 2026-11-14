@@ -121,10 +121,12 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   ComponentTableManagers、雪花号租约、任务表、连接表，管开服 / 关服的先后顺序；
   `prepare_worker` 加载 app 文件、建 SystemClusters。
 - `adapters/sanic_app.py`：Sanic 适配（`worker_main`），只把 `WorkerRuntime` 接到 Sanic 的
-  生命周期上。
-- `websocket.py`：WebSocket handler —— 为每个连接创建 `EndpointExecutor`、
-  `SystemCaller`、`SubscriptionBroker`。
-- `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`sel` 命令。
+  生命周期上，把 ws 连接包成 `SanicWsConnection` 交给 `serve_connection`。
+- `conn.py`：`WsConnection` 接口（recv / send / fail / protocol_error）和 `ConnectionClosed`，
+  处理连接的代码只经它收发，不碰 Web 框架。
+- `websocket.py`：`serve_connection` —— 为每个连接创建 `EndpointExecutor`、
+  `SystemCaller`、`SubscriptionBroker`，收、发各起一个协程，任意一边结束就拆连接。
+- `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`motd` 命令。
   `rpcs` 是等推送的调用：照常回 rsp，再在 `SubscriptionHub` 里起栅栏（`fence_`），这次调用
   引起的推送发出之后发 `["sync", id]`（设计见
   `docs/superpowers/specs/2026-10-10-rpcs-sync-design.md`）。

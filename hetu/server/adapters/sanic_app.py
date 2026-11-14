@@ -1,6 +1,7 @@
 """
-Sanic 适配：建 Sanic app，把它的生命周期接到 `WorkerRuntime` 上。换成 aiohttp 后删除
-（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.1、§5.8）。
+Sanic 适配：建 Sanic app，把它的生命周期接到 `WorkerRuntime` 上，把 ws 连接包成 `WsConnection` 交给
+`serve_connection`。换成 aiohttp 后删除（设计稿
+docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.1、§5.3、§5.8）。
 
 @author: Heerozh (Zhang Jianhao)
 @copyright: Copyright 2024-2026, Heerozh. All rights reserved.
@@ -14,16 +15,17 @@ import asyncio
 import logging
 import signal
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
-from sanic import Sanic
+from sanic import Request, Sanic, Websocket
+from sanic.exceptions import WebsocketClosed
 from sanic.worker.manager import WorkerManager
 from sanic.worker.process import WorkerProcess
 
 from ... import webext
 from ...i18n import _
-from .. import websocket as _websocket  # noqa: F401  导入即注册 ws 路由
 from ..config import HeTuConfig
+from ..conn import ConnectionClosed, next_conn_id
 from ..runtime import (
     DEFAULT_STARTUP_TIMEOUT,
     LEASE_LOST_EXIT_CODE,
@@ -34,7 +36,8 @@ from ..runtime import (
     setup_message_pipeline,
 )
 from ..threaded_accept import IS_WINDOWS, threaded_accept_listener
-from ..web import HETU_BLUEPRINT, web_root
+from ..web import web_root
+from ..websocket import serve_connection
 
 logger = logging.getLogger("HeTu.root")
 
@@ -94,6 +97,64 @@ async def _stop_when_serving(app: Sanic) -> None:
     while not app.state.is_running:
         await asyncio.sleep(0.1)
     app.stop()
+
+
+class SanicWsConnection:
+    """
+    把 Sanic 的 Websocket 包成 `WsConnection`。客户端地址用 Sanic 解析好的 `request.client_ip`
+    （按 PROXIES_COUNT、REAL_IP_HEADER 等配置）。
+
+    Sanic 上对端关闭之后 recv() 可能一直挂着（recv_streaming 不返回），要等 Sanic 取消连接的
+    handler；对端在 recv(timeout) 期间断开时，Sanic 会让它抛 CancelledError。
+
+    Adapts a Sanic Websocket to `WsConnection`.
+    """
+
+    __slots__ = ("_ws", "client_ip", "conn_id", "request")
+
+    def __init__(self, request: Request, ws: Websocket, conn_id: str) -> None:
+        self.conn_id = conn_id
+        self.client_ip: str = request.client_ip
+        self.request = request
+        self._ws = ws
+
+    async def recv(self, timeout: float | None = None) -> str | bytes | None:
+        try:
+            if timeout is not None:
+                return await self._ws.recv(timeout)
+            # 不限时就走 recv_streaming 自己重组：Sanic 的 recv() 每条消息都要建一个 Task 再
+            # asyncio.wait，慢。帧迭代器必须取完，否则这个连接就不能再收了
+            chunks = [chunk async for chunk in self._ws.recv_streaming()]
+        except WebsocketClosed as e:
+            raise ConnectionClosed from e
+        if len(chunks) == 1:
+            return chunks[0]
+        if chunks and isinstance(chunks[0], str):
+            return "".join(cast(list[str], chunks))
+        return b"".join(cast(list[bytes], chunks))
+
+    async def send(self, data: str | bytes) -> None:
+        try:
+            await self._ws.send(data)
+        except WebsocketClosed as e:
+            raise ConnectionClosed from e
+
+    def fail(self, code: int, reason: str) -> None:
+        # 同步、立即生效、可以重复调用；关闭握手超过 close_timeout 就 transport.abort()
+        self._ws.fail_connection(code, reason)
+
+    def protocol_error(self) -> BaseException | None:
+        # parser_exc 是 EOFError 时是对端直接断开，不算协议错误
+        exc = self._ws.ws_proto.parser_exc
+        if exc is None or isinstance(exc, EOFError):
+            return None
+        return exc
+
+
+async def _serve_websocket(request: Request, ws: Websocket, db_name: str) -> None:
+    """ws 路由 /hetu/<db_name>：Sanic 做完 ws 握手后，把连接交给 serve_connection"""
+    conn = SanicWsConnection(request, ws, next_conn_id())
+    await serve_connection(request.app.ctx.runtime, conn, db_name)
 
 
 _SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
@@ -225,8 +286,8 @@ def worker_main(app_name: str, config: Mapping[str, Any]) -> Sanic:
     # 两个循环在 runtime.start() 拿到租约时就起了
     app.after_server_start(_runtime_start_background)
 
-    # 启动服务器监听
-    app.blueprint(HETU_BLUEPRINT)
+    # HeTu 的 ws 入口
+    app.add_websocket_route(_serve_websocket, "/hetu/<db_name>")
 
     # 挂载用户自定义的HTTP端点（@hetu.define_route / @hetu.on_server_setup）
     webext.apply_to(app)

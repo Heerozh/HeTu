@@ -6,6 +6,7 @@ import logging
 import os
 import warnings
 from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
@@ -1076,7 +1077,7 @@ class _FakeSendWs:
             self.on_send(frame)
         await asyncio.sleep(self.delay)
 
-    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
+    def fail(self, code: int, reason: str) -> None:
         pass
 
 
@@ -2016,8 +2017,9 @@ def test_websocket_same_request_id_connections_independent(test_server):
 
 
 @pytest.mark.timeout(20)
-def test_websocket_fragmented_message_size_limit(test_server):
-    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。"""
+def test_websocket_fragmented_message_size_limit(test_server, caplog):
+    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。超限是协议错误，恰好打一条日志"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
     test_server.config["WEBSOCKET_MAX_SIZE"] = 128
 
     async def routine(connect):
@@ -2032,3 +2034,168 @@ def test_websocket_fragmented_message_size_limit(test_server):
         assert exc_info.value.rcvd.code == 1009
 
     test_server.websocket("/hetu/pytest_1", mimic=routine)
+    protocol_errors = [
+        r
+        for r in caplog.records
+        if r.name == "HeTu.root" and "WS协议异常" in r.getMessage()
+    ]
+    assert len(protocol_errors) == 1
+
+
+# ==== Sanic 适配层：SanicWsConnection ====
+
+
+class _FakeSanicWs:
+    """SanicWsConnection 用的 Sanic Websocket 替身"""
+
+    def __init__(self, frames=(), message=None, exc: BaseException | None = None):
+        self.frames = list(frames)  # recv_streaming 给出的一条消息的各帧
+        self.message = message  # recv(timeout) 的返回值
+        self.exc = exc  # 收发时抛的异常
+        self.timeouts: list = []
+        self.failed: list = []
+        self.ws_proto = SimpleNamespace(parser_exc=None)
+
+    async def recv(self, timeout=None):
+        self.timeouts.append(timeout)
+        if self.exc is not None:
+            raise self.exc
+        return self.message
+
+    async def recv_streaming(self):
+        if self.exc is not None:
+            raise self.exc
+        for frame in self.frames:
+            yield frame
+
+    async def send(self, data):
+        if self.exc is not None:
+            raise self.exc
+
+    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
+        self.failed.append((code, reason))
+
+
+def _sanic_conn(ws: _FakeSanicWs):
+    from hetu.server.adapters.sanic_app import SanicWsConnection
+
+    request = SimpleNamespace(client_ip="1.2.3.4")
+    return SanicWsConnection(cast(Any, request), cast(Any, ws), "7")
+
+
+async def test_sanic_ws_connection_recv():
+    """recv(timeout) 交给 Sanic 的 recv（握手超时靠它）；不限时走 recv_streaming，把各帧拼成一条"""
+    ws = _FakeSanicWs(message=b"handshake")
+    conn = _sanic_conn(ws)
+    assert (conn.conn_id, conn.client_ip) == ("7", "1.2.3.4")
+    assert await conn.recv(timeout=0.5) == b"handshake"
+    assert ws.timeouts == [0.5]
+    for frames, message in (
+        ([b"ab"], b"ab"),
+        ([b"a", b"b"], b"ab"),
+        (["a", "b"], "ab"),
+    ):
+        assert await _sanic_conn(_FakeSanicWs(frames=frames)).recv() == message
+
+
+async def test_sanic_ws_connection_converts_websocket_closed():
+    """Sanic 的 WebsocketClosed 转成 ConnectionClosed。不转的话，断线时会被当成收发出错打 ERROR"""
+    from sanic.exceptions import WebsocketClosed
+
+    from hetu.server.conn import ConnectionClosed
+
+    conn = _sanic_conn(_FakeSanicWs(exc=WebsocketClosed()))
+    with pytest.raises(ConnectionClosed):
+        await conn.recv()
+    with pytest.raises(ConnectionClosed):
+        await conn.recv(timeout=1)
+    with pytest.raises(ConnectionClosed):
+        await conn.send(b"x")
+
+
+async def test_sanic_ws_connection_fail_and_protocol_error():
+    """fail 交给 fail_connection；协议错误读 parser_exc，对端直接断开（EOFError）不算"""
+    ws = _FakeSanicWs()
+    conn = _sanic_conn(ws)
+    conn.fail(connection.CLOSE_REJECTED, "rejected")
+    assert ws.failed == [(connection.CLOSE_REJECTED, "rejected")]
+    assert conn.protocol_error() is None
+    ws.ws_proto.parser_exc = EOFError()
+    assert conn.protocol_error() is None
+    error = ValueError("bad frame")
+    ws.ws_proto.parser_exc = error
+    assert conn.protocol_error() is error
+
+
+@pytest.mark.timeout(20)
+def test_websocket_abrupt_disconnect_is_not_a_protocol_error(test_server, caplog):
+    """对端直接断开 TCP（不发 close 帧）：照常拆连接，不算协议错误、不打它的日志"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        client.transport.abort()
+        await _wait_server_connections(test_server.runtime, 0)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    messages = [r.getMessage() for r in caplog.records if r.name == "HeTu.root"]
+    assert any("连接断开" in m for m in messages)
+    assert not any("WS协议异常" in m for m in messages)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_handshake_timeout_closes_with_rejected(monkeypatch, test_server):
+    """连上来不发握手消息：HANDSHAKE_TIMEOUT 后以 4002 断开"""
+    monkeypatch.setattr(websocket_server, "HANDSHAKE_TIMEOUT", 0.2)
+    codes = []
+
+    async def routine(connect):
+        raw = await connect(handshake=False)
+        with pytest.raises(ConnectionClosedError) as exc_info:
+            await asyncio.wait_for(raw.recv(), 5)
+        rcvd = exc_info.value.rcvd
+        codes.append(None if rcvd is None else rcvd.code)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert codes == [connection.CLOSE_REJECTED]
+
+
+@pytest.mark.timeout(30)
+def test_websocket_disconnect_during_initialize_deletes_connection_row(
+    monkeypatch, test_server, ses_redis_service
+):
+    """
+    客户端握手完立刻断开，服务端还在 initialize 里（Connection 行已经提交、在等副本同步）：Sanic
+    取消连接协程，拆连接照样要删掉这一行。以前 initialize 在拆连接的 try 外面、行 id 也是返回之后
+    才记下，这一行就永远留在库里
+    """
+    import redis
+
+    from hetu.data.backend import Backend
+
+    entered = asyncio.Event()
+    wait_for_synced = Backend.wait_for_synced
+
+    async def slow_once(self):
+        if not entered.is_set():
+            entered.set()
+            await asyncio.sleep(1)  # 客户端趁这时断开
+        await wait_for_synced(self)
+
+    monkeypatch.setattr(Backend, "wait_for_synced", slow_once)
+    r = redis.Redis.from_url(ses_redis_service[0])
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client = await connect()
+        await asyncio.wait_for(entered.wait(), 5)
+        client.transport.abort()
+        await _wait_server_connections(test_server.runtime, 0)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert len(r.keys(pattern)) == before, (
+        "初始化途中断开的连接把 Connection 行留在库里了"
+    )

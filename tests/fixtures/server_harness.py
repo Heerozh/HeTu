@@ -34,8 +34,9 @@ from hetu.server import pipeline
 
 logger = logging.getLogger("HeTu.root")
 
-# routine 拿到的 connect()：新开一个已握手的客户端连接，send/recv 收发的是解码后的消息
-Connect = Callable[[], Awaitable[Any]]
+# routine 拿到的 connect()：新开一个已握手的客户端连接，send/recv 收发的是解码后的消息。
+# connect(handshake=False) 只建 ws 连接、不做 HeTu 的握手，收发原始帧
+Connect = Callable[..., Awaitable[Any]]
 Routine = Callable[[Connect], Awaitable[Any]]
 
 # routine 里抛出的这些不收集：取消、退出要照常往外传
@@ -65,12 +66,14 @@ class _ClientSession:
         self.result = WsResult()
         self.clients: list[Any] = []
 
-    async def connect(self) -> Any:
+    async def connect(self, *, handshake: bool = True) -> Any:
         from websockets.legacy.client import connect
 
         # 收发换成带编解码的版本，要往协议对象上挂属性，按 Any 处理
         ws: Any = await connect(self.url, **self.connect_kwargs)
         self.clients.append(ws)
+        if not handshake:
+            return ws
         result = self.result
 
         do_send = ws.send
@@ -84,7 +87,7 @@ class _ClientSession:
         pipe_ctx = None
         logger.debug(f"客户端pipe {id(crypto_layer)}")
 
-        async def handshake():
+        async def do_handshake():
             nonlocal pipe_ctx
             # 生成密钥对
             private_key = PrivateKey.generate()
@@ -130,7 +133,7 @@ class _ClientSession:
         def clear_recv():
             result.client_received.clear()
 
-        await handshake()
+        await do_handshake()
 
         ws.send = send
         ws.recv = recv

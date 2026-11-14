@@ -295,7 +295,7 @@ class LocalApp:
             user_data=user_data if user_data is not None else {},
             # 绕过了Endpoint层，所以这里代替它打上请求时间戳，与生产的ctx.timestamp一致
             timestamp=time.time(),
-            request=None,  # type: ignore[arg-type]
+            request=None,
             systems=None,  # type: ignore[arg-type]
         )
         ctx.systems = _AppSystemCaller(self, ctx)
