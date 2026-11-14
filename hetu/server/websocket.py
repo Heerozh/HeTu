@@ -179,12 +179,7 @@ async def serve_connection(
 
     # 初始化Endpoint执行器，一个连接一个执行器
     endpoint_executor = EndpointExecutor(namespace, tbl_mgr, context)
-    await endpoint_executor.initialize(conn.client_ip)
 
-    # 从这里起本连接的 Connection 行已经落库：之后不管哪一步失败或被取消（客户端在初始化期间
-    # 断线、pubsub 订阅失败……），都必须走到 finally 里的 terminate() 把它删掉。这行没有 TTL
-    # 也没有清理任务，漏掉就永远留在库里，而匿名连接数是按 IP 计数的，攒够几次同一出口的
-    # 客户端就再也连不上了
     broker: SubscriptionBroker | None = None
     # 收发两个协程的句柄：拆连接时按句柄取消，不按名字找（名字万一重复会取消到别的连接）
     recv_task: asyncio.Task | None = None
@@ -194,6 +189,12 @@ async def serve_connection(
     runtime.live_connections.add(current_task)
     current_task.add_done_callback(runtime.live_connections.discard)
     try:
+        # 落库本连接的 Connection 行。从这里起不管哪一步失败或被取消（客户端在初始化期间断线、
+        # pubsub 订阅失败……），都必须走到 finally 里的 terminate() 把它删掉，落库本身被取消时
+        # 也一样（行可能已经提交，见 initialize）。这行没有 TTL 也没有清理任务，漏掉就永远留在
+        # 库里，而匿名连接数是按 IP 计数的，攒够几次同一出口的客户端就再也连不上了
+        await endpoint_executor.initialize(conn.client_ip)
+
         # 初始化订阅管理器，一个连接一个订阅管理器
         broker = SubscriptionBroker(
             runtime.default_backend,
@@ -260,40 +261,6 @@ async def serve_connection(
         # 初始化发送/接受计数器
         flood_checker = connection.ConnectionFloodChecker()
 
-        # 创建接受客户端消息的协程
-        receiver_task = client_handler(
-            conn,
-            pipe_ctx,
-            endpoint_executor,
-            broker,
-            push_queue,
-            flood_checker,
-            int(runtime.config.get("DEBUG", 0)),
-        )
-        recv_task = runtime.tasks.spawn(receiver_task, name=f"client_handler:{conn_id}")
-
-        # 订阅推送不另开协程：hub 交到门面的待发区时，发送循环空闲就塞 PUSH_UPDATES 叫醒它，由它
-        # 直接取走发送。队列满时不塞：那时发送循环不会等在 get() 上，发完队列会回来取待发区
-        def wake_sender() -> None:
-            with contextlib.suppress(asyncio.QueueFull):
-                push_queue.put_nowait(PUSH_UPDATES)
-
-        broker.bind_sender_(wake_sender)
-
-        # 删除当前长连接用不上的临时变量
-        del namespace
-        del default_limits
-    except Exception as e:
-        # 初始化失败只能断开，finally 里会把已落库的 Connection 行清掉
-        err_msg = _("❌ [📡WSConnect] 连接初始化异常：{err}").format(
-            err=f"{type(e).__name__}:{e}"
-        )
-        replay.info(err_msg)
-        logger.exception(err_msg)
-        close_connection(conn, connection.CLOSE_INTERNAL_ERROR)
-    else:
-        assert broker is not None
-
         def pack(reply) -> bytes:
             # 如果关闭了replay，为了速度不执行下面的字符串序列化
             if replay.isEnabledFor(logging.DEBUG):
@@ -308,21 +275,59 @@ async def serve_connection(
                 return True
             return False
 
-        # 发送循环也单独起一个协程，和接收协程一起等，任意一边结束连接就在拆了。不能只等其中
-        # 一边：接收协程结束时队列要是满着，PUSH_CLOSE 塞不进去，而发送循环可能正卡在 send 上
-        # （对端不读数据），两边都等不到对方，清理永远不执行，Connection 行漏删
+        # 订阅推送不另开协程：hub 交到门面的待发区时，发送循环空闲就塞 PUSH_UPDATES 叫醒它，由它
+        # 直接取走发送。队列满时不塞：那时发送循环不会等在 get() 上，发完队列会回来取待发区
+        def wake_sender() -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                push_queue.put_nowait(PUSH_UPDATES)
+
+        broker.bind_sender_(wake_sender)
+
+        # 收、发各起一个协程，下面等任意一边结束。不能只等发送循环：接收协程结束时队列要是满着，
+        # PUSH_CLOSE 塞不进去，而发送循环可能正卡在 send 上（对端不读数据），要等到 fail 的
+        # abort 兜底才醒（Sanic 上是框架取消本协程），这期间连接拆不掉，还会多打一条发送异常
+        recv_task = runtime.tasks.spawn(
+            client_handler(
+                conn,
+                pipe_ctx,
+                endpoint_executor,
+                broker,
+                push_queue,
+                flood_checker,
+                int(runtime.config.get("DEBUG", 0)),
+            ),
+            name=f"client_handler:{conn_id}",
+        )
         send_task = runtime.tasks.spawn(
             _send_side(conn, broker, push_queue, pack, flooded),
             name=f"ws_send:{conn_id}",
         )
+
+        # 删除当前长连接用不上的临时变量
+        del namespace
+        del default_limits
+    except connection.TooManyAnonymousConnections:
+        # 同一 IP 的匿名连接太多，被拒：new_connection 已经记过警告，不再打堆栈
+        close_connection(conn, connection.CLOSE_INTERNAL_ERROR)
+    except Exception as e:
+        # 初始化失败只能断开，finally 里会把可能已落库的 Connection 行清掉
+        err_msg = _("❌ [📡WSConnect] 连接初始化异常：{err}").format(
+            err=f"{type(e).__name__}:{e}"
+        )
+        replay.info(err_msg)
+        logger.exception(err_msg)
+        close_connection(conn, connection.CLOSE_INTERNAL_ERROR)
+    else:
+        assert recv_task is not None and send_task is not None
         try:
             await asyncio.wait(
                 (recv_task, send_task), return_when=asyncio.FIRST_COMPLETED
             )
         except asyncio.CancelledError:
-            # 框架取消了本协程（Sanic：传输层断开、关服）：照常拆连接，取消不往外抛。wait 被
-            # 取消时不会取消它在等的协程，由下面的清理去取消
-            pass
+            # 框架取消了本协程（Sanic：传输层断开、关服）：照常拆连接，取消不往外抛（撤销这次
+            # 取消请求，免得 cancelling() 一直留着计数）。wait 被取消时不会取消它在等的协程，
+            # 由下面的清理去取消
+            current_task.uncancel()
         if (protocol_error := conn.protocol_error()) is not None:
             err_msg = _("❌ [📡WSConnect] WS协议异常：{exc}").format(exc=protocol_error)
             replay.info(err_msg)
@@ -337,7 +342,6 @@ async def serve_connection(
         closing = True
         cleanup_task = asyncio.create_task(
             _cleanup_connection(
-                runtime,
                 conn_id,
                 (recv_task, send_task),
                 system_caller,
@@ -463,7 +467,6 @@ async def send_loop(
 
 
 async def _cleanup_connection(
-    runtime: WorkerRuntime,
     conn_id: str,
     io_tasks: tuple[asyncio.Task | None, ...],
     system_caller: SystemCaller,
@@ -476,37 +479,51 @@ async def _cleanup_connection(
     replay.info(close_msg)
     logger.info(close_msg)
     # 收发两个协程都停下来之后才退订、删行：接收协程可能正在处理消息（调 System、订阅），发送
-    # 循环可能正卡在 send 上
-    for task in io_tasks:
-        if task is not None:
-            await runtime.tasks.cancel(task)
+    # 循环可能正卡在 send 上。两个一起取消、一起等，不让发送循环多跑一阵（Sanic 上它可能正占着
+    # 发送锁，拖住关服时发的 1001）。用 wait 不用 await task，理由同 TaskRegistry.cancel
+    tasks = [task for task in io_tasks if task is not None and not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks)
     # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
     # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
     # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
     # 退订等到 UNSUBSCRIBE ack 才返回，之后的通知 Redis 不会再投给本进程
     if broker is not None:
         await broker.close()
+    # 断线 System 只给建立起来的连接跑（initialize 走完了）：初始化途中断开、被拒的连接，游戏
+    # 逻辑从没见过它
+    if endpoint_executor.initialized:
+        await _call_disconnect_system(system_caller, context, endpoint_executor)
+    await endpoint_executor.terminate()
+
+
+async def _call_disconnect_system(
+    system_caller: SystemCaller,
+    context: SystemContext,
+    endpoint_executor: EndpointExecutor,
+) -> None:
+    """调断线 System（没定义就跳过），出错只记日志"""
     try:
         system_caller.call_check(DISCONNECT_SYSTEM)
     except ValueError:
-        pass
-    else:
-        # 断线System不走Endpoint，要自己打时间戳，否则是上一次rpc的时间（可能很久以前）
-        context.timestamp = time.time()
-        try:
-            # 被顶号的连接已经不代表这个用户：账号在新连接上，新连接的登录逻辑可能已经跑过
-            # （比如把用户标成在线），再以用户身份跑断线 System 会把它覆盖掉。改以匿名身份跑，
-            # 和库里一致（顶号时本行 owner 已被改成 0）。顶号通知可能丢了、还在路上，这里从
-            # master 再核一次：刚被顶号时副本可能还是旧的。
-            # 核查和断线 System 不在一个事务里（Connection 在自己的簇），核查之后、断线 System
-            # 提交之前才被顶号的，仍会以用户身份跑
-            if context.caller and await endpoint_executor.alive_checker.kicked(context):
-                context.caller = 0
-            await system_caller.call(DISCONNECT_SYSTEM)
-        except BaseException as e:
-            err_msg = _(
-                "❌ [📡WSDisconnectHook] 断线System调用异常: {system} | {err}"
-            ).format(system=DISCONNECT_SYSTEM, err=f"{type(e).__name__}:{e}")
-            replay.info(err_msg)
-            logger.exception(err_msg)
-    await endpoint_executor.terminate()
+        return
+    # 断线System不走Endpoint，要自己打时间戳，否则是上一次rpc的时间（可能很久以前）
+    context.timestamp = time.time()
+    try:
+        # 被顶号的连接已经不代表这个用户：账号在新连接上，新连接的登录逻辑可能已经跑过
+        # （比如把用户标成在线），再以用户身份跑断线 System 会把它覆盖掉。改以匿名身份跑，
+        # 和库里一致（顶号时本行 owner 已被改成 0）。顶号通知可能丢了、还在路上，这里从
+        # master 再核一次：刚被顶号时副本可能还是旧的。
+        # 核查和断线 System 不在一个事务里（Connection 在自己的簇），核查之后、断线 System
+        # 提交之前才被顶号的，仍会以用户身份跑
+        if context.caller and await endpoint_executor.alive_checker.kicked(context):
+            context.caller = 0
+        await system_caller.call(DISCONNECT_SYSTEM)
+    except BaseException as e:
+        err_msg = _(
+            "❌ [📡WSDisconnectHook] 断线System调用异常: {system} | {err}"
+        ).format(system=DISCONNECT_SYSTEM, err=f"{type(e).__name__}:{e}")
+        replay.info(err_msg)
+        logger.exception(err_msg)

@@ -29,11 +29,14 @@ class WsConnection(Protocol):
     一个已经完成 ws 握手（HTTP upgrade）的连接。
 
     - `recv`：收一整条消息（分片已经重组），文本帧是 str、二进制帧是 bytes；给了 timeout 时超时返回
-      None。连接断开之后，各框架的行为不同：aiohttp 立即抛 `ConnectionClosed`；Sanic 可能一直挂着
+      None。连接断开之后，各框架的行为不同：aiohttp 在有限时间内抛 `ConnectionClosed`（本端 fail
+      之后对端又不读数据的，已经在等的 recv 要到 fail 的 abort 兜底时才醒）；Sanic 可能一直挂着
       （对端关闭后 recv_streaming 不返回），靠框架取消 handler、拆连接时取消接收协程兜底。
     - `send`：发一条消息，str 发文本帧、bytes 发二进制帧。连接已断开或已 fail 时抛 `ConnectionClosed`。
-    - `fail`：同步调用，尽力发出带 code、reason 的 close 帧后断开；可以重复调用，只有第一次的 code
-      生效；保证在有限时间内断开，不受对端配合与否影响。
+    - `fail`：同步调用，立即生效：返回时 close 码就已经定下，`serve_connection` 返回之后框架自己的
+      关闭（Sanic 的 `ws.close()`、aiohttp handler 返回时的 `write_eof()`）不能把它盖成 1000。尽力
+      发出带 code、reason 的 close 帧后断开；可以重复调用，只有第一次的 code 生效；保证在有限时间内
+      断开，正卡在发送上的 send 也要在有限时间内醒来（抛 `ConnectionClosed`），不受对端配合与否影响。
     - `protocol_error`：协议层的错误（帧格式错、消息超长等），没有就返回 None。对端正常掉线、直接断开
       不算。
 

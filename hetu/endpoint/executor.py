@@ -12,9 +12,15 @@ from time import time as now
 from typing import TYPE_CHECKING
 
 from ..common import Permission
+from ..common.snowflake_id import SnowflakeID
 from ..i18n import _
 from ..safelogging.filter import ContextFilter
-from .connection import ConnectionAliveChecker, del_connection, new_connection
+from .connection import (
+    ConnectionAliveChecker,
+    TooManyAnonymousConnections,
+    del_connection,
+    new_connection,
+)
 from .context import Context
 from .definer import EndpointDefine, EndpointDefines
 from .guard import ClientReject
@@ -78,25 +84,45 @@ class EndpointExecutor:
         # 某次调用前的核查发现本连接已被顶号（execute 随之返回失败）。websocket 层据此带
         # CLOSE_KICKED 断开，而不是当作普通的调用失败
         self.kicked = False
+        # initialize 落库 Connection 行还没走完（途中被取消或出错），见 terminate
+        self._insert_pending = False
 
     async def initialize(self, address: str):
-        """初始化连接，分配connection id，如果失败则raise异常"""
+        """
+        初始化连接：分配 connection id、落库本连接的 Connection 行，失败则 raise 异常。
+
+        id 先记进 context 再落库：落库途中被取消（客户端在初始化期间断开）或出错时，行可能已经
+        提交，之后调 terminate() 照样能删掉它；行没落库的话，删一行不存在的行也无害。
+        """
         if self.context.connection_id != 0:
             return
-        # 通过connection component分配自己一个连接id
-        conn_id = await new_connection(self.tbl_mgr, address)
-        if not conn_id:
-            raise RuntimeError(_("连接初始化失败，new_connection调用失败"))
+        conn_id = SnowflakeID().next_id()
         self.context.connection_id = conn_id
+        self._insert_pending = True
+        try:
+            await new_connection(self.tbl_mgr, address, conn_id)
+        except TooManyAnonymousConnections:
+            # 插入之前就被拒了，没有行要删：terminate() 什么也不做，被拒的连接不让库多干活
+            self.context.connection_id = 0
+            self._insert_pending = False
+            raise
+        self._insert_pending = False
         self.context.address = address
         ContextFilter.set_log_context(str(self.context))
+
+    @property
+    def initialized(self) -> bool:
+        """initialize 已经走完：本连接的 Connection 行已经落库，副本也同步了"""
+        return self.context.connection_id != 0 and not self._insert_pending
 
     async def terminate(self):
         """删除连接，失败不抛出异常"""
         if self.context.connection_id == 0:
             return
-        # 释放connection
-        await del_connection(self.tbl_mgr, self.context.connection_id)
+        # 释放connection。initialize 没走完时，这一行可能刚提交、副本还没同步到，先等同步再删
+        await del_connection(
+            self.tbl_mgr, self.context.connection_id, wait_synced=self._insert_pending
+        )
 
     def execute_check(self, endpoint: str, args: tuple) -> EndpointDefine | None:
         """检查调用是否合法"""

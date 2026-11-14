@@ -2,8 +2,9 @@
 serve_connection 的单元测试：用内存里的假连接（FakeWsConnection），不走网络、不起 Web 框架，直接驱动
 握手、收发和拆连接（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.3）。
 
-假连接按 aiohttp 的语义实现：fail 之后、对端断开之后，收发立即抛 ConnectionClosed，不靠框架取消
-连接的协程。走真网络、跑在 Sanic 上的测试在 test_websocket.py。
+假连接按 aiohttp 的语义实现：fail 之后、对端断开之后，新的收发立即抛 ConnectionClosed，不靠框架
+取消连接的协程；正卡在发送上的 send 要等 abort 兜底（ABORT_DELAY 秒）才醒。走真网络、跑在 Sanic 上的
+测试在 test_websocket.py。
 """
 
 import asyncio
@@ -29,6 +30,8 @@ pytestmark = pytest.mark.parametrize(
 
 # 独立 instance：别的模块在 server1、pytest_1 等 instance 上按各自的簇建过表
 INSTANCE = "ws_serve"
+# 连接关了之后，正卡在发送上的 send 过多久被 abort 叫醒（对应 aiohttp 适配层 fail 的 abort 兜底）
+ABORT_DELAY = 3.0
 _CLOSED = object()
 
 
@@ -45,11 +48,12 @@ class FakeWsConnection:
         # 第一次 fail 的 code / reason，也就是客户端收到的 close 帧
         self.close_code: int | None = None
         self.close_reason: str | None = None
-        # 对端不读数据：send 一直卡在 drain 上，fail 之后也不返回
+        # 对端不读数据：send 一直卡在 drain 上，连接关了之后要到 abort 兜底才醒
         self.stuck = False
         # protocol_error() 的返回值
         self.error: BaseException | None = None
         self._closed = False
+        self._aborted = asyncio.Event()
         self._inbox: asyncio.Queue[Any] = asyncio.Queue()
         self._outbox: asyncio.Queue[Any] = asyncio.Queue()
 
@@ -71,7 +75,8 @@ class FakeWsConnection:
         if self._closed:
             raise ConnectionClosed
         if self.stuck:
-            await asyncio.Event().wait()
+            await self._aborted.wait()
+            raise ConnectionClosed
         self._outbox.put_nowait(data)
 
     def fail(self, code: int, reason: str) -> None:
@@ -88,6 +93,7 @@ class FakeWsConnection:
         if not self._closed:
             self._closed = True
             self._inbox.put_nowait(_CLOSED)
+            asyncio.get_running_loop().call_later(ABORT_DELAY, self._aborted.set)
 
     def client_send_raw(self, data: str | bytes) -> None:
         self._inbox.put_nowait(data)
@@ -167,17 +173,44 @@ async def _connect(runtime: WorkerRuntime) -> tuple[FakeClient, asyncio.Task]:
     return client, task
 
 
-async def _finished(task: asyncio.Task, timeout: float = 5) -> None:
+async def _finished(
+    task: asyncio.Task, timeout: float = 5, *, cancelled: bool = False
+) -> None:
     """
     等 serve_connection 自己结束，超时算失败。不能用 asyncio.wait_for：它超时会取消 task，而
-    serve_connection 被取消时会照常拆完连接、正常返回，卡住了也测不出来
+    serve_connection 被取消时会照常拆完连接、正常返回，卡住了也测不出来。cancelled 为真时要求它
+    以取消结束，否则要求正常返回
     """
     done, _pending = await asyncio.wait({task}, timeout=timeout)
     if not done:
         task.cancel()
         await asyncio.wait({task}, timeout=timeout)
         pytest.fail(f"serve_connection 没有在 {timeout} 秒内自己结束")
-    task.result()  # 有异常就抛出来
+    if cancelled:
+        assert task.cancelled()
+    else:
+        task.result()  # 有异常就抛出来
+
+
+def _spy_disconnect_system(monkeypatch) -> list[int]:
+    """记下拆连接时跑了几次断线 System（记的是 connection_id），照常调原来的"""
+    calls: list[int] = []
+    call = websocket_server._call_disconnect_system
+
+    async def spy(system_caller, context, endpoint_executor):
+        calls.append(context.connection_id)
+        await call(system_caller, context, endpoint_executor)
+
+    monkeypatch.setattr(websocket_server, "_call_disconnect_system", spy)
+    return calls
+
+
+def _receiver_exit_logs(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "HeTu.root" and "接收协程结束" in r.getMessage()
+    ]
 
 
 async def _connection_rows(runtime: WorkerRuntime) -> int:
@@ -280,9 +313,14 @@ async def test_send_flooding_closes_with_rejected(monkeypatch, mod_runtime):
     await _wait_rows(mod_runtime, before)
 
 
-async def test_kicked_closes_with_kicked(mod_runtime):
-    """同一用户在别的连接登录：旧连接收到顶号通知后以 CLOSE_KICKED 断开，新连接照常可用"""
+async def test_kicked_closes_with_kicked(mod_runtime, caplog):
+    """
+    同一用户在别的连接登录：旧连接收到顶号通知后以 CLOSE_KICKED 断开、拆完（Connection 行删掉），
+    新连接照常可用。旧连接的接收协程发现连接已关，安静地退出（不再记"接收协程结束"）
+    """
+    caplog.set_level(logging.INFO, logger="HeTu.root")
     user_id = 299001
+    before = await _connection_rows(mod_runtime)
     old, old_task = await _connect(mod_runtime)
     assert await old.call("login", user_id) == ["rsp", {"id": user_id}]
     new, new_task = await _connect(mod_runtime)
@@ -290,24 +328,29 @@ async def test_kicked_closes_with_kicked(mod_runtime):
     await _finished(old_task, 10)
     assert old.conn.close_code == connection.CLOSE_KICKED
     assert old.conn.close_reason == connection.CLOSE_KICKED_REASON
+    await _wait_rows(mod_runtime, before + 1)  # 只剩新连接那一行
     assert await new.call("echo_response", ["alive"]) == ["rsp", ["alive"]]
+    assert _receiver_exit_logs(caplog) == []
     new.conn.disconnect()
     await _finished(new_task, 5)
+    await _wait_rows(mod_runtime, before)
 
 
 async def test_setup_failure_closes_with_internal_error(monkeypatch, mod_runtime):
-    """Connection 行落库之后初始化失败：CLOSE_INTERNAL_ERROR，已落库的行要删掉"""
+    """Connection 行落库之后初始化失败：CLOSE_INTERNAL_ERROR，已落库的行要删掉，断线 System 照常跑"""
 
     class BrokenBroker:
         def __init__(self, *args, **kwargs):
             raise RuntimeError("broker boom")
 
     monkeypatch.setattr(websocket_server, "SubscriptionBroker", BrokenBroker)
+    disconnects = _spy_disconnect_system(monkeypatch)
     before = await _connection_rows(mod_runtime)
     client, task = await _connect(mod_runtime)
     await _finished(task, 5)
     assert client.conn.close_code == connection.CLOSE_INTERNAL_ERROR
     await _wait_rows(mod_runtime, before)
+    assert len(disconnects) == 1  # initialize 走完了，连接算建立过
 
 
 async def test_send_error_closes_with_internal_error(monkeypatch, mod_runtime):
@@ -331,8 +374,12 @@ async def test_send_error_closes_with_internal_error(monkeypatch, mod_runtime):
 # ==== 收发途中断开 ====
 
 
-async def test_peer_disconnect_runs_cleanup(mod_runtime):
-    """收的途中对端断开：拆连接跑完，断线 System 以用户身份跑，Connection 行删掉"""
+async def test_peer_disconnect_runs_cleanup(mod_runtime, caplog):
+    """
+    收的途中对端断开：拆连接跑完，断线 System 以用户身份跑，Connection 行删掉。正常掉线不算接收
+    协程出错，不记"接收协程结束"（拆连接时会记"连接断开"）
+    """
+    caplog.set_level(logging.INFO, logger="HeTu.root")
     user_id = 299002
     before = await _connection_rows(mod_runtime)
     client, task = await _connect(mod_runtime)
@@ -341,12 +388,21 @@ async def test_peer_disconnect_runs_cleanup(mod_runtime):
     await _finished(task, 5)
     await _wait_rows(mod_runtime, before)
     assert await _disconnect_count(mod_runtime, user_id) == 1
+    assert _receiver_exit_logs(caplog) == []
+    assert any(
+        f"连接断开：{client.conn.conn_id}" in r.getMessage() for r in caplog.records
+    )
 
 
 async def test_peer_gone_while_sending_runs_cleanup(mod_runtime):
-    """发的途中发现对端已断开（send 抛 ConnectionClosed）：拆连接跑完，Connection 行删掉"""
+    """
+    发的途中发现对端已断开（send 抛 ConnectionClosed）：拆连接跑完，断线 System 以用户身份跑，
+    Connection 行删掉
+    """
+    user_id = 299004
     before = await _connection_rows(mod_runtime)
     client, task = await _connect(mod_runtime)
+    assert await client.call("login", user_id) == ["rsp", {"id": user_id}]
     conn = client.conn
 
     async def gone(data):
@@ -357,13 +413,16 @@ async def test_peer_gone_while_sending_runs_cleanup(mod_runtime):
     await _finished(task, 5)
     assert conn.close_code is None
     await _wait_rows(mod_runtime, before)
+    assert await _disconnect_count(mod_runtime, user_id) == 1
 
 
-async def test_cleanup_runs_when_queue_full_and_send_stuck(monkeypatch, mod_runtime):
+async def test_cleanup_is_prompt_when_queue_full_and_send_stuck(
+    monkeypatch, mod_runtime
+):
     """
     对端不读数据，发送循环卡在 send 上；接收协程这时出错结束，队列满着，PUSH_CLOSE 塞不进去。
-    以前只等发送循环，两边都等不到对方，清理永远不执行（aiohttp 上不会有框架来取消连接协程）。
-    现在收发任意一边结束就拆：Connection 行要删掉
+    以前只等发送循环：aiohttp 上没有框架来取消连接协程，要等 fail 的 abort 兜底把卡住的 send
+    叫醒才能拆连接，还会多一条发送异常。现在收发任意一边结束就拆，远早于 abort 兜底
     """
     monkeypatch.setattr(websocket_server, "PUSH_QUEUE_SIZE", 2)
     before = await _connection_rows(mod_runtime)
@@ -373,7 +432,7 @@ async def test_cleanup_runs_when_queue_full_and_send_stuck(monkeypatch, mod_runt
     for _ in range(3):
         client.send(["rpc", "report_ctx_timestamp"])
     client.conn.client_send_raw("not binary")  # 接收协程以 CLOSE_REJECTED 结束
-    await _finished(task, 5)
+    await _finished(task, ABORT_DELAY / 2)
     assert client.conn.close_code == connection.CLOSE_REJECTED
     await _wait_rows(mod_runtime, before)
 
@@ -405,10 +464,90 @@ async def test_framework_cancel_stops_both_sides_before_unsubscribe(
     assert await client.call("login", user_id) == ["rsp", {"id": user_id}]
     task.cancel()
     await _finished(task, 5)
-    assert not task.cancelled()
+    assert task.cancelling() == 0  # 吞掉的取消请求已经撤销
     assert running_at_close == [[]]
     await _wait_rows(mod_runtime, before)
     assert await _disconnect_count(mod_runtime, user_id) == 1
+
+
+async def test_cancel_during_initialize_still_deletes_connection_row(
+    monkeypatch, mod_runtime
+):
+    """
+    Connection 行已经提交、initialize 还在等副本同步时，连接协程被取消（Sanic：客户端握手完立刻
+    断开）：拆连接照样要把这一行删掉，删之前先等副本同步；连接没建立起来，不跑断线 System。以前
+    initialize 在拆连接的 try 外面、行 id 也是返回之后才记下，这一行就永远留在库里
+    """
+    from hetu.data.backend import Backend
+
+    entered = asyncio.Event()
+    calls: list[int] = []
+    wait_for_synced = Backend.wait_for_synced
+
+    async def blocked_once(self):
+        calls.append(1)
+        if not entered.is_set():
+            entered.set()
+            await asyncio.Event().wait()  # 卡在这里，直到被取消
+        await wait_for_synced(self)
+
+    monkeypatch.setattr(Backend, "wait_for_synced", blocked_once)
+    disconnects = _spy_disconnect_system(monkeypatch)
+    before = await _connection_rows(mod_runtime)
+    conn = FakeWsConnection()
+    task = _serve(mod_runtime, conn)
+    await FakeClient(conn).handshake()
+    await asyncio.wait_for(entered.wait(), 5)
+    await _wait_rows(mod_runtime, before + 1)  # 行已经提交（副本上也看得到了）
+    task.cancel()
+    await _finished(task, 5, cancelled=True)
+    await _wait_rows(mod_runtime, before)
+    # 删行之前又等了一次副本同步：这一行刚提交时副本上可能还没有，随机读到副本就删不掉
+    assert len(calls) == 2
+    # 连接没建立起来（initialize 没走完），游戏逻辑从没见过它，不跑断线 System
+    assert disconnects == []
+
+
+async def test_anonymous_limit_rejection_does_no_cleanup_work(monkeypatch, mod_runtime):
+    """
+    同一 IP 的匿名连接数到了上限，新连接被拒：以 1011 断开。拆连接不碰库：不跑断线 System、不等
+    副本同步、不删行。这个限制是防刷连接的，被拒的连接不能让库（master）多干活
+    """
+    from hetu.data.backend import Backend
+    from hetu.endpoint import executor as executor_module
+
+    monkeypatch.setattr(connection, "MAX_ANONYMOUS_CONNECTION_BY_IP", 1)
+    first = FakeWsConnection(client_ip="10.9.9.9")
+    first_task = _serve(mod_runtime, first)
+    first_client = FakeClient(first)
+    await first_client.handshake()
+    # 回了 rsp 说明 initialize 已经走完：这条匿名连接已经落库、副本也同步了
+    assert await first_client.call("report_ctx_timestamp") == ["rsp", "ok"]
+
+    work: list[str] = []
+    wait_for_synced = Backend.wait_for_synced
+
+    async def counting_synced(self):
+        work.append("wait_for_synced")
+        await wait_for_synced(self)
+
+    async def counting_del(*args, **kwargs):
+        work.append("del_connection")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Backend, "wait_for_synced", counting_synced)
+        mp.setattr(executor_module, "del_connection", counting_del)
+        disconnects = _spy_disconnect_system(mp)
+        second = FakeWsConnection(client_ip="10.9.9.9")
+        second_task = _serve(mod_runtime, second)
+        await FakeClient(second).handshake()
+        await _finished(second_task, 5)
+    assert second.close_code == connection.CLOSE_INTERNAL_ERROR
+    assert work == []
+    assert disconnects == []
+
+    first.disconnect()
+    await _finished(first_task, 5)
 
 
 async def test_protocol_error_is_logged(mod_runtime, caplog):

@@ -280,6 +280,8 @@ async def client_handler(
     ctx = executor.context
     last_data = None
     cancelled = False
+    # 连接已经关了（对端断开，或顶号核查、发送那边已经 fail 了它），不算异常，也不用再 fail
+    connection_closed = False
     # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
     # 连接断开后 conn.recv() 在 aiohttp 上抛 ConnectionClosed；在 Sanic 上可能一直挂着，等
@@ -367,7 +369,7 @@ async def client_handler(
         # 唯一合法的静默出口：连接本来就在被 serve_connection 拆，别再插手
         cancelled = True
     except ConnectionClosed:
-        exit_reason = _("WebSocket 已关闭")
+        connection_closed = True
     except RedisConnectionError as e:
         exit_reason = _("Redis ConnectionError")
         err_msg = _("❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}").format(
@@ -395,17 +397,22 @@ async def client_handler(
         # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）
         for task in list(deferred):
             task.cancel()
-        # 除了被取消（连接本来就在拆），任何退出路径都必须把连接一起 fail 掉并留下日志。
-        # 否则连接会变成"半死"：TCP 仍 ESTABLISHED、协议层 ping/pong 照常、客户端 socket
-        # 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到回应，而且两端一行
-        # 错误日志都没有（实测：卡在 WatchRange 上无限等待）。
+        # 除了被取消（连接本来就在拆）和连接已经关了，任何退出路径都必须把连接一起 fail 掉并
+        # 留下日志。否则连接会变成"半死"：TCP 仍 ESTABLISHED、协议层 ping/pong 照常、客户端
+        # socket 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到回应，而且两端
+        # 一行错误日志都没有（实测：卡在 WatchRange 上无限等待）。
+        # 连接已经关了的不打 INFO：每次正常掉线都会走到这里（aiohttp 上 recv 直接抛
+        # ConnectionClosed），拆连接时还会记一条"连接断开"
         if not cancelled:
-            close_msg = _("⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}").format(
-                reason=exit_reason
-            )
-            replay.info(close_msg)
-            logger.info(close_msg)
-            close_connection(conn, close_code)
+            if connection_closed:
+                logger.debug("[📡WSReceiver] connection closed, receiver exits")
+            else:
+                close_msg = _(
+                    "⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}"
+                ).format(reason=exit_reason)
+                replay.info(close_msg)
+                logger.info(close_msg)
+                close_connection(conn, close_code)
             try:
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:
