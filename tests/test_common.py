@@ -191,14 +191,17 @@ async def test_fixed_worker_keeper(monkeypatch):
     """开发模式分配器：用本机进程序号，零协调"""
     from hetu.data.backend.worker_keeper import FixedWorkerKeeper
 
+    monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
     monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
     assert await FixedWorkerKeeper().get_worker_id() == 0  # 单进程模式
 
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 3")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "3")
     keeper = FixedWorkerKeeper()
     assert await keeper.get_worker_id() == 3
     assert await keeper.get_worker_id() == 3  # 幂等
 
+    # 过渡期：没设 HETU_WORKER_INDEX 时从 Sanic 给 worker 设的标识里取
+    monkeypatch.delenv("HETU_WORKER_INDEX")
     monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv12")  # sanic对两位数不留空格
     assert await FixedWorkerKeeper().get_worker_id() == 12
 
@@ -563,6 +566,35 @@ async def test_runtime_post_configures_and_closes_each_backend_once(
     await runtime.start_backends()
     await runtime.close_backends()
     assert calls == {"post_configure": 1, "close": 1}
+
+
+async def test_runtime_stop_runs_once_when_called_twice(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """Sanic 关服时 after_server_stop 可能跑两遍，而且两遍并发：终端里 Ctrl+C 会把 SIGINT 发给
+    整个进程组，管理进程再转发一次；第二个信号打断第一遍后，Sanic 的 _run_shutdown_coro 会把它
+    整个重跑一遍，第一遍的 task 还挂着接着跑。stop() 要只真正关一次：租约只释放一次，后端只关一次"""
+    from hetu.data.backend import Backend
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    calls = {"close": 0, "release": 0}
+    close, release = Backend.close, SnowflakeLease.release
+
+    async def counting_close(self):
+        calls["close"] += 1
+        return await close(self)
+
+    async def counting_release(self):
+        calls["release"] += 1
+        return await release(self)
+
+    monkeypatch.setattr(Backend, "close", counting_close)
+    monkeypatch.setattr(SnowflakeLease, "release", counting_release)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    await asyncio.gather(runtime.stop(), runtime.stop())
+    await runtime.stop()
+    assert calls == {"close": 1, "release": 1}
 
 
 def test_runtime_default_backend_is_first_configured(monkeypatch):
@@ -963,9 +995,27 @@ async def test_fixed_worker_keeper_leaves_tool_range(monkeypatch):
     """SQLite 服务器 worker 的序号不能进工具进程的预留段"""
     from hetu.data.backend.worker_keeper import FixedWorkerKeeper
 
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 1000")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "1000")
     with pytest.raises(KeyError):
         await FixedWorkerKeeper().get_worker_id()
+
+
+def test_worker_ident(monkeypatch):
+    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和 Sanic 的一样），其他进程是 "Main "。"""
+    from hetu.common.helper import worker_ident, worker_index
+
+    monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
+    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
+    assert (worker_index(), worker_ident()) == (None, "Main ")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "3")
+    assert (worker_index(), worker_ident()) == (3, "Srv 3")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "12")
+    assert worker_ident() == "Srv12"
+    # HETU_WORKER_INDEX 优先于 Sanic 的标识
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 5")
+    assert worker_index() == 12
+    monkeypatch.delenv("HETU_WORKER_INDEX")
+    assert (worker_index(), worker_ident()) == (5, "Srv 5")
 
 
 async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path):

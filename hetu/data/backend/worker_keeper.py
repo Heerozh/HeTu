@@ -6,14 +6,12 @@
 """
 
 import logging
-import os
-import re
 from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
-from ...common.helper import get_machine_id, lease_owner_exited
+from ...common.helper import get_machine_id, lease_owner_exited, worker_index
 from ...common.permission import Permission
 from ...common.snowflake_id import (
     FENCE_MARGIN_SEC,
@@ -65,8 +63,8 @@ class FixedWorkerKeeper(WorkerKeeper):
 
     ## id 从哪来
 
-    用 Sanic 给每个 worker 进程设的 `SANIC_WORKER_IDENTIFIER`（形如 "Srv 0"、"Srv 1"，
-    见 sanic/worker/process.py）。单进程模式下该变量不存在，退化为 0。
+    用多进程管理进程给每个 worker 设的序号（`HETU_WORKER_INDEX`，见
+    `hetu.common.helper.worker_index`）。单进程模式下没有序号，退化为 0。
 
     刻意**不做**成配置项：一旦允许手工指定，就会出现"一部分进程指定了、另一部分忘记指定"
     的混用场景，而两种分配方式互相看不见对方占用了哪些 id，会静默撞车产生重复雪花ID——
@@ -83,18 +81,17 @@ class FixedWorkerKeeper(WorkerKeeper):
         self.worker_id = -1
 
     @staticmethod
-    def _sanic_worker_index() -> int:
-        """从 Sanic 的 worker 标识里取出本进程在本机内的序号"""
-        ident = os.environ.get("SANIC_WORKER_IDENTIFIER", "")
-        match = re.search(r"(\d+)", ident)
-        return int(match.group(1)) if match else 0
+    def _worker_index() -> int:
+        """本进程在本机内的 worker 序号，单进程模式下是 0"""
+        index = worker_index()
+        return 0 if index is None else index
 
     @override
     async def get_worker_id(self) -> int:
         if self.worker_id >= 0:
             return self.worker_id
 
-        worker_id = self._sanic_worker_index()
+        worker_id = self._worker_index()
         # [TOOL_WORKER_ID_FLOOR, MAX_WORKER_ID] 留给 hetu call / shell（SQLiteToolWorkerKeeper）
         if worker_id >= TOOL_WORKER_ID_FLOOR:
             raise KeyError(
@@ -125,7 +122,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
     """SQLite 后端上工具进程（hetu call / shell）的 Worker ID 租约。
 
     SQLite 上的服务器 worker 用本机进程序号（`FixedWorkerKeeper`），不做任何协调；工具进程
-    不能也用序号（没有 `SANIC_WORKER_IDENTIFIER`，会拿到 0 和服务器撞号），也不能共用一个
+    不能也用序号（没有 worker 序号，会拿到 0 和服务器撞号），也不能共用一个
     固定 id（大模型常并行跑命令，两个工具进程同 id 照样重号，还违反时间戳水位的单写者前提）。
     所以工具进程在预留段 [TOOL_WORKER_ID_FLOOR, MAX_WORKER_ID] 里用库里的带过期 KV
     （`__hetu_kv`，维护锁也在用）互斥地租，语义与 `RedisWorkerKeeper` 一致：SET NX 抢、

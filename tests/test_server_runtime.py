@@ -150,3 +150,25 @@ async def test_renamed_task_releases_its_name():
     await asyncio.sleep(0)
     again = reg.spawn(_forever(), name="x")
     await reg.cancel(again)
+
+
+def test_hetu_config_defaults_and_attribute_access():
+    """HeTuConfig：只收大写键，可以按属性读，没给的键用默认值（和原来 Sanic 的默认值相同）"""
+    import pickle
+
+    from hetu.server.config import DEFAULTS, HeTuConfig
+
+    config = HeTuConfig(
+        {"NAMESPACE": "game", "lower_key": 1, "GRACEFUL_SHUTDOWN_TIMEOUT": 3}
+    )
+    assert config.NAMESPACE == config["NAMESPACE"] == "game"
+    assert "lower_key" not in config
+    assert config.GRACEFUL_SHUTDOWN_TIMEOUT == 3
+    assert config.WEBSOCKET_MAX_SIZE == DEFAULTS["WEBSOCKET_MAX_SIZE"] == 2**20
+    assert config.DEBUG is False
+    with pytest.raises(AttributeError):
+        _ = config.NOT_SET
+    # Sanic 多进程时要把配置 pickle 给 spawn 出来的 worker
+    restored = pickle.loads(pickle.dumps(config))
+    assert type(restored) is HeTuConfig
+    assert restored == config

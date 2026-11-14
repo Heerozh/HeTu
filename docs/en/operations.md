@@ -312,7 +312,6 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `rediss://`, or `sqlite:///<file>` for dev)      |
 | `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                   |
 | `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)         |
-| `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy |
 | `--authkey KEY`    | `""`                       | Crypto-layer auth key for handshake signature; empty disables it                                    |
 
 Run `hetu start --help` for the full list.

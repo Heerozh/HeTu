@@ -12,6 +12,7 @@ Sanic adapter: builds the Sanic app and wires its lifecycle into `WorkerRuntime`
 
 import asyncio
 import logging
+import logging.config
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,7 +23,9 @@ from sanic.worker.process import WorkerProcess
 from ... import webext
 from ...i18n import _
 from ...safelogging.default import DEFAULT_LOGGING_CONFIG
+from ...safelogging.formatter import ContextAutoFormatter
 from .. import websocket as _websocket  # noqa: F401  导入即注册 ws 路由
+from ..config import HeTuConfig
 from ..runtime import (
     DEFAULT_STARTUP_TIMEOUT,
     LEASE_LOST_EXIT_CODE,
@@ -121,12 +124,24 @@ def worker_main(app_name: str, config: Mapping[str, Any]) -> Sanic:
     多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何注册的listener。
     后续Workers进程才会执行注册的listener。
     """
+    # 测试、嵌入场景直接传 dict，补上默认值
+    if not isinstance(config, HeTuConfig):
+        config = HeTuConfig(config)
+
     # 加载玩家的app文件、建簇、把配置传给各模块
     prepare_worker(config)
 
+    # 日志由 HeTu 自己 dictConfig，不交给 Sanic。深度 Debug 时把 ctx 等字段逐行附在日志后面
+    ContextAutoFormatter.LOG_EXTRA = int(config["DEBUG"]) > 1
+    logging.config.dictConfig(config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
+
     # 加载web服务器
-    app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
+    app = Sanic(app_name, configure_logging=False)
     app.update_config(config)
+    # 访问日志交给前面的反向代理；Sanic 的 Inspector 不用（以后由 CLI 提供 reload）。配置里就算还
+    # 留着这两个键也关掉
+    app.config.ACCESS_LOG = False
+    app.config.INSPECTOR = False
 
     # 设置管理进程等ack的超时。此函数在管理进程也会执行一次（AppLoader.load），
     # 所以在这里改类属性就能生效。注意WorkerManager.THRESHOLD是模块导入时从

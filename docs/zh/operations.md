@@ -212,7 +212,6 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--db URL`          | `redis://127.0.0.1:6379/0`| 后端 DSN；scheme 选择后端（`redis://`、`rediss://`、开发用的 `sqlite:///<库文件>`）                  |
 | `--workers N`       | `4`                       | Worker 进程数（经验值：`CPU * 1.2`）                                                                |
 | `--debug 0/1/2`     | `0`                       | `1` 启用热重载 + 详细日志；`2` 额外启用 Python 协程调试（慢 90%）                                    |
-| `--cert DIR`        | `""`                      | TLS 证书目录，或 `auto` 使用自签名证书；通常建议在反向代理处终止 TLS                                  |
 | `--authkey KEY`     | `""`                      | 加密层握手签名的认证密钥；留空禁用                                                                  |
 
 运行 `hetu start --help` 获取完整列表。

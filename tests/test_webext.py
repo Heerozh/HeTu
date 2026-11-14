@@ -74,7 +74,6 @@ def build_server(app_file):
             "LOGGING": DEFAULT_LOGGING_CONFIG,
             "DEBUG": False,
             "WORKER_NUM": 1,
-            "ACCESS_LOG": False,
         },
     )
 
@@ -206,3 +205,39 @@ def test_reserved_and_invalid_uri_rejected():
     @hetu.define_route("/hetumeta")
     async def similar(request):
         pass
+
+
+def test_worker_main_turns_off_removed_sanic_options(tmp_path, monkeypatch):
+    """访问日志、Inspector 都已删掉：配置里就算还留着这两个键，Sanic 也不打开。深度 Debug
+    （DEBUG > 1）时控制台日志附带 ctx 等 extra 字段"""
+    import logging
+
+    from hetu.safelogging.formatter import ContextAutoFormatter
+
+    monkeypatch.setattr(ContextAutoFormatter, "LOG_EXTRA", False)
+    # DEBUG > 1 会把这几个 logger 调成 DEBUG，测完还原，免得影响同进程后面的用例
+    loggers = [logging.getLogger(name) for name in (None, "HeTu.root", "sanic")]
+    levels = [lg.level for lg in loggers]
+    try:
+        app = worker_main(
+            f"Hetu-{NAMESPACE}-{next(_app_seq)}",
+            {
+                "APP_FILE": str(make_app_file(tmp_path, "")),
+                "NAMESPACE": NAMESPACE,
+                "INSTANCES": ["webext_1"],
+                "LISTEN": "0.0.0.0:875",
+                "PACKET_LAYERS": [{"type": "jsonb"}],
+                "BACKENDS": {},
+                "LOGGING": DEFAULT_LOGGING_CONFIG,
+                "DEBUG": 2,
+                "WORKER_NUM": 1,
+                "ACCESS_LOG": True,
+                "INSPECTOR": True,
+            },
+        )
+    finally:
+        for lg, level in zip(loggers, levels, strict=True):
+            lg.setLevel(level)
+    assert app.config.ACCESS_LOG is False
+    assert app.config.INSPECTOR is False
+    assert ContextAutoFormatter.LOG_EXTRA is True

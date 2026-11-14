@@ -232,6 +232,12 @@ class WorkerRuntime:
         self.cleanup_tasks: set[asyncio.Task] = set()
         # 进程该以什么码退出：单进程模式丢租约时由适配层置为 LEASE_LOST_EXIT_CODE
         self.exit_code = 0
+        # stop() 只真正关一次（见 stop）；上一次关到一半被打断时，已经释放的租约、已经关掉的后端
+        # 不再来第二次
+        self._stop_lock = asyncio.Lock()
+        self._stopped = False
+        self._lease_released = False
+        self._closed_backends: set[int] = set()
 
     @property
     def default_backend(self) -> Backend:
@@ -483,9 +489,21 @@ class WorkerRuntime:
         4. 停续约、水位预留循环，写精确水位并释放 Worker ID；
         5. 关后端。
 
+        可以重复调用、并发调用，只真正关一次。Sanic 关服时 after_server_stop 可能跑两遍，而且
+        两遍并发：终端里 Ctrl+C 会把 SIGINT 发给整个进程组，管理进程再转发一次；第二个信号打断
+        第一遍后，Sanic 的 `_run_shutdown_coro` 会把它整个重跑一遍，第一遍的 task 还挂着接着跑。
+
         Shut down in a fixed order: wait for connections, cancel leftover connection
-        tasks, stop FutureCalls, release the lease, close backends.
+        tasks, stop FutureCalls, release the lease, close backends. Safe to call more
+        than once, even concurrently; only the first call does the work.
         """
+        async with self._stop_lock:
+            if self._stopped:
+                return
+            await self._stop()
+            self._stopped = True
+
+    async def _stop(self) -> None:
         timeout = self.graceful_shutdown_timeout
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -507,13 +525,18 @@ class WorkerRuntime:
         # 水位之后再写一次。调用方保证连接已拆完、FutureCalls 已停（见 stop），不会再发号，
         # 最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
         lease = self.snowflake_lease
-        if lease is not None:
+        if lease is not None and not self._lease_released:
             await lease.stop_loops()
             await lease.release()
+            self._lease_released = True
 
-        # 关闭后端连接池。"default" 和第一个后端是同一个，只关一次
+        # 关闭后端连接池。"default" 和第一个后端是同一个，只关一次；上一次关到一半被打断的，
+        # 已经关掉的不再关
         for name, backend in self._unique_backends():
+            if id(backend) in self._closed_backends:
+                continue
             logger.info(
                 _("⌚ [📡Server] Closing backend {attrib}...").format(attrib=name)
             )
             await backend.close()
+            self._closed_backends.add(id(backend))
