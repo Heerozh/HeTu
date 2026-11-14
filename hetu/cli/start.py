@@ -315,5 +315,10 @@ class StartCommand(CommandInterface):
                 )
                 raise
 
+        # 单进程模式丢租约时 on_lease_lost 停服并记下非 0 退出码（app.stop() 本身退出码是 0），
+        # 让 docker/systemd/k8s 按失败重启
+        exit_code = getattr(app.ctx, "exit_code", 0)
         # 退出log listener
         log_handlers.stop_all_logging_handlers()
+        if exit_code:
+            sys.exit(exit_code)

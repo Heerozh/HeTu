@@ -1945,6 +1945,36 @@ def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_
     assert seen_at_release == [set()], f"释放租约时还在跑：{seen_at_release}"
 
 
+@pytest.mark.timeout(30)
+def test_lease_lost_in_single_process_stops_with_failure_code(monkeypatch, test_server):
+    """单进程模式没有管理进程（没有 app.multiplexer）。以前续约发现租约丢了就调
+    app.m.restart()，抛 AttributeError，续约任务死掉，服务器照常跑却再也发不出号。现在停服并
+    记下非 0 退出码，交给 docker/systemd/k8s 重启（app.stop() 自己的退出码是 0）"""
+    from hetu.data.backend import snowflake_lease
+    from hetu.server.main import LEASE_LOST_EXIT_CODE
+
+    monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
+
+    async def lost_keep_alive():
+        raise SystemExit("lease lost")
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        # 模拟租约过期后被别人拿走：下一次续约就会发现
+        lease = test_server.ctx.snowflake_lease
+        monkeypatch.setattr(lease.keeper, "keep_alive", lost_keep_alive)
+        for _ in range(100):
+            if getattr(test_server.ctx, "exit_code", 0):
+                return
+            await asyncio.sleep(0.05)
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert test_server.ctx.snowflake_lease.lost
+    assert getattr(test_server.ctx, "exit_code", 0) == LEASE_LOST_EXIT_CODE
+
+
 @pytest.mark.timeout(20)
 def test_websocket_fragmented_rpc_and_following_message(test_server):
     """加密压缩包跨多帧（含事件循环切换），必须完整重组且不打乱后续 nonce。"""

@@ -45,6 +45,9 @@ ACK_TIMEOUT_MARGIN = 10.0
 # "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
 # 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
 UNLIMITED_ACK_THRESHOLD = 10**9
+# 单进程模式丢租约后 hetu start 的退出码（见 on_lease_lost）。app.stop() 自己的退出码是 0，
+# docker/systemd/k8s 会当成正常退出、不重启
+LEASE_LOST_EXIT_CODE = 1
 # 开服失败时停续约循环、释放租约的限时（秒）：开服失败多半是后端出了问题，释放卡住不能挡住中止
 LEASE_ABANDON_TIMEOUT = 5.0
 
@@ -135,8 +138,7 @@ async def start_backends(app: Sanic):
     app.ctx.__setattr__("snowflake_lease", lease)
     # 拿到租约立刻开始续约、预留水位，不能等开始监听：发号围栏在拿到租约 45 秒后跳闸，
     # 而之后的启动 System 最长能跑 STARTUP_TIMEOUT（默认 60）秒
-    # app.m 只在丢租约时才去取，和原来的写法一致
-    lease.on_lost = lambda: app.m.restart()
+    lease.on_lost = lambda: on_lease_lost(app)
     lease.start_loops()
 
 
@@ -279,6 +281,38 @@ async def worker_close(app):
     # FutureCalls 执行的 System 会发号，要在释放租约之前停掉
     await stop_future_calls(app)
     await close_backends(app)
+
+
+def on_lease_lost(app: Sanic) -> None:
+    """
+    续约发现 worker id 已经不属于本进程：再发号就可能和接手的进程撞号（发号围栏会拦住，但
+    本进程从此发不出号），必须换一个新进程重新租。
+
+    多进程交给 Sanic 管理进程只重启本 worker。单进程没有管理进程（没有 app.multiplexer，
+    app.m 会抛 AttributeError）：停服并记下非 0 退出码，由 hetu start 退出时带出，交给
+    docker/systemd/k8s 重启。
+    """
+    if hasattr(app, "multiplexer"):
+        app.multiplexer.restart()
+        return
+    logger.error(
+        _(
+            "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
+        )
+    )
+    app.ctx.exit_code = LEASE_LOST_EXIT_CODE
+    if app.state.is_running:
+        app.stop()
+    else:
+        # 还在开服：Sanic 用 run_until_complete 跑各个启动钩子，这时 app.stop() 停掉 loop 会让
+        # 开服报错。进入正常服务再停；登记进 Sanic 的任务表，没等到就关服时由它取消
+        app.add_task(_stop_when_serving(app), name="hetu:stop_on_lease_lost")
+
+
+async def _stop_when_serving(app: Sanic):
+    while not app.state.is_running:
+        await asyncio.sleep(0.1)
+    app.stop()
 
 
 def _report_task_death(task: asyncio.Task) -> None:

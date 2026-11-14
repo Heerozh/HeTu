@@ -495,6 +495,52 @@ async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
     assert all(t.done() for t in loops)
 
 
+def test_lease_lost_restarts_only_this_worker_in_multi_process():
+    """多进程模式丢租约：交给 Sanic 管理进程只重启本 worker，新进程会重新租 id"""
+    from types import SimpleNamespace
+
+    from hetu.server.main import on_lease_lost
+
+    calls = []
+    app = SimpleNamespace(
+        ctx=SimpleNamespace(),
+        multiplexer=SimpleNamespace(restart=lambda: calls.append("restart")),
+        stop=lambda: calls.append("stop"),
+    )
+    on_lease_lost(app)
+    assert calls == ["restart"]
+    assert not hasattr(app.ctx, "exit_code")
+
+
+@pytest.mark.parametrize("serving", [True, False])
+def test_lease_lost_stops_single_process_with_failure_code(serving):
+    """单进程模式丢租约：没有管理进程可以重启 worker，停服并记下非 0 退出码。已在正常服务就
+    马上停；还在开服（Sanic 用 run_until_complete 跑启动钩子，这时停 loop 会让开服报错）就
+    登记一个任务，等进入正常服务再停"""
+    from types import SimpleNamespace
+
+    from hetu.server.main import LEASE_LOST_EXIT_CODE, on_lease_lost
+
+    calls = []
+
+    def add_task(coro, *, name):
+        coro.close()
+        calls.append(("add_task", name))
+
+    app = SimpleNamespace(
+        ctx=SimpleNamespace(),
+        state=SimpleNamespace(is_running=serving),
+        stop=lambda: calls.append("stop"),
+        add_task=add_task,
+    )
+    on_lease_lost(app)
+    assert app.ctx.exit_code == LEASE_LOST_EXIT_CODE != 0
+    if serving:
+        assert calls == ["stop"]
+    else:
+        assert calls == [("add_task", "hetu:stop_on_lease_lost")]
+
+
 async def test_snowflake_lease_fence():
     """发号围栏：租约超出安全期就拒绝发号，而不是继续发可能重复的ID"""
     from hetu.common.snowflake_id import (
