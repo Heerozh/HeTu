@@ -282,13 +282,21 @@ class NodeRegistrar:
         )
 
     async def write(self) -> bool:
-        """按当前状态写一次登记。围栏关着时不写，返回 False"""
+        """
+        按当前状态写一次登记，限时 WRITE_TIMEOUT 秒（超时抛 TimeoutError）。围栏关着时不写，返回 False。
+
+        限时是因为看过围栏之后要尽快落地：围栏的安全期离别的进程能接手这个 worker id 只差 5 秒
+        （LEASE_SAFE_SEC 和 REUSE_STALE_SEC），等连接池、重试拖得太久，HSET 可能落在接手之后，盖掉对方的登记。
+
+        Write this worker's entry once, within WRITE_TIMEOUT seconds; skipped if the fence is closed.
+        """
         async with self._lock:
             if not fence_open(self.keeper):
                 return False
-            await self._client().hset(
-                REGISTRY_KEY, self.field, encode_entry(self.entry())
-            )
+            async with asyncio.timeout(WRITE_TIMEOUT):
+                await self._client().hset(
+                    REGISTRY_KEY, self.field, encode_entry(self.entry())
+                )
             return True
 
     async def _run(self) -> None:

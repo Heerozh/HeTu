@@ -279,6 +279,23 @@ async def test_shutdown_steps_give_up_when_redis_hangs(monkeypatch):
     assert registrar._task is None
 
 
+async def test_each_write_is_time_limited(monkeypatch):
+    """
+    登记循环的每次写都限时：看过围栏之后要尽快落地，围栏的安全期离别的进程能接手只差 5 秒。Redis 卡住时这一次
+    放弃、下个周期再写，不会一直挂着
+    """
+    monkeypatch.setattr(registry, "WRITE_TIMEOUT", 0.05)
+    monkeypatch.setattr(registry, "WRITE_INTERVAL", 0.02)
+    client, keeper = FakeRedis(), FakeKeeper()
+    client.hang = True
+    registrar = make_registrar(client, keeper)
+    registrar.start()
+    try:
+        await until(lambda: client.calls >= 3)
+    finally:
+        await registrar.stop()
+
+
 async def test_write_failures_are_reported_once(monkeypatch, caplog):
     monkeypatch.setattr(registry, "WRITE_INTERVAL", 0.02)
     client, keeper = FakeRedis(), FakeKeeper()
