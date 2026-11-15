@@ -30,8 +30,10 @@ from ..i18n import _
 ADVERTISED_ADDRESS_CONFIG_KEY = "DISCOVERY_ADVERTISED_ADDRESS"
 SYSFS_NET = "/sys/class/net"
 DEFAULT_REDIS_PORT = 6379
-# 本机的容器网桥：Docker 的 docker0、自定义网络的 br-<12 位十六进制>，podman、CNI、libvirt 的
-_CONTAINER_BRIDGE = re.compile(r"docker0|br-[0-9a-f]{12}|(?:podman|cni|virbr).*")
+# 本机的容器网桥：Docker 的 docker0、自定义网络的 br-<12 位十六进制>，podman、CNI、libvirt、LXD、Incus 的
+_CONTAINER_BRIDGE = re.compile(
+    r"docker0|br-[0-9a-f]{12}|(?:podman|cni|virbr|lxdbr|incusbr).*"
+)
 _SIOCGIFCONF = 0x8912
 # struct ifreq 的大小：16 字节网卡名，加上 24 字节（64 位）或 16 字节（32 位）的 union
 _IFREQ_SIZE = 40 if struct.calcsize("P") == 8 else 32
@@ -300,7 +302,8 @@ def host_network_problem(
         iflink = int(read("iflink"))
     except OSError, ValueError:
         return None
-    if iflink == ifindex:
+    # iflink 是 0：没绑底层网卡的隧道（GRE、IPIP 等），不是成对的虚拟网卡
+    if iflink in (ifindex, 0):
         return None
     try:
         uevent = read("uevent").splitlines()
@@ -363,13 +366,19 @@ def network_problem_message(ip: str, problem: NetworkProblem, derived: bool) -> 
         ).format(ip=ip, device=problem.device, cause=cause)
     return _(
         "❌ 节点发现只支持 host 网络：广播地址 {ip} 在 {device} 上，{device} 是容器网络的虚拟网卡"
-        "（veth 之类：iflink {iflink} ≠ ifindex {ifindex}），别的机器上的网关连不到。{hint}"
+        "（veth 之类：iflink {iflink} ≠ ifindex {ifindex}），别的机器上的网关连不到。{hint}{already}"
     ).format(
         ip=ip,
         device=problem.device,
         iflink=problem.iflink,
         ifindex=problem.ifindex,
         hint=host_network_hint(),
+        already=_(
+            "已经是 host 网络的话（比如 k8s 的 hostNetwork，到 Redis 走的是 CNI 的虚拟网卡），在 LISTEN 里"
+            "写明本机的对外 IP，比如 10.0.3.17:2466"
+        )
+        if derived
+        else "",
     )
 
 

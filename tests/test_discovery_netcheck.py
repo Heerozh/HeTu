@@ -177,7 +177,8 @@ def test_master_endpoint_needs_a_host(master, words):
 
 
 def test_source_address_follows_the_route():
-    assert source_address(UNREACHABLE_PEER, 6379) == lan_ip()
+    ip = lan_ip()  # 先调：没有路由时它跳过，不然下一行先抛出来，用例就失败了
+    assert source_address(UNREACHABLE_PEER, 6379) == ip
 
 
 def test_source_address_rejects_a_local_redis():
@@ -208,6 +209,8 @@ def test_network_mode_by_interface(tmp_path):
             "br0": (4, 4, "DEVTYPE=bridge\nINTERFACE=br0\nIFINDEX=4\n"),
             "ens5.100": (5, 2, "DEVTYPE=vlan\nINTERFACE=ens5.100\nIFINDEX=5\n"),
             "macvlan0": (6, 2, "INTERFACE=macvlan0\nIFINDEX=6\n"),
+            # 没绑底层网卡的隧道（GRE、IPIP）：iflink 是 0
+            "gre1": (13, 0, "INTERFACE=gre1\nIFINDEX=13\n"),
             "eth0": (9, 10, "INTERFACE=eth0\nIFINDEX=9\n"),
         },
     )
@@ -218,6 +221,11 @@ def test_network_mode_by_interface(tmp_path):
         "10.3.0.2": "br0",
         "10.1.0.2": "ens5.100",
         "10.4.0.2": "macvlan0",
+        "10.5.0.2": "gre1",
+        "172.17.0.3": "eth0:1",  # 别名标签：网卡是 eth0
+        "172.17.0.4": "docker0:1",
+        "10.10.0.1": "lxdbr0",
+        "10.11.0.1": "incusbr0",
         "172.17.0.2": "eth0",
         "172.17.0.1": "docker0",
         "172.18.0.1": "br-0123456789ab",
@@ -230,17 +238,29 @@ def test_network_mode_by_interface(tmp_path):
     def problem(ip: str) -> NetworkProblem | None:
         return host_network_problem(ip, sysfs=sysfs, interfaces=interfaces)
 
-    for ip in ("10.0.0.2", "10.0.0.3", "10.2.0.2", "10.3.0.2", "10.1.0.2", "10.9.0.1"):
+    for ip in (
+        "10.0.0.2",
+        "10.0.0.3",
+        "10.2.0.2",
+        "10.3.0.2",
+        "10.1.0.2",
+        "10.9.0.1",
+        "10.5.0.2",
+    ):
         assert problem(ip) is None, ip
     assert problem("10.8.8.8") is None  # 不是本机的地址：判断不了
     assert problem("172.17.0.2") == NetworkProblem("veth", "eth0", 9, 10)
     assert problem("10.4.0.2") == NetworkProblem("veth", "macvlan0", 6, 2)
+    assert problem("172.17.0.3") == NetworkProblem("veth", "eth0", 9, 10)
     for ip, device in (
         ("172.17.0.1", "docker0"),
         ("172.18.0.1", "br-0123456789ab"),
         ("10.88.0.1", "podman0"),
         ("10.22.0.1", "cni0"),
         ("192.168.122.1", "virbr0"),
+        ("172.17.0.4", "docker0"),
+        ("10.10.0.1", "lxdbr0"),
+        ("10.11.0.1", "incusbr0"),
     ):
         assert problem(ip) == NetworkProblem("bridge", device), ip
 
@@ -254,7 +274,8 @@ def test_local_interfaces_include_loopback():
 
 
 def test_preflight_derives_the_address_from_the_route_to_redis():
-    assert preflight(node_config(), interfaces={}) == f"{lan_ip()}:2466"
+    ip = lan_ip()
+    assert preflight(node_config(), interfaces={}) == f"{ip}:2466"
 
 
 def test_preflight_uses_the_listen_ip_and_port():
@@ -280,7 +301,8 @@ def test_preflight_needs_proxies_count(count):
 
 def test_preflight_accepts_real_ip_header_instead_of_proxies_count():
     config = node_config(PROXIES_COUNT=0, REAL_IP_HEADER="X-Real-IP")
-    assert preflight(config, interfaces={}) == f"{lan_ip()}:2466"
+    ip = lan_ip()
+    assert preflight(config, interfaces={}) == f"{ip}:2466"
 
 
 def test_preflight_rejects_a_redis_on_this_machine():
@@ -303,6 +325,23 @@ def test_preflight_rejects_container_networking(tmp_path):
     assert "--network host" in message
     assert "network_mode: host" in message
     assert "hostNetwork: true" in message
+
+
+def test_derived_address_on_a_virtual_nic_also_suggests_writing_the_ip(tmp_path):
+    """
+    从 0.0.0.0 推出来的地址在虚拟网卡上：可能是 bridge 网络，也可能已经是 host 网络、只是到 Redis 走的是 CNI 的
+    虚拟网卡（k8s hostNetwork）。说明里两条出路都给；LISTEN 写明了 IP 的就只说改用 host 网络
+    """
+    ip = lan_ip()
+    sysfs = fake_sysfs(tmp_path, {"eth0": (14, 15, "INTERFACE=eth0\nIFINDEX=14\n")})
+    with pytest.raises(DiscoveryCheckFailed) as e:
+        preflight(node_config(), sysfs=sysfs, interfaces={ip: "eth0"})
+    assert "LISTEN 里写明本机的对外 IP" in str(e.value)
+    with pytest.raises(DiscoveryCheckFailed) as e:
+        preflight(
+            node_config(LISTEN=f"{ip}:2466"), sysfs=sysfs, interfaces={ip: "eth0"}
+        )
+    assert "LISTEN 里写明本机的对外 IP" not in str(e.value)
 
 
 def test_preflight_rejects_a_redis_behind_the_local_docker_bridge():
