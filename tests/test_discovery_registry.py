@@ -558,6 +558,17 @@ def test_nodes_command_summarizes_the_registry(tmp_path, redis_urls):
     assert out["namespaces"] == ["game"]
 
 
+@pytest.mark.timeout(60)
+def test_nodes_command_does_not_leak_the_password(tmp_path):
+    """连不上 Redis 时以 3 退出，报错里的地址打码：排查命令的输出常被贴到工单、群里"""
+    code, out = run_nodes(
+        "--db", "redis://hetu:supersecret@127.0.0.1:1/0", cwd=tmp_path
+    )
+    assert code == 3, out
+    assert "supersecret" not in json.dumps(out, ensure_ascii=False)
+    assert "hetu:***@127.0.0.1:1" in out["error"]
+
+
 def test_nodes_command_needs_redis(tmp_path):
     code, out = run_nodes("--db", f"sqlite:///{tmp_path / 'x.db'}", cwd=tmp_path)
     assert code == 2

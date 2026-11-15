@@ -291,6 +291,39 @@ def lease_identity(value: str) -> str:
     return value.split(LEASE_NONCE_SEP, 1)[0]
 
 
+def mask_url_password(url: str) -> str:
+    """
+    把地址里的口令打码，给报错和日志用：用户信息里的（redis://user:口令@host）、查询串里的
+    （?password=口令，redis-py 也认）都换成 ***。没有口令、解析不了的原样返回。
+
+    Mask the password in a URL (userinfo and the `password` query parameter).
+    """
+    from urllib.parse import parse_qsl, urlencode, urlparse
+
+    try:
+        parsed = urlparse(url)
+        password = parsed.password
+    except ValueError:
+        return url
+    netloc = parsed.netloc
+    if password is not None:
+        userinfo, _sep, host = netloc.rpartition("@")
+        netloc = f"{userinfo.split(':', 1)[0]}:***@{host}"
+    query = parsed.query
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if any(key.lower() == "password" for key, _value in pairs):
+        query = urlencode(
+            [(k, "***" if k.lower() == "password" else v) for k, v in pairs], safe="*"
+        )
+    # 在原字符串上换，别的部分保持原样（geturl() 会把 unix:/// 改写成 unix:/）
+    masked = url
+    if netloc != parsed.netloc:
+        masked = masked.replace(parsed.netloc, netloc, 1)
+    if query != parsed.query:
+        masked = masked.replace("?" + parsed.query, "?" + query, 1)
+    return masked
+
+
 def windows_pid_exited(pid: int) -> bool:
     """
     本机上确定已经没有进程在用这个 pid 了。只在 Windows 上判断，其它平台恒为 False。
