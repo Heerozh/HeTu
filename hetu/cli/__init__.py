@@ -14,6 +14,7 @@ from ..i18n import _
 from .build import BuildCommand
 from .call import CallCommand
 from .data import GetCommand, RangeCommand
+from .dns import DnsCommand
 from .init import InitCommand
 from .migrate import MigrateCommand
 from .nodes import NodesCommand
@@ -31,6 +32,7 @@ COMMANDS = [
     RangeCommand,
     ShellCommand,
     NodesCommand,
+    DnsCommand,
 ]
 
 

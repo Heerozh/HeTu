@@ -59,6 +59,7 @@ dev = [
     "austin-dist>=4.0.0",
     "autolang",
     "basedpyright>=1.38.1",
+    "dnspython>=2.9.2",
     "docker>=7.1.0",
     "griffe>=1.0",
     "ipykernel>=7.1.0",
