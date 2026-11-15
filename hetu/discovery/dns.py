@@ -63,11 +63,22 @@ REDIS_TIMEOUT = 2.0
 # 只告警一次的名字最多记多少个（别人拿各种名字来扫时不至于无限增长）
 MAX_WARNED_NAMES = 100
 
-# 只读 ACL 用户：只能 HGETALL hetu:nodes。以实测为准，测试里用它建用户跑一遍
-ACL_COMMAND = (
-    "ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all "
+# 只读 ACL 用户：只能 HGETALL hetu:nodes。以实测为准，测试里用它建用户跑一遍；{password} 是口令的占位，
+# 运维文档（中英）里写的命令和它一致，也有测试对照
+ACL_COMMAND_TEMPLATE = (
+    "ACL SETUSER hetu-dns on >{password} resetkeys ~hetu:nodes resetchannels -@all "
     "+hgetall +ping"
 )
+
+
+def acl_command() -> str:
+    """
+    建 hetu dns 用的只读用户的命令，口令的占位按当前语言写
+
+    The command that creates the read-only user for hetu dns.
+    """
+    return ACL_COMMAND_TEMPLATE.format(password=_("口令"))
+
 
 EXIT_USAGE = 2
 EXIT_NOT_READY = 3
@@ -918,7 +929,7 @@ def _acl_hint() -> str:
     return _(
         "请用只能读 hetu:nodes 的只读用户（ACL 不随复制同步，要在 hetu dns 连的那台副本上建；用的不是 0 "
         "号库时还要加 +select）：{command}"
-    ).format(command=ACL_COMMAND)
+    ).format(command=acl_command())
 
 
 async def check_redis(client: Any, redis_url: str) -> list[str]:
@@ -1136,7 +1147,10 @@ def format_report(service: DnsService, selection: Selection, url: str) -> str:
     if others:
         lines.append(
             _("别的 namespace：{others}").format(
-                others="，".join(f"{ns}（{n}）" for ns, n in sorted(others.items()))
+                others=_("，").join(
+                    _("{ns}（{count} 条）").format(ns=ns, count=n)
+                    for ns, n in sorted(others.items())
+                )
             )
         )
     return "\n".join(lines)

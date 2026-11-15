@@ -530,7 +530,7 @@ ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgeta
 - 原生集群的判断按异常类型（`MovedError`、`ClusterDownError` 等）：redis-py 解析错误时会去掉开头的错误码，按消息
   前缀认不出来。刚建好的集群里，没收敛完的节点回的是 CLUSTERDOWN，也当成集群。
 - §6.5 的 ACL 命令（加 `+select`，用的是 12 号库）用 Redis 8.10.3 实测：redis-py 8 默认的 RESP3 握手（HELLO）、
-  `CLIENT SETINFO` 都不受影响，`HGETALL hetu:nodes` 能读，别的 key、`ROLE` 被拒（测试里按 `ACL_COMMAND` 建用户）。
+  `CLIENT SETINFO` 都不受影响，`HGETALL hetu:nodes` 能读，别的 key、`ROLE` 被拒（测试里按 `ACL_COMMAND_TEMPLATE` 建用户）。
 - `--once` 打印的是给人看的报告（会答哪些地址、哪些不答和原因、解析不了的登记、别的 namespace），不是一行 JSON。
 - 审查后加的：不带口令也能连上 Redis 就告警（§6.5）。hetu dns 自己的用户权限再小，副本的 default 用户没设口令时
   网关一旦被攻破照样全开；文档写明副本的 default 用户要设口令或禁用。

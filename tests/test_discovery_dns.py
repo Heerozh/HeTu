@@ -28,7 +28,7 @@ from fixtures.backends import REDIS_BACKENDS
 
 from hetu.discovery import dns as hdns
 from hetu.discovery.dns import (
-    ACL_COMMAND,
+    ACL_COMMAND_TEMPLATE,
     DnsCheckFailed,
     DnsService,
     NodeAddress,
@@ -738,6 +738,17 @@ async def test_unreachable_nodes_are_not_answered():
     assert "连不上 10.0.3.18:2466" in selection.excluded["10.0.3.18"]
 
 
+def test_documented_acl_command_matches_the_code():
+    """运维文档（中英）里建只读用户的命令和代码里的一致：改了一边，另一边要跟着改"""
+    from pathlib import Path
+
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    zh = (docs / "zh" / "operations.md").read_text(encoding="utf-8")
+    en = (docs / "en" / "operations.md").read_text(encoding="utf-8")
+    assert ACL_COMMAND_TEMPLATE.format(password="口令") in zh
+    assert ACL_COMMAND_TEMPLATE.format(password="password") in en
+
+
 def test_listen_outside_loopback_is_warned():
     assert check_listen("127.0.0.1") == []
     assert check_listen("localhost") == []  # 主机名按解析出的地址判断
@@ -813,9 +824,9 @@ def acl_url(replica_url: str, user: str, password: str) -> str:
 
 
 def create_dns_user(replica_io, replica_url: str) -> str:
-    """按文档里的命令（ACL_COMMAND）在副本上建只读用户，返回它的地址。不是 0 号库要加 +select"""
+    """按文档里的命令（ACL_COMMAND_TEMPLATE）在副本上建只读用户，返回它的地址。不是 0 号库要加 +select"""
     # 去掉开头的 ACL SETUSER hetu-dns
-    rules = ACL_COMMAND.replace(">口令", ">dns-secret").split()[3:]
+    rules = ACL_COMMAND_TEMPLATE.format(password="dns-secret").split()[3:]
     replica_io.execute_command("ACL", "SETUSER", "hetu-dns", *rules, "+select")
     return acl_url(replica_url, "hetu-dns", "dns-secret")
 
