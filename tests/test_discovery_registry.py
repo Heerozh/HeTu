@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 import redis.asyncio
+from fixtures.backends import REDIS_BACKENDS
 from websockets.legacy.client import connect
 
 from hetu.discovery import registry
@@ -350,9 +351,13 @@ def clean_registry():
 
 
 @pytest.fixture
-def redis_urls(ses_redis_service):
+def redis_urls(request):
     """这个模块独占 13 号库，用例前清空"""
     import redis as sync_redis
+
+    if "redis" not in REDIS_BACKENDS:
+        pytest.skip("HETU_TEST_BACKENDS 里没有 redis")
+    ses_redis_service = request.getfixturevalue("ses_redis_service")
 
     master, replica = (url.rsplit("/", 1)[0] + "/13" for url in ses_redis_service)
     io = sync_redis.Redis.from_url(master)
@@ -482,6 +487,29 @@ def test_server_registers_and_withdraws_before_it_stops_listening(
 
 
 @pytest.mark.timeout(60)
+def test_interrupted_stop_does_not_wait_again(
+    tmp_path, redis_urls, clean_registry, monkeypatch
+):
+    """关服在注销等待里被打断，再调关服时接着关，不再等一遍"""
+    monkeypatch.setattr(server_runtime, "DEREGISTER_WAIT", 30.0)
+    config = server_config(tmp_path, redis_urls)
+
+    async def scenario(server, sock, io):
+        await server.start(sock)
+        worker_id = server.runtime.snowflake_lease.worker_id
+        stopping = asyncio.create_task(server.stop())
+        await wait_entry(io, worker_id, lambda e: e.state == STATE_DRAINING)
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+        started = time.monotonic()
+        await server.stop()
+        assert time.monotonic() - started < 10
+        assert await entry_of(io, worker_id) is None
+
+    run_server(config, scenario)
+
+
+@pytest.mark.timeout(60)
 def test_lost_lease_leaves_the_registry_alone(
     tmp_path, redis_urls, clean_registry, monkeypatch
 ):
@@ -592,6 +620,40 @@ def test_nodes_command_without_config_only_suggests_its_own_flags(tmp_path):
     assert code == 3
     assert "--db" in out["error"]
     assert "--instance" not in out["error"]
+
+
+@pytest.mark.timeout(60)
+def test_nodes_command_reads_the_servant_unless_told_otherwise(tmp_path, redis_urls):
+    """
+    默认读 servant，--master 读 master。servant 指向副本上另一个空库，两边读到的就不一样
+    """
+    import redis as sync_redis
+
+    master, replica = redis_urls
+    empty_replica = replica.rsplit("/", 1)[0] + "/14"
+    config = tmp_path / "config.yml"
+    config.write_text(
+        f"""
+NAMESPACE: game
+INSTANCES: [s1]
+BACKENDS:
+  main:
+    type: redis
+    master: {master}
+    servants: [{empty_replica}]
+""",
+        encoding="utf-8",
+    )
+    io = sync_redis.Redis.from_url(master)
+    io.hset(REGISTRY_KEY, "0", encode_entry(make_entry(ts=time.time())))
+    io.close()
+    code, out = run_nodes("--config", str(config), cwd=tmp_path)
+    assert code == 0, out
+    assert (out["read_from"], out["nodes"]) == ("servant", [])
+    code, out = run_nodes("--config", str(config), "--master", cwd=tmp_path)
+    assert code == 0, out
+    assert out["read_from"] == "master"
+    assert [node["addr"] for node in out["nodes"]] == ["10.0.3.17"]
 
 
 def test_nodes_command_needs_redis(tmp_path):

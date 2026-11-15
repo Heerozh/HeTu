@@ -24,6 +24,7 @@ import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 import pytest
+from fixtures.backends import REDIS_BACKENDS
 
 from hetu.discovery import dns as hdns
 from hetu.discovery.dns import (
@@ -721,6 +722,22 @@ async def test_refresh_loop_survives_unexpected_errors(monkeypatch, caplog):
     assert any("重算答案出错" in r.getMessage() for r in caplog.records)
 
 
+async def test_unreachable_nodes_are_not_answered():
+    """新地址先从网关连一次：连不上的先不答，原因写进 excluded"""
+
+    async def connect(addr: str, port: int, timeout: float) -> str | None:
+        return None if addr == "10.0.3.17" else "ConnectionRefusedError"
+
+    now = time.time()
+    client = FakeClient({b"0": entry(ts=now), b"1": entry(addr="10.0.3.18", ts=now)})
+    service = DnsService(client, namespace="game", prober=Prober(2466, connect=connect))
+    selection = await service.refresh(wait_probes=True)
+    assert selection is not None
+    assert answers(ask(service, a_query())) == ["10.0.3.17"]
+    assert selection.pending == ["10.0.3.18"]
+    assert "连不上 10.0.3.18:2466" in selection.excluded["10.0.3.18"]
+
+
 def test_listen_outside_loopback_is_warned():
     assert check_listen("127.0.0.1") == []
     assert check_listen("localhost") == []  # 主机名按解析出的地址判断
@@ -764,9 +781,13 @@ def test_bridge_network_is_rejected(tmp_path):
 
 
 @pytest.fixture
-def replica(ses_redis_service):
+def replica(request):
     """(master 的 io, 副本的地址)，用 12 号库，用例前清空；用例里在副本上建的 ACL 用户用完删掉"""
     import redis as sync_redis
+
+    if "redis" not in REDIS_BACKENDS:
+        pytest.skip("HETU_TEST_BACKENDS 里没有 redis")
+    ses_redis_service = request.getfixturevalue("ses_redis_service")
 
     master_url, replica_url = (
         url.rsplit("/", 1)[0] + "/12" for url in ses_redis_service
@@ -913,6 +934,10 @@ async def test_replica_without_a_default_password_is_warned(replica):
 
 
 @pytest.mark.timeout(60)
+@pytest.mark.skipif(
+    "redis_cluster" not in REDIS_BACKENDS,
+    reason="HETU_TEST_BACKENDS 里没有 redis_cluster",
+)
 async def test_native_cluster_is_rejected(ses_redis_cluster_service):
     """连到不持有 hetu:nodes 的集群节点：收到 MOVED，第一版不支持原生集群，以 2 退出"""
     import redis as sync_redis
@@ -990,6 +1015,8 @@ def test_hetu_dns_end_to_end(replica):
         mapping={
             "0": entry(addr="127.0.0.1", port=node_port, ts=time.time()),
             "1": entry(addr="10.255.255.1", port=node_port, ts=time.time(), ns="other"),
+            # 同一个 namespace、探测不通：假节点只监听 127.0.0.1
+            "2": entry(addr="127.0.0.2", port=node_port, ts=time.time()),
         },
     )
     proc = subprocess.Popen(
@@ -1028,6 +1055,7 @@ def test_hetu_dns_end_to_end(replica):
     assert "答案变了" in log, log
     assert "收到第一个查询" in log, log
     assert "权限太大" not in log, log
+    assert "从网关连不上节点 127.0.0.2" in log, log
     # 测试用的副本 default 用户没设口令
     assert "不带口令也能连上" in log, log
 
@@ -1049,6 +1077,7 @@ def test_once_reports_what_would_be_answered(replica):
                     addr="127.0.0.3", port=node_port, ts=now, state=STATE_DRAINING
                 ),
                 "3": entry(addr="127.0.0.4", port=node_port + 1, ts=now),
+                "4": entry(addr="127.0.0.5", port=node_port, ts=now),
             },
         )
         proc = _run_dns(
@@ -1075,7 +1104,28 @@ def test_once_reports_what_would_be_answered(replica):
     assert "127.0.0.2  登记" in report, report
     assert "127.0.0.3  关服中" in report, report
     assert f"127.0.0.4  端口 {node_port + 1}" in report, report
+    assert f"127.0.0.5  从网关连不上 127.0.0.5:{node_port}" in report, report
     assert "dns-secret" not in report  # 口令打码
+
+
+@pytest.mark.timeout(120)
+def test_listen_port_in_use_exits_with_3(replica):
+    """--listen 的端口被占了：以 3 退出（环境未就绪），说明是监听失败"""
+    _master, replica_url, replica_io = replica
+    url = create_dns_user(replica_io, replica_url)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        port = taken.getsockname()[1]
+        proc = _run_dns(
+            "--namespace",
+            "game",
+            "--listen",
+            f"127.0.0.1:{port}",
+            env={"HETU_DNS_REDIS": url},
+        )
+    stderr = proc.stderr.decode("utf-8", "replace")
+    assert proc.returncode == 3, stderr
+    assert "监听" in stderr
 
 
 @pytest.mark.parametrize("url", ["http://10.0.1.20:6379/0", "localhost:6379"])

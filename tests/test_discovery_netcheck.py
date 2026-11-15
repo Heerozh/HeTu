@@ -388,8 +388,13 @@ def run_start(monkeypatch, config: str) -> None:
 
 
 def test_start_runs_the_checks_before_anything_else(tmp_path, monkeypatch, capsys):
-    """检查不过：打出说明、以 2 退出，不开服（app.py 不存在也轮不到加载它）"""
+    """检查不过：打出说明、以 2 退出，不开服（不 bind 端口、不加载 app.py，它也不存在）"""
     monkeypatch.chdir(tmp_path)
+
+    def serve(cls, config, workers):
+        raise AssertionError("检查没过就不该开服")
+
+    monkeypatch.setattr(StartCommand, "serve", classmethod(serve))
     backend = f"type: sqlite\n    master: sqlite:///{tmp_path / 'x.db'}"
     config = write_start_config(tmp_path, "true", backend)
     with pytest.raises(SystemExit) as e:
