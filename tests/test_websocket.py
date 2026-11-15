@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
-from fixtures.server_harness import ServerHarness
+from fixtures.http_servers import ALL_HTTP_SERVERS
+from fixtures.server_harness import make_harness, routine_timeout_for
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 import hetu
@@ -20,7 +21,6 @@ from hetu.endpoint import connection
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import websocket as websocket_server
-from hetu.server import worker_main
 from hetu.system import SystemClusters
 
 logger = logging.getLogger("HeTu.root")
@@ -30,22 +30,31 @@ logging.lastResort.setLevel(logging.DEBUG)
 
 
 @pytest.fixture
-def test_server(ses_redis_service):
+def ws_redis_url(ses_redis_service, http_server) -> str:
+    """
+    test_server 用的 Redis 地址：两个 Web 服务器栈各用一个库。session 级的 Redis 不清库，用例会在
+    库里留下数据，同一个用例在两个栈上各跑一遍时，后跑的会看到先跑的留下的数据
+    """
+    import re
+
+    match = re.match(r"(redis://127\.0\.0\.1:\d+)/0", ses_redis_service[0])
+    assert match
+    return f"{match.group(1)}/{ALL_HTTP_SERVERS.index(http_server)}"
+
+
+@pytest.fixture
+def test_server(request, ws_redis_url, http_server):
     SystemClusters()._clear()
     EndpointDefines()._clear()
     # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
     # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
     webext.clear()
-    import re
-
-    match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])
-    assert match
-    port = match.group(1)
 
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
-    server = worker_main(
+    harness = make_harness(
+        http_server,
         "Hetu-test",
         {
             "APP_FILE": app_file,
@@ -60,7 +69,7 @@ def test_server(ses_redis_service):
             "BACKENDS": {
                 "Redis": {
                     "type": "Redis",
-                    "master": f"redis://127.0.0.1:{port}/0",
+                    "master": ws_redis_url,
                 }
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
@@ -69,9 +78,9 @@ def test_server(ses_redis_service):
             "DEBUG": False,
             "WORKER_NUM": 4,
         },
+        routine_timeout_for(request.node),
     )
 
-    harness = ServerHarness(server)
     yield harness
 
     harness.stop()
@@ -88,8 +97,10 @@ def test_websocket_started(test_server):
     # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
 
-def test_custom_http_route(test_server):
+def test_custom_http_route(test_server, http_server):
     # app.py里用@hetu.define_route注册的普通HTTP端点应该能正常提供服务
+    if http_server == "aiohttp":
+        pytest.skip("webext 的声明是 Sanic 形状的，第 6 步才支持 aiohttp")
     response = test_server.get("/webext-test/abc.zip")
     assert response.status == 200
     assert response.text == "downloaded abc.zip"
@@ -1780,7 +1791,7 @@ def test_websocket_motd(test_server):
 
 @pytest.mark.timeout(20)
 def test_websocket_setup_failure_deletes_connection_row(
-    monkeypatch, test_server, ses_redis_service
+    monkeypatch, test_server, ws_redis_url
 ):
     """initialize() 落库之后初始化再出错（这里让订阅管理器构造失败）：连接断开，
     且本连接那行 Connection 必须被删掉，不能永远留在库里（匿名连接数按 IP 计数）"""
@@ -1791,7 +1802,7 @@ def test_websocket_setup_failure_deletes_connection_row(
             raise RuntimeError("broker boom")
 
     monkeypatch.setattr(websocket_server, "SubscriptionBroker", BrokenBroker)
-    r = redis.Redis.from_url(ses_redis_service[0])
+    r = redis.Redis.from_url(ws_redis_url)
     pattern = "pytest_1:Connection:*:id:*"
     before = len(r.keys(pattern))
 
@@ -1814,7 +1825,7 @@ def test_websocket_setup_failure_deletes_connection_row(
 
 @pytest.mark.timeout(30)
 def test_shutdown_waits_for_connection_cleanup(
-    monkeypatch, test_server, ses_redis_service
+    monkeypatch, test_server, ws_redis_url
 ):
     """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
     里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
@@ -1828,7 +1839,7 @@ def test_shutdown_waits_for_connection_cleanup(
         await cleanup(*args, **kwargs)
 
     monkeypatch.setattr(websocket_server, "_cleanup_connection", slow_cleanup)
-    r = redis.Redis.from_url(ses_redis_service[0])
+    r = redis.Redis.from_url(ws_redis_url)
     pattern = "pytest_1:Connection:*:id:*"
     before = len(r.keys(pattern))
 
@@ -2164,7 +2175,7 @@ def test_websocket_handshake_timeout_closes_with_rejected(monkeypatch, test_serv
 
 @pytest.mark.timeout(30)
 def test_websocket_disconnect_during_initialize_deletes_connection_row(
-    monkeypatch, test_server, ses_redis_service
+    monkeypatch, test_server, ws_redis_url
 ):
     """
     客户端握手完立刻断开，服务端还在 initialize 里（Connection 行已经提交、在等副本同步）：Sanic
@@ -2185,7 +2196,7 @@ def test_websocket_disconnect_during_initialize_deletes_connection_row(
         await wait_for_synced(self)
 
     monkeypatch.setattr(Backend, "wait_for_synced", slow_once)
-    r = redis.Redis.from_url(ses_redis_service[0])
+    r = redis.Redis.from_url(ws_redis_url)
     pattern = "pytest_1:Connection:*:id:*"
     before = len(r.keys(pattern))
 
@@ -2199,3 +2210,24 @@ def test_websocket_disconnect_during_initialize_deletes_connection_row(
     assert len(r.keys(pattern)) == before, (
         "初始化途中断开的连接把 Connection 行留在库里了"
     )
+
+
+@pytest.mark.timeout(20)
+def test_websocket_path_with_trailing_slash(test_server):
+    """带尾斜杠的路径也能连上（Sanic 默认就匹配，aiohttp 栈另外注册了一条）"""
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["slash"]])
+        assert await client.recv() == ["rsp", ["slash"]]
+
+    test_server.websocket("/hetu/pytest_1/", mimic=routine)
+
+
+def test_no_access_log(test_server, caplog):
+    """访问日志交给前面的反向代理：两个栈都不打"""
+    caplog.set_level(logging.DEBUG)
+    response = test_server.get("/")
+    assert response.status == 200
+    access = [r for r in caplog.records if r.name in ("aiohttp.access", "sanic.access")]
+    assert access == []

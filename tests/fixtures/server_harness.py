@@ -1,9 +1,10 @@
 """
 测试里起停 HeTu 服务、跑客户端 routine 的封装。
 
-测试只经它和服务器打交道，不直接碰 Web 框架：换 aiohttp 时只在这里加一个实现，测试本身不动
-（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.0）。现在内部用
-sanic_testing。
+测试只经它和服务器打交道，不直接碰 Web 框架（设计稿
+docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.0）。两个实现：`SanicHarness` 内部用
+sanic_testing；`AiohttpHarness` 每次调用都新建事件循环和 `AiohttpServer`，走的就是 `hetu start` 单进程的
+开服、关服代码。用 `make_harness` 按栈建。
 
 两个实现都必须满足的语义，测试依赖它们：
 
@@ -11,7 +12,8 @@ sanic_testing。
    任务）和关服钩子（拆连接、停后台任务、释放租约、关后端）都跑，每次一个新的事件循环。
 2. routine 跑在服务器的同一个事件循环里，服务开始监听、后台任务起来之后才开始。所以 routine
    能和服务端的 monkeypatch 共享 asyncio 对象，也能直接读 `runtime` 上的状态。
-3. routine 抛出的 `ConnectionClosedOK` 被吞掉；其他异常等服务停下之后原样抛给测试。
+3. routine 抛出的 `ConnectionClosedOK` 被吞掉；其他异常等服务停下之后原样抛给测试。routine 跑超过
+   `routine_timeout` 秒就被取消，测试以 TimeoutError 失败（见 `routine_timeout_for`）。
 4. routine 返回后，先关掉它开的所有客户端连接，再停服务。
 5. Linux / macOS 上跑 uvloop。
 
@@ -21,7 +23,7 @@ it, so tests never touch the web framework directly.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -41,6 +43,21 @@ Routine = Callable[[Connect], Awaitable[Any]]
 
 # routine 里抛出的这些不收集：取消、退出要照常往外传
 _PASS_THROUGH = (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit)
+# 用例没标 timeout 时 routine 最多跑多久（秒）
+DEFAULT_ROUTINE_TIMEOUT = 120.0
+
+
+def routine_timeout_for(node: Any) -> float:
+    """
+    routine 的超时：用例 `@pytest.mark.timeout(N)` 的八成（留余量给起停服），没标就用
+    DEFAULT_ROUTINE_TIMEOUT。harness 要在服务器的事件循环里自己限时：pytest-timeout 靠 SIGALRM，
+    打断不了 uvloop（信号处理函数里抛的异常被 uvloop 的回调吞掉，事件循环照转），routine 卡住时
+    整个测试进程就挂死了
+    """
+    marker = node.get_closest_marker("timeout")
+    if marker is None or not marker.args:
+        return DEFAULT_ROUTINE_TIMEOUT
+    return max(1.0, float(marker.args[0]) * 0.8)
 
 
 @dataclass
@@ -153,16 +170,17 @@ class _SanicTestingResponse:
         self.ws = session
 
 
-class ServerHarness:
+class SanicHarness:
     """
-    一个 HeTu 服务的测试封装，语义见模块说明。
+    Sanic 栈上一个 HeTu 服务的测试封装，语义见模块说明。
 
     `config` 是起服时用的配置，可以在调用 `websocket()` / `get()` 之前修改。`runtime` 是本次（或
     上一次）起服的 `WorkerRuntime`，每次起服新建一个。
     """
 
-    def __init__(self, app: Sanic):
+    def __init__(self, app: Sanic, routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT):
         self._app = app
+        self.routine_timeout = routine_timeout
 
     @property
     def config(self) -> MutableMapping[str, Any]:
@@ -191,7 +209,8 @@ class ServerHarness:
             session = _ClientSession(url, kwargs)
             sessions.append(session)
             try:
-                await mimic(session.connect)
+                async with asyncio.timeout(self.routine_timeout):
+                    await mimic(session.connect)
             except ConnectionClosedOK:
                 pass
             except _PASS_THROUGH:
@@ -220,3 +239,108 @@ class ServerHarness:
 
     def stop(self) -> None:
         self._app.stop()
+
+
+class AiohttpHarness:
+    """
+    aiohttp 栈上一个 HeTu 服务的测试封装，语义见模块说明。
+
+    每次调用都新建事件循环（Linux / macOS 上是 uvloop）和 `AiohttpServer`，runtime 和
+    `web.Application` 跟着新建：一个 Application 只能绑定一个事件循环。
+    """
+
+    def __init__(
+        self,
+        config: Mapping[str, Any],
+        routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT,
+    ):
+        from hetu.server.adapters import aiohttp_app
+
+        self._config = aiohttp_app.prepare(config)
+        self._runtime: Any = None
+        self.routine_timeout = routine_timeout
+
+    @property
+    def config(self) -> MutableMapping[str, Any]:
+        return self._config
+
+    @property
+    def runtime(self) -> Any:
+        return self._runtime
+
+    def _run(self, body: Callable[[str], Awaitable[Any]]) -> Any:
+        """新建事件循环，开服，跑 body("127.0.0.1:端口")，再关服。返回 body 的返回值"""
+        from hetu.server.adapters import aiohttp_app
+
+        async def main() -> Any:
+            server = aiohttp_app.AiohttpServer(self._config)
+            self._runtime = server.runtime
+            sock = aiohttp_app.bind_socket("127.0.0.1:0")
+            try:
+                await server.start(sock)
+                try:
+                    return await body(f"127.0.0.1:{sock.getsockname()[1]}")
+                finally:
+                    await server.stop()
+            finally:
+                sock.close()
+
+        with asyncio.Runner(loop_factory=aiohttp_app.new_event_loop) as runner:
+            return runner.run(main())
+
+    def websocket(self, path: str, mimic: Routine, **connect_kwargs: Any) -> WsResult:
+        """
+        起服，用 `mimic(connect)` 跑客户端逻辑，再停服。`connect_kwargs` 原样传给客户端的
+        `connect()`，比如 `extra_headers`。
+        """
+        errors: list[BaseException] = []
+
+        async def body(host: str) -> WsResult:
+            session = _ClientSession(f"ws://{host}{path}", connect_kwargs)
+            try:
+                async with asyncio.timeout(self.routine_timeout):
+                    await mimic(session.connect)
+            except ConnectionClosedOK:
+                pass
+            except _PASS_THROUGH:
+                raise
+            except BaseException as e:  # noqa: BLE001 留到服务停下之后原样抛给测试
+                errors.append(e)
+            finally:
+                await session.close()
+            return session.result
+
+        result = self._run(body)
+        if errors:
+            raise errors[0]
+        return result
+
+    def get(self, path: str) -> HttpResult:
+        """起服，发一个 GET 请求，再停服"""
+        import aiohttp
+
+        async def body(host: str) -> HttpResult:
+            async with (
+                aiohttp.ClientSession() as http,
+                http.get(f"http://{host}{path}") as response,
+            ):
+                return HttpResult(status=response.status, text=await response.text())
+
+        return self._run(body)
+
+    def stop(self) -> None:
+        """每次调用都已经停服了，这里什么也不做"""
+
+
+def make_harness(
+    http_server: str,
+    app_name: str,
+    config: Mapping[str, Any],
+    routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT,
+) -> SanicHarness | AiohttpHarness:
+    """按 Web 服务器栈（sanic / aiohttp）建 harness。Sanic 栈用 app_name 建 Sanic app"""
+    if http_server == "aiohttp":
+        return AiohttpHarness(config, routine_timeout)
+    from hetu.server import worker_main
+
+    return SanicHarness(worker_main(app_name, config), routine_timeout)

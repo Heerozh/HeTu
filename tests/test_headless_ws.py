@@ -13,12 +13,11 @@ from typing import Any
 
 import pytest
 from fixtures.backends import ALL_BACKENDS, backend_config_by_name
-from fixtures.server_harness import ServerHarness
+from fixtures.server_harness import make_harness
 
 from hetu import headless, webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.server import worker_main
 from hetu.system import SystemClusters
 
 logger = logging.getLogger("HeTu.root")
@@ -26,7 +25,7 @@ logger = logging.getLogger("HeTu.root")
 
 @contextmanager
 def _preserve_loggers():
-    """worker_main 会 dictConfig(LOGGING)，把 HeTu.replay 改成 ERROR 且
+    """建 harness 时会 dictConfig(LOGGING)（worker_main / aiohttp_app.prepare），把 HeTu.replay 改成 ERROR 且
     不 propagate；本模块按字母序排在别的依赖 caplog 抓 replay 日志的测试之前，退出时把
     被改过的 logger 恢复原样，不把污染留给后面的测试。"""
     names = (None, "HeTu.root", "HeTu.replay")
@@ -45,7 +44,7 @@ def _preserve_loggers():
 
 
 @pytest.fixture(params=["redis", "sqlite"])
-def hl_server(request):
+def hl_server(request, http_server):
     backend_name = request.param
     if backend_name not in ALL_BACKENDS:
         pytest.skip(f"HETU_TEST_BACKENDS 未包含 {backend_name}")
@@ -58,7 +57,8 @@ def hl_server(request):
     webext.clear()
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     with _preserve_loggers():
-        server = worker_main(
+        harness = make_harness(
+            http_server,
             f"Hetu-headless-{backend_name}",
             {
                 "APP_FILE": app_file,
@@ -80,7 +80,6 @@ def hl_server(request):
                 "WORKER_NUM": 1,
             },
         )
-        harness = ServerHarness(server)
         try:
             yield harness, config
         finally:
