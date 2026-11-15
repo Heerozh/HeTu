@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from ...common.snowflake_id import SnowflakeID, WorkerKeeper
+from ...common.snowflake_id import RENEW_INTERVAL, SnowflakeID, WorkerKeeper
 from ...i18n import _
 from .snowflake_timestamp import TIMESTAMP_SAVE_INTERVAL, SnowflakeTimestampKeeper
 
@@ -21,9 +21,6 @@ if TYPE_CHECKING:
     from .table import Table
 
 logger = logging.getLogger("HeTu.root")
-
-# 续约间隔（秒）。租约 TTL 60 秒、围栏余量 15 秒，5 秒一次留足了重试的余地
-RENEW_INTERVAL = 5
 
 
 class SnowflakeLease:
@@ -194,7 +191,7 @@ class SnowflakeLease:
         """
         `acquire` 之后立刻起续约和水位预留两个循环；续约发现租约丢失时调用 `on_lost`。
 
-        不能晚起：发号围栏在拿到租约 WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC 秒后跳闸，之后的
+        不能晚起：发号围栏在拿到租约 LEASE_SAFE_SEC 秒后跳闸，之后的
         初始化（服务器的启动 System 最长能跑 STARTUP_TIMEOUT 秒）跑久了就会发不出号。
         """
         assert self.ts_keeper is not None, "acquire() first"

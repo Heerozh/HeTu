@@ -386,7 +386,7 @@ class WorkerRuntime:
             async with asyncio.timeout_at(deadline):
                 await self.start_backends()
         except TimeoutError as e:
-            raise timeout_aborted(_("卡在连接后端/建表阶段")) from e
+            raise timeout_aborted(_("卡在连接后端、租 Worker ID 或建表阶段")) from e
         except Exception as e:
             logger.exception(
                 _("❌ 进程[{pid}] 启动失败: {err}").format(
@@ -488,7 +488,7 @@ class WorkerRuntime:
         # 反复宕机导致 Worker ID 分配满了时每秒重试，等它们过期
         await lease.acquire(wait=True)
         self.snowflake_lease = lease
-        # 拿到租约立刻开始续约、预留水位，不能等开始监听：发号围栏在拿到租约 45 秒后跳闸，
+        # 拿到租约立刻开始续约、预留水位，不能等开始监听：发号围栏在拿到租约 LEASE_SAFE_SEC（15）秒后跳闸，
         # 而之后的启动 System 最长能跑 STARTUP_TIMEOUT（默认 60）秒
         lease.on_lost = lambda: self.on_lease_lost()
         lease.start_loops()

@@ -11,12 +11,15 @@ from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
-from ...common.helper import get_machine_id, lease_owner_exited, worker_index
+from ...common.helper import (
+    lease_owner_exited,
+    lease_owner_id,
+    lease_value,
+    worker_index,
+)
 from ...common.permission import Permission
 from ...common.snowflake_id import (
-    FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
-    TOOL_NODE_PREFIX,
     TOOL_WORKER_ID_FLOOR,
     WORKER_ID_EXPIRE_SEC,
     WORKER_ID_KEY,
@@ -135,7 +138,8 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
         super().__init__()
         self.client = client
         self.worker_id = -1
-        self.node_id = f"{TOOL_NODE_PREFIX}{get_machine_id()}:{pid}"
+        # 持有者标识 + 本进程随机生成的部分，续约、释放按整个值比对，见 lease_value
+        self.node_id = lease_value(lease_owner_id(pid, tool=True), pid)
         self._token = self.node_id.encode()
 
     @staticmethod
@@ -154,7 +158,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
             WORKER_ID_EXPIRE_SEC,
         )
         if mine:
-            self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+            self.arm_fence(started_at)
         return bool(mine)
 
     @override
@@ -171,9 +175,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
                 self._token,
                 WORKER_ID_EXPIRE_SEC,
             ):
-                self.lease_deadline = (
-                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
-                )
+                self.arm_fence(started_at)
                 self.worker_id = worker_id
                 logger.info(
                     _(
@@ -190,8 +192,9 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
 
     @override
     async def keep_alive(self):
-        """值相符才续期；租约已不属于本进程（卡住太久被别人接手）就抛 SystemExit"""
+        """值相符才续期；租约已不属于本进程（卡住太久被别人接手）就关掉发号围栏、抛 SystemExit"""
         if not await self._expire_if_mine():
+            self.close_fence()
             logger.error(
                 _(
                     "[❄️ID] 续约 Worker ID {worker_id} 失败: "
@@ -208,6 +211,8 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
 
         if self.worker_id < 0:
             return
+        # 决定释放就不再发号：释放之后别的进程马上就能拿走这个 id
+        self.close_fence()
         deleted = await self.client.run_(
             SQLiteStore.kv_delete_if, self._key(self.worker_id), self._token
         )

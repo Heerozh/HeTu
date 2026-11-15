@@ -176,9 +176,12 @@ async def test_redis_keeper_detects_stolen_lease(mod_auto_backend):
     thief = RedisWorkerKeeper(501, redis_client)
     assert await thief.get_worker_id() == worker_id
 
-    # victim 醒来续约，必须发现自己已经不是持有者
+    # victim 醒来续约，必须发现自己已经不是持有者，并且马上停止发号：上层接着是优雅关服，期间还会
+    # 发号，等安全期自己过完就会和 thief 撞号
     with pytest.raises(SystemExit):
         await victim.keep_alive()
+    assert victim.lease_deadline is not None
+    assert time.monotonic() > victim.lease_deadline
 
     # 而且不能把 thief 的租约刷掉或删掉
     assert await redis_client.get(victim._key(worker_id)) is not None
@@ -435,7 +438,7 @@ def _server_runtime(backend_config: dict) -> WorkerRuntime:
 
 
 async def test_restart_resumes_from_snowflake_watermark(
-    mod_test_app, mod_backend_config
+    mod_test_app, mod_backend_config, monkeypatch
 ):
     """开关服的水位接线：正常关服后马上重启不该被钳在未来，崩溃后重启要从开服时预留的
     水位接着发。
@@ -467,6 +470,11 @@ async def test_restart_resumes_from_snowflake_watermark(
     await runtime.snowflake_lease.stop_loops()
     await runtime.default_backend.close()
 
+    # 崩溃后马上重启，要确认旧租约没人续约了才接回同一个 worker id（水位是按 id 存的），默认最多等
+    # REUSE_STALE_SEC（20）秒，这里缩到 1 秒
+    from hetu.data.backend.redis import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
     runtime = _server_runtime(mod_backend_config)
     await runtime.start_backends()
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
@@ -475,7 +483,7 @@ async def test_restart_resumes_from_snowflake_watermark(
 
 async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
     """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
-    WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC（45）秒后跳闸，而之后的启动 System 最长能跑
+    LEASE_SAFE_SEC（15）秒后跳闸，而之后的启动 System 最长能跑
     STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
     runtime = _server_runtime(mod_backend_config)
     await runtime.start_backends()
@@ -701,6 +709,11 @@ async def test_snowflake_lease_fence():
     keeper.lease_deadline = time.monotonic() + 60
     assert generator.next_id() > 0
 
+    # 续约发现租约已经被接手：马上关掉，不等安全期过完
+    keeper.close_fence()
+    with pytest.raises(WorkerLeaseExpired):
+        generator.next_id()
+
     # 不提供租约的分配器（开发模式）不启用围栏
     keeper.lease_deadline = None
     assert generator.next_id() > 0
@@ -711,11 +724,8 @@ async def test_snowflake_lease_fence():
 @use_redis_family_backend_only
 async def test_redis_keeper_arms_fence(mod_auto_backend):
     """Redis租约必须武装围栏，且安全期要留出余量、抢到的那一刻就生效"""
-    from hetu.data.backend.redis.worker_keeper import (
-        FENCE_MARGIN_SEC,
-        WORKER_ID_EXPIRE_SEC,
-        RedisWorkerKeeper,
-    )
+    from hetu.common.snowflake_id import LEASE_SAFE_SEC
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
     redis = mod_auto_backend()
     redis_client = redis.master.aio
@@ -729,10 +739,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     await keeper.get_worker_id()
     # 抢到就武装，不用等第一次续约（那要5秒后）
     assert keeper.lease_deadline is not None
-    # 安全期必须早于Redis侧的过期时刻，留出余量给时钟漂移。用发起请求前的时刻算，所以
-    # 它一定不晚于 "现在 + TTL - 余量"
+    # 安全期必须早于同标识的进程能接手的时刻（见 LEASE_SAFE_SEC）。用发起请求前的时刻算，所以
+    # 它一定不晚于 "现在 + LEASE_SAFE_SEC"
     now = time.monotonic()
-    assert keeper.lease_deadline <= now + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+    assert keeper.lease_deadline <= now + LEASE_SAFE_SEC
     assert keeper.lease_deadline > now
 
     # 续约成功要推进安全期
@@ -740,6 +750,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     time.sleep(0.01)
     await keeper.keep_alive()
     assert keeper.lease_deadline > old
+
+    # 释放之后别的进程马上就能拿走这个 id，不能再发号
+    await keeper.release_worker_id()
+    assert time.monotonic() > keeper.lease_deadline
 
 
 def test_batched():
@@ -914,6 +928,7 @@ async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
         assert master.run_sync_(SQLiteStore.kv_set_nx, key, b"thief", 60)
         with pytest.raises(SystemExit):
             await first.keep_alive()
+        assert time.monotonic() > first.lease_deadline  # 被抢就马上停止发号
         await first.release_worker_id()
         assert master.run_sync_(SQLiteStore.kv_get, key) == b"thief"
         master.run_sync_(SQLiteStore.kv_delete_if, key, b"thief")

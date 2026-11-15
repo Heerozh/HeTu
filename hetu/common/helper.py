@@ -1,14 +1,30 @@
+import contextlib
 import itertools
+import logging
 import os
+import re
+import secrets
 import sys
 import uuid
 
 from ..i18n import _
 
+logger = logging.getLogger("HeTu.root")
+
 # 本进程在本机内的 worker 序号（从 0 开始），由多进程管理进程在启动 worker 时设置（设计稿
 # docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.7）。单进程模式、管理进程、
 # 工具进程都没有
 WORKER_INDEX_ENV = "HETU_WORKER_INDEX"
+
+# 本节点 token 的文件（见 node_token）。容器里它在容器自己的可写层里：同一个容器重启后还在，别的容器
+# （哪怕同一个镜像、同一台宿主机、同一个主机名）没有它
+NODE_TOKEN_PATH = "/var/tmp/hetu-node-token"
+# 本进程读到（或生成）的 token，第一次用到时才读
+_node_token: str | None = None
+# 节点 token 的格式：16 位小写十六进制（secrets.token_hex(8)）
+_TOKEN_RE = re.compile(r"[0-9a-f]{16}")
+# 租约值里持有者标识和本进程随机部分之间的分隔符（标识里只有冒号，见 lease_owner_id）
+LEASE_NONCE_SEP = "#"
 
 # OpenProcess 查询进程状态所需的最小权限
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -122,6 +138,159 @@ def get_machine_id():
         return hex(node_id)[2:]
 
 
+def _read_token(path: str) -> str | None:
+    """
+    读 path 里的 token。文件不存在返回 None；是符号链接、读不了、内容不是合法的 token，抛 OSError /
+    ValueError。
+
+    不跟随符号链接：/var/tmp 谁都能写，别人事先放一个指向任意文件的链接，就能让我们把那个文件的内容当成
+    token 读出来（会打进日志、存进 Redis）。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read(64)
+    token = raw.decode("ascii").strip()
+    if not _TOKEN_RE.fullmatch(token):
+        raise ValueError(
+            _("内容不是合法的节点 token: {raw}").format(raw=repr(raw[:32]))
+        )
+    return token
+
+
+def read_or_create_node_token(path: str) -> str:
+    """
+    读 path 里的 token；没有就随机生成一个写进去。读写不了、内容不对，抛 OSError / ValueError。
+
+    同一个容器里的几个 worker 会同时第一次启动：各自先写自己的临时文件，再用硬链接放到 path 上。
+    硬链接是原子的，path 已经存在就失败，于是只有一个写成，其余的读它的；path 一出现就是写完了的，
+    不会读到写了一半的内容。写完先 fsync：宿主机紧接着崩溃，也不会留下一个空文件。
+
+    临时文件的名字带随机数、用 O_EXCL 新建：别人在 /var/tmp 里事先放好同名的符号链接，也不会跟着它去
+    截断别的文件。
+    """
+    token = _read_token(path)
+    if token is not None:
+        return token
+    token = secrets.token_hex(8)
+    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(token)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # 同时启动的别的 worker 先写成了，用它的
+            existing = _read_token(path)
+            if existing is None:  # 刚刚还在，又被删了
+                raise
+            return existing
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    logger.info(_("[❄️ID] 生成了新的节点 token，存在 {path}").format(path=path))
+    return token
+
+
+def node_token() -> str | None:
+    """
+    本节点的 token，租约持有者标识的一部分（见 `lease_owner_id`）。第一次用到时读 NODE_TOKEN_PATH，
+    没有就随机生成、写进去：在容器里就是"每个容器首次启动时持久化一个自己的 token"，同一个容器重启后
+    不变。Windows 上不用（没有容器共用主机名的问题），返回 None。
+
+    不按 `is_container_env` 判断要不要用：cgroup v2 下 /proc/1/cgroup 只剩 "0::/"，没有 /.dockerenv
+    的容器（比如 k8s 的 containerd）认不出来，而 k8s 的 hostNetwork 正好会让多个 pod 共用主机名。
+    不在容器里时，同一台机器上的进程读到的是同一个 token，靠 pid 区分，不受影响。
+
+    文件用不了（写不进去、内容不对、是符号链接）时用一个只在本进程有效的随机 token 并告警：照样和别的
+    容器区分得开，只是重启后接不回原来的 Worker ID。从跑过 HeTu 的容器 commit 镜像之前要删掉这个文件，不然从这个镜像起的
+    容器都带着同一个 token。
+
+    This node's token, persisted on first use (per container when containerised).
+    """
+    global _node_token
+    if sys.platform == "win32":
+        return None
+    if _node_token is None:
+        try:
+            token = read_or_create_node_token(NODE_TOKEN_PATH)
+        except (OSError, ValueError) as e:
+            token = secrets.token_hex(8)
+            logger.warning(
+                _(
+                    "[❄️ID] 节点 token 文件 {path} 用不了（{err}），改用只在本进程有效的 token，"
+                    "重启后接不回原来的 Worker ID。删掉这个文件、或者让它所在的目录可写，下次启动"
+                    "就会重新生成"
+                ).format(path=NODE_TOKEN_PATH, err=f"{type(e).__name__}: {e}")
+            )
+        _node_token = token
+    return _node_token
+
+
+def lease_owner_id(pid: int, *, tool: bool = False) -> str:
+    """
+    Worker ID 租约的持有者标识，由冒号连接：`机器码[:节点 token]:进程部分`，工具进程再带 `cli:` 前缀。
+    租约里存的是它加上本进程随机生成的部分（`lease_value`），续约、释放按整个值比对；开服时按标识认出
+    "自己重启前留下的"租约，确认没人在续约了才接手（见 RedisWorkerKeeper 的"复用"）。所以要满足：
+
+    1. **同时活着的进程之间尽量不同**。相同的话不会撞号（接手的门槛比发号围栏长，见 RedisWorkerKeeper
+       的"复用"），但后启动的每次开服都要多等 REUSE_STALE_SEC 秒、确认对方还在续约后另拿一个；对方续约
+       晚了，id 还会被接走，只好退出重启。host 网络下同一台宿主机上的容器主机名都和宿主机一样、pid 都是 1
+       （实测），多个副本设了同一个 hostname、k8s 的 hostNetwork 也一样，原来的 `主机名:pid` 就会撞。
+       节点 token 每个容器各一个（`node_token`），把它们分开；
+    2. **同一个位置重启前后尽量不变**，才能接回原来的 Worker ID（接不回也不影响正确性，只是旧的要等
+       过期）。
+
+    进程部分：
+    - HeTu 的多进程管理器起的 worker（有 HETU_WORKER_INDEX）：`w<序号>:<管理进程 pid>`。worker 的 pid
+      每次重启都变，序号和管理进程不变（容器里管理进程是 pid 1），管理器保证同一序号的旧进程退出之后
+      才起新的。裸机上重启了 hetu start，管理进程的 pid 变了，不会和还在退出中的旧 worker 撞；
+    - 其他（单进程、工具进程）：`<pid>`。
+
+    最后一段总是一个 pid（管理进程的或本进程的），Windows 上 `lease_owner_exited` 据此判断持有者还在
+    不在。
+
+    The lease owner id: unique among live processes, stable across restarts where possible.
+    """
+    from .snowflake_id import TOOL_NODE_PREFIX
+
+    parts = [get_machine_id()]
+    if (token := node_token()) is not None:
+        parts.append(token)
+    index = None if tool else worker_index()
+    if index is not None:
+        parts += [f"w{index}", str(os.getppid())]  # 这个是管理进程pid
+    else:
+        parts.append(str(pid))
+    owner = ":".join(parts)
+    return TOOL_NODE_PREFIX + owner if tool else owner
+
+
+def lease_value(identity: str, pid: int) -> str:
+    """
+    租约里存的值：`持有者标识#持有租约的进程的 pid.随机数`，随机数是本进程生成的、不落盘。
+
+    续约、释放都按整个值比对：标识就算撞了，换一个进程随机部分也不同，比对不上。只存标识的话，本进程
+    卡住超过租约的 60 秒、key 过期后被标识相同的另一个进程拿走，醒来续约照样比对得上，两边用同一个
+    Worker ID。认"自己重启前留下的"只看标识（`lease_identity`），见 RedisWorkerKeeper.get_worker_id。
+    pid 给 Windows 上的退出判断用（`lease_owner_exited`）：管理进程起的 worker，标识里的是管理进程的 pid。
+
+    The stored lease value: owner id, then the holder's pid and a random per-process part.
+    """
+    return f"{identity}{LEASE_NONCE_SEP}{pid}.{secrets.token_hex(4)}"
+
+
+def lease_identity(value: str) -> str:
+    """租约值里的持有者标识（去掉 "#" 和之后的部分）"""
+    return value.split(LEASE_NONCE_SEP, 1)[0]
+
+
 def windows_pid_exited(pid: int) -> bool:
     """
     本机上确定已经没有进程在用这个 pid 了。只在 Windows 上判断，其它平台恒为 False。
@@ -154,8 +323,12 @@ def windows_pid_exited(pid: int) -> bool:
 
 def lease_owner_exited(owner: bytes | str) -> bool:
     """
-    worker id 租约的主人（node_id，即 `机器码:pid`，工具进程再带 `cli:` 前缀）是本机上已经
-    退出的进程。只在 Windows 上这么认。
+    worker id 租约的主人是本机上已经退出的进程。只在 Windows 上这么认。
+
+    租约值的格式见 `lease_value`：标识的第一段是机器码，最后一段是 pid（HeTu 管理进程起的 worker 是管理
+    进程的 pid，其余是本进程的），"#" 后面是持有租约的进程自己的 pid（旧格式没有）。这些 pid 都退出了才算：
+    worker 被强制结束、管理进程还在时，它会以同一个序号重启、接着用这把租约；管理进程被强制结束、worker
+    还在时，worker 要读到控制管道断开再优雅关服，这期间还在写数据。
 
     为什么要认：Windows 上进程被强制结束（TerminateProcess）时关服钩子里的 release_worker_id
     没机会跑——任务管理器"结束任务"、`taskkill /F`、单进程模式第二次 Ctrl+C 强退，管理进程等
@@ -177,9 +350,11 @@ def lease_owner_exited(owner: bytes | str) -> bool:
         owner = owner.decode("ascii", errors="replace")
     from .snowflake_id import TOOL_NODE_PREFIX
 
-    machine_id, _, pid = owner.removeprefix(TOOL_NODE_PREFIX).rpartition(":")
-    return (
-        machine_id == get_machine_id()
-        and pid.isdecimal()
-        and windows_pid_exited(int(pid))
-    )
+    identity, _sep, holder = owner.partition(LEASE_NONCE_SEP)
+    parts = identity.removeprefix(TOOL_NODE_PREFIX).split(":")
+    if len(parts) < 2 or parts[0] != get_machine_id():
+        return False
+    pids = [parts[-1]]
+    if "." in holder:
+        pids.append(holder.split(".", 1)[0])
+    return all(pid.isdecimal() and windows_pid_exited(int(pid)) for pid in pids)
