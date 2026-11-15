@@ -1467,6 +1467,97 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void Reconnect_JitterShortensEachWaitButNotTheBackoff()
+        {
+            // 抖动 0.5：实际等待 = 退避延迟 × (1 - 0.5 × random)。退避序列本身不受影响，
+            // 照旧按 1/2/4/8 翻倍，不会因为上一次等得短就越退越短。
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3"),
+                new FakeTransport("c4")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var randoms = new Queue<double>(new[] { 0.0, 0.5, 1.0, 0.25 });
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                reconnectJitter: 0.5,
+                random: () => randoms.Dequeue());
+
+            session.Start();
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[2].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[3].RaiseClosed("e");
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    TimeSpan.FromMilliseconds(1000),
+                    TimeSpan.FromMilliseconds(1500),
+                    TimeSpan.FromMilliseconds(2000),
+                    TimeSpan.FromMilliseconds(7000)
+                },
+                scheduler.ScheduledDelays);
+        }
+
+        [Test]
+        public void Reconnect_JitteredWaitStaysWithinRangeAndUnderMax()
+        {
+            // 默认的随机源：每次等待都落在 [0.5, 1] × 退避延迟里，封顶之后也不超过上限
+            var ts = new FakeTransport[8];
+            for (var i = 0; i < ts.Length; i++)
+                ts[i] = new FakeTransport($"c{i}");
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(4),
+                reconnectJitter: 0.5);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            for (var i = 0; i < ts.Length - 1; i++)
+            {
+                ts[i].RaiseClosed("e");
+                scheduler.RunNext();
+            }
+            ts[^1].RaiseClosed("e");
+
+            var backoff = new[] { 1, 2, 4, 4, 4, 4, 4, 4 };
+            Assert.AreEqual(backoff.Length, scheduler.ScheduledDelays.Count);
+            for (var i = 0; i < backoff.Length; i++)
+            {
+                var wait = scheduler.ScheduledDelays[i].TotalSeconds;
+                Assert.That(wait, Is.InRange(backoff[i] * 0.5, backoff[i]), $"第 {i} 次");
+            }
+        }
+
+        [TestCase(-0.1)]
+        [TestCase(1.1)]
+        public void Constructor_RejectsJitterOutsideZeroToOne(double jitter)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new HeTuSessionClientBase(
+                    () => new FakeTransport("c1"),
+                    new FakeScheduler(),
+                    reconnectJitter: jitter));
+        }
+
+        [Test]
         public void Reconnect_AfterMaxAttempts_EntersFaultedAndStopsRetrying()
         {
             var ts = new[]

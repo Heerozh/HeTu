@@ -127,8 +127,17 @@ namespace HeTu
             TimeSpan.FromSeconds(30);
 
         /// <summary>
-        ///     连续重试次数上限默认值。20 次按 1/2/4/8/16/30s 退避大约覆盖 8 分钟，
-        ///     足以扛过常规热重启；想让玩家挂着等长维护就显式传 <c>0</c>（不限次）。
+        ///     重连等待的随机抖动默认值：每次实际等待在 [1 − 0.5, 1] × 当前退避延迟里
+        ///     随机取（退避 1s 时等 0.5~1s，封顶 30s 时等 15~30s）。服务器重启、网关摘掉
+        ///     节点之后，同时掉线的客户端不加抖动会按同一个节奏一波一波重连，每一波都是
+        ///     一次建连风暴。
+        /// </summary>
+        public const double DefaultReconnectJitter = 0.5;
+
+        /// <summary>
+        ///     连续重试次数上限默认值。20 次按 1/2/4/8/16/30s 退避（每次再随机缩短最多一半）
+        ///     大约覆盖 4~8 分钟，足以扛过常规热重启；想让玩家挂着等长维护就显式传
+        ///     <c>0</c>（不限次）。
         /// </summary>
         public const int DefaultMaxReconnectAttempts = 20;
 
@@ -177,6 +186,11 @@ namespace HeTu
         ///     <see cref="DefaultConnectTimeout" />（30s）；<see cref="TimeSpan.Zero" />
         ///     关闭超时，await 等到 Ready 或 Faulted 为止。
         /// </param>
+        /// <param name="reconnectJitter">
+        ///     重连等待的随机抖动，0~1：每次实际等待在 [1 − 本值, 1] × 当前退避延迟里随机取。
+        ///     <c>null</c> 用 <see cref="DefaultReconnectJitter" />（0.5）；<c>0</c> 关闭，
+        ///     按退避延迟准时重连。
+        /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable Connect(
             string url,
@@ -186,7 +200,8 @@ namespace HeTu
             TimeSpan? maxReconnectDelay = null,
             int maxReconnectAttempts = DefaultMaxReconnectAttempts,
             TimeSpan? connectTimeout = null,
-            TimeSpan? requestTimeout = null)
+            TimeSpan? requestTimeout = null,
+            double? reconnectJitter = null)
 #else
         public UniTask Connect(
             string url,
@@ -196,7 +211,8 @@ namespace HeTu
             TimeSpan? maxReconnectDelay = null,
             int maxReconnectAttempts = DefaultMaxReconnectAttempts,
             TimeSpan? connectTimeout = null,
-            TimeSpan? requestTimeout = null)
+            TimeSpan? requestTimeout = null,
+            double? reconnectJitter = null)
 #endif
         {
             if (_core != null
@@ -215,7 +231,8 @@ namespace HeTu
                 reconnectDelay ?? DefaultReconnectDelay,
                 maxReconnectDelay ?? DefaultMaxReconnectDelay,
                 maxReconnectAttempts,
-                requestTimeout ?? DefaultRequestTimeout);
+                requestTimeout ?? DefaultRequestTimeout,
+                reconnectJitter ?? DefaultReconnectJitter);
             WireFacadeEvents(_core);
 
             return ConnectCore(connectTimeout ?? DefaultConnectTimeout);
