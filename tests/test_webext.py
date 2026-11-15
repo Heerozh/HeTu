@@ -94,8 +94,9 @@ def test_define_route_serves_requests(tmp_path):
 
 def test_methods_limit_and_request_size(tmp_path):
     """
-    methods 限制生效：只注册了 POST 的路径，用 GET 请求得到 405；不写 methods 就只有 GET。请求体的上限
-    是 REQUEST_MAX_SIZE，超过回 413
+    methods 限制生效：只注册了 POST 的路径，用 GET 请求得到 405；不写 methods 就只有 GET。methods 可以
+    只给一个字符串，大小写重复的只注册一次（aiohttp 上同一方法加两次会报错）。请求体的上限是
+    REQUEST_MAX_SIZE，超过回 413
     """
     server = make_server(
         tmp_path,
@@ -108,6 +109,16 @@ async def upload(request):
 @hetu.define_route("/ping")
 async def ping(request):
     return web.Response(text="pong")
+
+
+@hetu.define_route("/delete", methods="DELETE")
+async def delete(request):
+    return web.Response(text="deleted")
+
+
+@hetu.define_route("/both", methods=["get", "GET", "put"])
+async def both(request):
+    return web.Response(text=request.method)
 """,
         REQUEST_MAX_SIZE=10,
     )
@@ -117,6 +128,10 @@ async def ping(request):
     assert server.get("/upload").status == 405
     assert server.get("/ping").text == "pong"
     assert server.request("POST", "/ping").status == 405
+    assert server.request("DELETE", "/delete").text == "deleted"
+    assert server.get("/delete").status == 405
+    assert server.get("/both").text == "GET"
+    assert server.request("PUT", "/both").text == "PUT"
 
 
 def test_user_route_replaces_default_welcome_page(tmp_path):
@@ -171,7 +186,7 @@ def setup(app: web.Application):
 
 
 def test_reserved_and_invalid_uri_rejected():
-    """HeTu的WebSocket入口前缀不能被占用，uri也必须是绝对路径。"""
+    """HeTu的WebSocket入口前缀不能被占用，uri也必须是绝对路径，methods 不能为空。"""
     with pytest.raises(ValueError, match="hetu"):
 
         @hetu.define_route("/hetu/{db_name}")
@@ -190,6 +205,12 @@ def test_reserved_and_invalid_uri_rejected():
         async def not_absolute(request):
             pass
 
+    with pytest.raises(ValueError, match="methods"):
+
+        @hetu.define_route("/nothing", methods=[])
+        async def no_methods(request):
+            pass
+
     # 只是前缀相似的路径不受影响
     @hetu.define_route("/hetumeta")
     async def similar(request):
@@ -200,11 +221,17 @@ COUNT_APP = (
     DOWNLOAD_APP
     + """
 
+def _count(app):
+    return sum(1 for r in app.router.resources() if r.canonical == "/download/{name}")
+
+
 @hetu.on_server_setup
 def count_routes(app: web.Application):
+    # 回调在 define_route 的路由挂好之后才执行：这时就数得到
+    at_setup = _count(app)
+
     async def count(request):
-        n = sum(1 for r in request.app.router.resources() if r.canonical == "/download/{name}")
-        return web.Response(text=str(n))
+        return web.Response(text=f"{at_setup} {_count(request.app)}")
 
     app.router.add_get("/route-count", count)
 """
@@ -214,7 +241,8 @@ def count_routes(app: web.Application):
 def test_app_file_exec_twice_registers_once(tmp_path):
     """
     app 文件在同一进程里被 exec 两遍（嵌入场景、测试）：注册表按函数的全限定名覆盖，路由只挂一次、配置
-    回调只调一次。aiohttp 不拦同一路径的重复注册（先注册的那条生效），所以从路由表里数
+    回调只调一次；回调执行时 define_route 的路由已经挂好了。aiohttp 只拦挨着的重复注册（同一路径、
+    同一方法连着加会报错），隔开的照样登记、先注册的那条生效，所以由回调数路由表
     """
     make_server(tmp_path, COUNT_APP)
     # 簇、Endpoint 的定义是单件，生产中第二次加载在新进程里，这里手动还原成新进程的状态。webext 的
@@ -223,5 +251,43 @@ def test_app_file_exec_twice_registers_once(tmp_path):
     EndpointDefines()._clear()
     server = make_server(tmp_path, COUNT_APP)
 
-    assert server.get("/route-count").text == "1"
+    assert server.get("/route-count").text == "1 1"
     assert server.get("/download/x").text == "downloaded x"
+
+
+def test_on_server_setup_error_aborts_before_backends(tmp_path):
+    """
+    on_server_setup 的回调出错就中止开服，而且是在连后端、跑启动 System 之前：配错的路由不用等开完服
+    （最长 STARTUP_TIMEOUT）才报出来，启动 System 也不会已经写过数据。先确认回调正常时启动 System
+    确实会跑（会写标记文件），不然这个用例是空测
+    """
+    marker = tmp_path / "on_start_ran"
+    seed_app = f"""
+from pathlib import Path
+
+
+@hetu.define_system(namespace="{NAMESPACE}", components=(Dummy,), on_start=True, force=True)
+async def seed(ctx):
+    Path({str(marker)!r}).write_text("ran")
+"""
+    server = make_server(tmp_path, seed_app)
+    assert server.get("/").status == 200
+    assert marker.exists()
+
+    marker.unlink()
+    webext.clear()
+    SystemClusters()._clear()
+    EndpointDefines()._clear()
+    server = make_server(
+        tmp_path,
+        seed_app
+        + """
+
+@hetu.on_server_setup
+def broken(app):
+    raise RuntimeError("broken setup")
+""",
+    )
+    with pytest.raises(RuntimeError, match="broken setup"):
+        server.get("/")
+    assert not marker.exists()

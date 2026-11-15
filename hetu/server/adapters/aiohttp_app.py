@@ -377,14 +377,17 @@ class AiohttpServer:
 
     async def start(self, sock: socket.socket) -> None:
         """
-        开服：`runtime.start()`（连后端、拿租约、跑启动 System），在已经 bind 好的 sock 上开始监听，再起
-        后台任务（FutureCalls）。开服失败时 `StartupAborted` 原样抛出；开始监听这一步失败时先关服
-        （释放租约、关后端）再抛出。
+        开服：建 aiohttp 的 app（用户的 `on_server_setup` 回调在这里跑），`runtime.start()`（连后端、拿租约、
+        跑启动 System），在已经 bind 好的 sock 上开始监听，再起后台任务（FutureCalls）。开服失败时
+        `StartupAborted` 原样抛出；开始监听这一步失败时先关服（释放租约、关后端）再抛出。
         """
+        # 先建 app：用户的回调（webext）出错时还没连后端、没跑启动 System，马上就能报出来，不用等开完服，
+        # 启动 System 也不会已经写过数据。同原来 Sanic 的时机（建 app 时，后端还没连）
+        app = build_app(self)
         await self.runtime.start()
         try:
             self._runner = web.AppRunner(
-                build_app(self),
+                app,
                 handle_signals=False,
                 # 访问日志交给前面的反向代理（推荐 Caddy）。aiohttp 默认开着
                 access_log=None,
@@ -502,10 +505,11 @@ async def _web_root(request: web.Request) -> web.Response:
 
 def build_app(server: AiohttpServer) -> web.Application:
     """
-    建 aiohttp 的 app，路由按这个顺序注册（aiohttp 按注册顺序匹配）：
+    建 aiohttp 的 app，路由按这个顺序注册：
 
-    1. ws 入口 /hetu/{db_name}，带尾斜杠的也注册（和原来 Sanic 一样能连上）。排在最前，用户在
-       on_server_setup 里注册的通配路由抢不走它；
+    1. ws 入口 /hetu/{db_name}，带尾斜杠的也注册（和原来 Sanic 一样能连上）。aiohttp 先按路径前缀的
+       索引找 resource，同一个前缀里才按注册顺序，所以用户在 "/" 下注册的通配路由抢不走 /hetu 下的它；
+       排在最前，是让用户在 on_server_setup 里绕过 define_route 的检查、注册到 /hetu 下的路由也排在后面；
     2. 用户的 `@hetu.define_route` 路由、`@hetu.on_server_setup` 回调（hetu/webext.py）；
     3. 默认欢迎页 "/"：用户自己注册了 "/"（或挂在 "/" 上的静态目录）就让给用户。
     """

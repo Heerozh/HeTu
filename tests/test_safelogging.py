@@ -108,8 +108,11 @@ def test_config_template_console_formatter_is_context_aware():
 def test_context_auto_formatter_plain_output_matches_sanic(monkeypatch):
     """
     不在终端里（不上颜色）时，输出和原来 Sanic 25.12 的 AutoFormatter 逐字一致，带不带 extra
-    字段都一样。期望的字符串是删 Sanic 之前拿它的 AutoFormatter 跑出来的。
+    字段都一样。期望的字符串是删 Sanic 之前拿它的 AutoFormatter 跑出来的；时间的格式也写死在这里，
+    不读被测类的 DATE_FORMAT
     """
+    import time
+
     monkeypatch.setattr(formatter_mod, "_use_color", lambda: False)
     expected = {
         False: "Main  {asctime} WARNING: test message",
@@ -118,11 +121,12 @@ def test_context_auto_formatter_plain_output_matches_sanic(monkeypatch):
     for log_extra in (False, True):
         monkeypatch.setattr(ContextAutoFormatter, "IDENT", "Main ")
         monkeypatch.setattr(ContextAutoFormatter, "LOG_EXTRA", log_extra)
-        fmt = ContextAutoFormatter()
         record = _make_record(logging.WARNING)
         record.ctx = "[uid|conn|MySystem]"
-        asctime = fmt.formatTime(record, ContextAutoFormatter.DATE_FORMAT)
-        assert fmt.format(record) == expected[log_extra].format(asctime=asctime)
+        asctime = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(record.created))
+        assert ContextAutoFormatter().format(record) == expected[log_extra].format(
+            asctime=asctime
+        )
 
 
 def test_context_auto_formatter_color_output(monkeypatch):

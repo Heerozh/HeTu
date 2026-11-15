@@ -53,7 +53,8 @@ def hl_server(request):
     SystemClusters()._clear()
     EndpointDefines()._clear()
     # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再以 HeTuApp 之名 exec
-    # 同一个文件，同一 uri 就会登记两条（aiohttp 不报错，只是后一条永远轮不到），先清掉
+    # 同一个文件，同一 uri 就会登记两条，挂到 aiohttp 上时两条挨着加，撞"method GET is already
+    # registered"，开服失败。先清掉
     webext.clear()
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     with _preserve_loggers():

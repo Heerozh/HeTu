@@ -155,8 +155,8 @@ async def test_renamed_task_releases_its_name():
 def test_logging_config_referencing_sanic_is_rejected(monkeypatch):
     """
     LOGGING 里还引用着 Sanic 的类：setup_logging 先报 LoggingConfigError，写明是哪几项、要改成什么，
-    不去 dictConfig（不然只报一句 "Unable to configure formatter"）。文件名、logger 名里出现 sanic
-    不算；配置模板、默认配置都能过
+    不去 dictConfig（不然只报一句 "Unable to configure formatter"）。QueueHandler 的 queue、listener
+    也查。文件名、logger 名里出现 sanic、名字以 sanic 开头的别的包都不算；配置模板、默认配置都能过
     """
     import logging.config
     from pathlib import Path
@@ -178,20 +178,31 @@ def test_logging_config_referencing_sanic_is_rejected(monkeypatch):
         "version": 1,
         "formatters": {"colour": {"class": "sanic.logging.formatter.AutoFormatter"}},
         "filters": {"verbosity": {"()": "sanic.logging.filter.VerbosityFilter"}},
-        "handlers": {"console": {"class": "logging.StreamHandler"}},
+        "handlers": {
+            "console": {"class": "logging.StreamHandler"},
+            "queued": {
+                "class": "logging.handlers.QueueHandler",
+                "queue": "sanic.compat.Queue",
+                "listener": "sanic.logging.Listener",
+            },
+        },
     }
     with pytest.raises(LoggingConfigError) as exc_info:
         setup_logging({"LOGGING": old_config})
     message = str(exc_info.value)
     assert "formatters.colour.class: sanic.logging.formatter.AutoFormatter" in message
     assert "filters.verbosity.(): sanic.logging.filter.VerbosityFilter" in message
+    assert "handlers.queued.queue: sanic.compat.Queue" in message
+    assert "handlers.queued.listener: sanic.logging.Listener" in message
     assert "hetu.safelogging.formatter.ContextAutoFormatter" in message
     assert "logging.StreamHandler" not in message
     assert configured == []
 
+    # 名字以 sanic 开头的别的包（sanic_tools 之类）也不算
     check_logging_config(
         {
             "version": 1,
+            "formatters": {"plain": {"class": "sanic_tools.PlainFormatter"}},
             "handlers": {
                 "file": {"class": "logging.FileHandler", "filename": "sanic.log"}
             },
