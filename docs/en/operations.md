@@ -311,13 +311,21 @@ replicated; on a managed Redis, create the account in the console), and add
 ACL SETUSER hetu-dns on >password resetkeys ~hetu:nodes resetchannels -@all +hgetall +ping
 ```
 
+Give the replica's default user a password too, or disable it. The gateway has to
+reach the replica's Redis port, and if the default user needs no password, an
+attacker who gets into the gateway simply uses it: they can read all the data and
+even change the replica's replication setup, and the read-only user protects
+nothing. With a password set, put it in the nodes' `BACKENDS` URLs; with the
+default user disabled, the nodes use another user.
+
 `hetu dns` checks its deployment at startup too. It exits with code 2 when it
 isn't on the host network (Caddy queries the host's 127.0.0.1, which a bridge
 network never sees) or when Redis is a native cluster (not supported in the
 first version; go through a proxy); with code 3 when it can't connect to
 Redis, the password is wrong, or the ACL refuses it (it prints the user to
-create); and it warns when the user is too powerful, when it is connected to
-the master, or when `--listen` isn't a loopback address. At run time, a node
+create); and it warns when the user is too powerful, when Redis accepts a
+connection without a password (the default user has none), when it is
+connected to the master, or when `--listen` isn't a loopback address. At run time, a node
 that shows up for the first time is probed with one TCP connection from the
 gateway; until that succeeds the node isn't answered, and the log says to
 check the security group.

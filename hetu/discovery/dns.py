@@ -897,6 +897,39 @@ async def check_redis(client: Any, redis_url: str) -> list[str]:
     return warnings
 
 
+async def check_anonymous_access(
+    redis_url: str, *, connect: Callable[[str], Any] | None = None
+) -> list[str]:
+    """
+    不带口令也能连上 Redis 就告警（§6.5）。网关是唯一暴露在公网的机器，它被攻破的话，攻击者不用 hetu dns 的
+    只读用户，直接用没设口令的 default 用户就能读走全部数据，还能改副本的主从配置（REPLICAOF）、篡改 HeTu 从
+    副本读到的数据。hetu dns 自己用的用户权限再小也挡不住这个，只能去掉口令另连一次试试：PING 得通就告警，
+    要口令、被拒、连不上都不告警。地址里本来就没有口令时，hetu dns 自己就是这么连上的，直接告警。
+
+    Warn when Redis accepts a connection without a password (an unprotected default user).
+    """
+    url = urlparse(redis_url)
+    if url.scheme == "unix":
+        return []
+    host = url.netloc.rsplit("@", 1)[-1]
+    warning = _(
+        "⚠️ Redis {host} 不带口令也能连上：default 用户没设口令。网关暴露在公网，它被攻破的话，攻击者不用 "
+        "hetu dns 的只读用户，直接用 default 用户就能读走全部数据，还能改副本的主从配置（REPLICAOF）、篡改 "
+        "HeTu 从副本读到的数据。请给 default 用户设口令（节点 BACKENDS 的地址里带上口令），或者禁用它（ACL "
+        "SETUSER default off，节点改用别的用户）；ACL 和 requirepass 都不随复制同步，master 和每台副本都要设"
+    ).format(host=host)
+    if url.password is None and not url.username:
+        return [warning]
+    client = (connect or _connect_redis)(url._replace(netloc=host).geturl())
+    try:
+        await client.ping()
+    except Exception:  # noqa: BLE001 要口令（NOAUTH）、被拒、连不上：都不算能匿名连上
+        return []
+    finally:
+        await client.aclose()
+    return [warning]
+
+
 def check_listen(host: str) -> list[str]:
     """--listen 不是回环地址就告警：别人也能查到节点地址"""
     try:
@@ -1011,6 +1044,7 @@ async def _main(args: Any) -> int:
     client = _connect_redis(url)
     try:
         warnings = await check_redis(client, url)
+        warnings += await check_anonymous_access(url)
         warnings += check_listen(host)
         for warning in warnings:
             logger.warning(warning)

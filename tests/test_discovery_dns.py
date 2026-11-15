@@ -31,6 +31,7 @@ from hetu.discovery.dns import (
     NodeAddress,
     Prober,
     Selector,
+    check_anonymous_access,
     check_listen,
     check_network,
     check_redis,
@@ -468,6 +469,57 @@ async def test_refresh_answers_new_nodes_after_probing_and_survives_read_errors(
     assert answers(ask(service, a_query())) == []
 
 
+class _PingClient:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self.closed = False
+
+    async def ping(self) -> bool:
+        if self.error is not None:
+            raise self.error
+        return True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_no_password_in_the_url_is_warned_without_another_connection():
+    """hetu dns 自己就是不带口令连上的：直接告警，不用另连一次"""
+
+    def connect(url: str) -> Any:
+        raise AssertionError("不该另连")
+
+    warnings = await check_anonymous_access("redis://10.0.1.20:6379/0", connect=connect)
+    assert len(warnings) == 1
+    assert "10.0.1.20:6379 不带口令也能连上" in warnings[0]
+
+
+async def test_anonymous_probe_drops_the_credentials():
+    """去掉地址里的用户名和口令另连一次：要口令（NOAUTH）就不告警，PING 得通就告警；告警里不带口令"""
+    import redis.exceptions
+
+    url = "redis://hetu-dns:dns-secret@10.0.1.20:6379/0?protocol=2"
+    seen: list[str] = []
+    clients: list[_PingClient] = []
+
+    def connect_with(error: BaseException | None):
+        def connect(probe_url: str) -> Any:
+            seen.append(probe_url)
+            clients.append(_PingClient(error))
+            return clients[-1]
+
+        return connect
+
+    noauth = redis.exceptions.AuthenticationError("Authentication required.")
+    assert await check_anonymous_access(url, connect=connect_with(noauth)) == []
+    warnings = await check_anonymous_access(url, connect=connect_with(None))
+    assert seen == ["redis://10.0.1.20:6379/0?protocol=2"] * 2
+    assert all(client.closed for client in clients)
+    assert len(warnings) == 1
+    assert "dns-secret" not in warnings[0]
+    assert await check_anonymous_access("unix:///run/redis.sock") == []
+
+
 def test_listen_outside_loopback_is_warned():
     assert check_listen("127.0.0.1") == []
     assert check_listen("0.0.0.0")
@@ -597,6 +649,31 @@ async def test_denied_hgetall_explains_the_grant(replica):
 
 
 @pytest.mark.timeout(60)
+async def test_replica_without_a_default_password_is_warned(replica):
+    """
+    测试用的副本 default 用户没设口令：hetu dns 用的只读用户权限再小也没用，告警；给 default 设上口令之后不告警
+    """
+    import redis as sync_redis
+
+    _master, replica_url, replica_io = replica
+    url = create_dns_user(replica_io, replica_url)
+    warnings = await check_anonymous_access(url)
+    assert len(warnings) == 1, warnings
+    assert "不带口令也能连上" in warnings[0]
+    replica_io.execute_command(
+        "ACL", "SETUSER", "default", "resetpass", ">default-secret"
+    )
+    try:
+        assert await check_anonymous_access(url) == []
+    finally:
+        admin = sync_redis.Redis.from_url(replica_url, password="default-secret")
+        try:
+            admin.execute_command("ACL", "SETUSER", "default", "nopass")
+        finally:
+            admin.close()
+
+
+@pytest.mark.timeout(60)
 async def test_native_cluster_is_rejected(ses_redis_cluster_service):
     """连到不持有 hetu:nodes 的集群节点：收到 MOVED，第一版不支持原生集群，以 2 退出"""
     import redis as sync_redis
@@ -712,6 +789,8 @@ def test_hetu_dns_end_to_end(replica):
     assert "答案变了" in log, log
     assert "收到第一个查询" in log, log
     assert "权限太大" not in log, log
+    # 测试用的副本 default 用户没设口令
+    assert "不带口令也能连上" in log, log
 
 
 @pytest.mark.timeout(120)

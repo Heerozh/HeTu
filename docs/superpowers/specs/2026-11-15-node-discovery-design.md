@@ -327,6 +327,7 @@ dynamic a {
 | 连得上 Redis，HGETALL `hetu:nodes` 没被拒绝 | 退出（3）；被 ACL 拒绝时，把要授权的命令打出来 |
 | HGETALL 没有收到 MOVED / ASK（连的不是原生集群） | 退出（2）：第一版不支持原生集群，请经代理层连（§13）。恰好连到持有这个 key 的分片主节点时查不出来；之后槽位迁走了，运行时读失败的错误日志里同样这么说 |
 | 权限是不是太大：HGETALL 一个注册表以外的 key | 没被拒绝就告警：网关暴露在公网，请用只读、只能读 `hetu:nodes` 的用户，并打出建用户的命令 |
+| 不带口令也能连上：去掉地址里的用户名、口令另连一次，PING 得通（地址里本来就没口令时直接算） | 告警：default 用户没设口令时，网关被攻破的话攻击者直接用它，只读用户形同虚设。请给 default 设口令或禁用它（master 和每台副本都要设） |
 | 连的是不是 master（`ROLE`，被 ACL 拒绝就跳过这条） | 是 master 就告警，请指向副本 |
 | `--listen` 是回环地址 | 不是就告警：别人也能查到节点地址 |
 | bind 成功 | 失败（比如端口被占）就退出（3） |
@@ -526,6 +527,8 @@ ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgeta
 - §6.5 的 ACL 命令（加 `+select`，用的是 12 号库）用 Redis 8.10.3 实测：redis-py 8 默认的 RESP3 握手（HELLO）、
   `CLIENT SETINFO` 都不受影响，`HGETALL hetu:nodes` 能读，别的 key、`ROLE` 被拒（测试里按 `ACL_COMMAND` 建用户）。
 - `--once` 打印的是给人看的报告（会答哪些地址、哪些不答和原因、解析不了的登记、别的 namespace），不是一行 JSON。
+- 审查后加的：不带口令也能连上 Redis 就告警（§6.5）。hetu dns 自己的用户权限再小，副本的 default 用户没设口令时
+  网关一旦被攻破照样全开；文档写明副本的 default 用户要设口令或禁用。
 
 **顺带修的现存问题**：用 Dockerfile 构建的镜像里没有 `hetu/data/backend/redis/commit_v2.lua`（构建时没有 .git，
 setuptools-scm 列不出文件，package-data 又没列它），已发布的 `heerozh/hetu:latest`（2026-11-09 构建）也是这样，
