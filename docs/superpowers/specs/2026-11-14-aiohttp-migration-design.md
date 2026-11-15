@@ -1120,7 +1120,8 @@ abort。所以：
   - 管理进程 → worker：`stop`。所有平台都用它通知停服，不转发信号；
   - worker 在一个线程里等管理进程的消息（Windows 的 selector 事件循环等不了管道），收到后用
     `call_soon_threadsafe` 转回事件循环。管理进程没了（kill -9、OOM，daemon 标志不起作用）时 worker 读到
-    EOF，同样优雅退出；
+    EOF，同样优雅退出。这时日志队列没人读了，worker 退出前放弃队列里的积压（`safelogging.abandon_queues`）：
+    不然关服时打的日志写满管道，队列的后台线程就一直卡着，进程退出时等它就永远退不出去；
   - 用两条单向管道，而不是一条双向的：收、发在不同的线程里，不用操心 Connection 的线程安全。
 
 **开服**
@@ -1147,6 +1148,8 @@ abort。所以：
   ack 超时被强制结束）也算一次失败。Sanic 不会自动重启崩溃的 worker（§3.2 第 11 条），这是新行为。
 - 丢租约：worker 走正常的关服流程（§5.4.4），告诉管理进程，以 `LEASE_LOST_EXIT_CODE` 退出，由管理进程重启。
   没有在续约任务里 `sys.exit`：SystemExit 会直接冒出 run，跳过关服流程。
+- 开好服之后 worker 出错退出的（比如关服时 `runtime.stop()` 出错）：worker 自己不打，说明交给管理进程打出来
+  （管理进程没了就自己写 stderr）。
 
 **停机与信号**
 
@@ -1154,15 +1157,17 @@ abort。所以：
   - 关服信号（SIGINT、SIGTERM，Windows 上还有 Ctrl+Break）只认第一个，之后的都不理，不会像 Sanic 那样第二个
     信号就强杀整个进程组。收到过关服信号之后，退出前一直忽略它们；
   - Docker 里管理进程是 PID 1，显式装了 SIGTERM 的处理；
-  - 主循环每 0.25 秒醒一次，Windows 上的 Ctrl+C 也能及时生效（§3.2 第 8 条）。
+  - 主循环每 0.25 秒醒一次。Windows 上主线程在 `multiprocessing.connection.wait`（`WaitForMultipleObjects`）里等
+    的时候按 Ctrl+C：信号处理跑完之后它抛 `InterruptedError`，不像 POSIX 那样自动重试。主循环接住，当作这一轮
+    没有事件，接着看要不要关服（§3.2 第 8 条）。
 - 管理进程经控制管道通知所有 worker 停服，等它们退出。每个 worker 最多等
   `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒，`worker_stop_timeout`，对应 worker
   关服时各步的预算，见 §5.5），超时还没退出的强制结束。编排器的宽限期（compose 的 `stop_grace_period`）要比它
   长，第 6 步写进文档。
 - Unix 上，终端里的 Ctrl+C 会把 SIGINT 发给整个前台进程组，worker 也会收到：worker 和单进程一样只认第一个关服
   信号（`_install_stop_signals`），和管理进程的停服通知谁先到都一样。没有把 worker 移出前台进程组。
-- Windows 上，Ctrl+C 会发给控制台里的所有进程：worker 在入口处就忽略 SIGINT，只听管理进程的通知，这样 Windows
-  上也能优雅停机，不再硬杀。`lease_owner_exited` 保留作兜底（worker 被强制结束时）。
+- Windows 上，Ctrl+C、Ctrl+Break 会发给控制台里的所有进程：worker 在入口处就忽略 SIGINT 和 SIGBREAK，只听管理
+  进程的通知，这样 Windows 上也能优雅停机，不再硬杀。`lease_owner_exited` 保留作兜底（worker 被强制结束时）。
 
 **socket**
 
@@ -1177,7 +1182,9 @@ abort。所以：
   app，文件列表由 worker 在 ready 时报上来。每秒查一次修改时间。
 - 有改动就逐个重启 worker：每个序号都先停旧的再起新的，新的就绪之后才动下一个。
 - 改坏了、新的没开起服来：停在这个序号，打出它的出错说明，其余 worker 照旧服务；下一次改动时从头再重启一遍。
-  这种失败不算进崩溃重启的次数，免得开发时改坏一次文件服务器就退出。
+  这种失败不算进崩溃重启的次数，免得开发时改坏一次文件服务器就退出。只有正在重载的那个序号这样处理，重载期间
+  别的序号意外退出照常退避重启。
+- 重载途中要求关服：停完正在停的旧 worker 就收手，不再起新的。
 
 **测试**（`tests/test_supervisor.py`）
 
@@ -1185,12 +1192,16 @@ abort。所以：
   - 各 worker 的 `HETU_WORKER_INDEX` 互不相同，管理进程的环境里不留；关服时都经控制管道收到停服；
   - 就绪前出错：整体失败、不重启，三个一起出错时说明只打一次；`StartupAborted` 用单进程的说法；没有说明时打
     退出码；
-  - ack 超时：以 1 退出，写明哪个 worker 卡住了；开服途中关服：以 0 退出；
-  - 崩溃的 worker 退避后以同一序号重启；连续失败超过上限整体退出；丢租约的重启；
+  - ack 超时：以 1 退出，写明哪个 worker 卡住了，直接强制结束；开服途中关服：以 0 退出；
+  - 崩溃的 worker 退避后以同一序号重启；连续失败超过上限整体退出；丢租约的重启；稳定跑满 stable_after 之后才崩
+    的从头计数；重启出来的卡在开服里：强制结束，算一次失败；
+  - 开好服之后、关服时 worker 出错：说明由管理进程打出来；
   - 不理停服通知的，到时强制结束；
-  - 关服信号只认第一个：真往测试进程发两次 SIGTERM 和一次 SIGINT，worker 照常关完服，没有被强杀；
+  - 关服信号只认第一个：用 `signal.raise_signal` 发两次 SIGTERM 和一次 SIGINT，worker 照常关完服，没有被强杀；
+  - Windows 上 Ctrl+C 让 `connection.wait` 抛 `InterruptedError`：在 Linux 上模拟，照常关服；
   - worker 一侧：收到停服通知、或者读到 EOF，都会停；
-  - 自动重载：逐个重启，每个序号先停后起；改坏了停在那个序号，其余照旧，改好后的下一次改动恢复；
+  - 自动重载：逐个重启，每个序号先停后起；改坏了停在那个序号，其余照旧，改好后的下一次改动恢复；重载途中关服不
+    再起新的；
   - 退避的数、关服上限的数。
 - 端到端，真起 `hetu start`（aiohttp 栈、多个 worker）：
   - 两个 worker 都接连接；kill -9 其中一个，它以原序号回来、重新接连接；Ctrl+C（SIGINT 发给整个进程组）后以 0
@@ -1199,25 +1210,31 @@ abort。所以：
     一次，Connection 行删光，以 0 退出；
   - Redis 后端：开着服时两个 worker 各持有一个租约，关服之后都释放了；
   - app 导入出错：很快以非 0 退出，不重启，三个 worker 一起出错时 traceback 只打一次；
-  - kill -9 管理进程：worker 自己关服退出。
+  - kill -9 管理进程：worker 自己关服退出；配了进程安全队列的日志、关服时打出的日志写满管道时也一样。
 - `test_aiohttp_adapter.py`：`_serve` 的 worker 模式开好服报 ready，管理进程的通知（从别的线程）到了就关服；
   丢租约时报告管理进程，以非 0 退出。
-- 变异检查共 15 个，都被抓到：
+- 变异检查共 21 个，都被抓到：
   - 启动后不从管理进程的环境里删 `HETU_WORKER_INDEX`；
   - 每个开服失败都打全说明；
-  - 没有 ack 超时；就绪超时的 worker 只发停服通知、不强制结束；
-  - 崩溃后不重启；连续失败不放弃；重启时换了序号；
+  - 没有 ack 超时；就绪超时的 worker 只发停服通知、不强制结束；重启出来的 worker 就绪超时不处理；
+  - 崩溃后不重启；连续失败不放弃；稳定跑满之后不从头计数；重启时换了序号；
   - 不发停服通知；
   - 第二个关服信号强杀 worker；收到过关服信号之后恢复原来的处理；
-  - worker 读到 EOF 不停服；
-  - 自动重载先起新的再停旧的；改坏了接着重启下一个；
+  - 不接 Windows 上 `connection.wait` 抛的 `InterruptedError`；
+  - worker 读到 EOF 不停服；管理进程没了时不放弃日志队列；
+  - 开好服之后出错的说明不打；
+  - 自动重载先起新的再停旧的；改坏了接着重启下一个；重载途中要求关服还起新的；
   - worker 不报 ready；丢租约不报告管理进程。
 
-  第一轮有两个漏网：
+  漏网过、补了测试的：
   - "每个开服失败都打全说明"：别的 worker 一旦被通知停服，它们的失败就不再记，那条"也没能开服"几乎走不到。
     改成开服阶段有说明的失败都记，测试要求恰好一条说明加两行"也没能开服"；
   - "重载先起新的再停旧的"：假 worker 停得比新进程起来快，记下的先后看不出来。改成假 worker 收到停服后过 1 秒
-    才退出。
+    才退出；
+  - "不接 InterruptedError"：模拟 Windows 的假 wait 先被 `Connection.poll` 内部的 `wait([self])` 调到，由
+    `_receive` 接住了，测不到 `_poll`。改成只打断同时等好几个对象的那次；
+  - "改坏了接着重启下一个"：测试在出错日志出现后 20ms 就把文件改好了，下一个 worker 起来时已经是好的代码。改成
+    过 1 秒再改好。
 
 **Windows 人工检查清单**（没有 CI）：
 
@@ -1235,6 +1252,26 @@ abort。所以：
   关服信号处理，没有把 worker 移出前台进程组。
 - DEBUG 自动重载时改坏了不退出、不算失败次数，等下一次改动（原设计没写）。
 - SO_REUSEPORT 没做。
+
+**PR #233 审查后的修改**：
+
+- 高：Windows 上 Ctrl+C 会让管理进程崩掉，所有 worker 被硬杀。
+  - 主线程在 `multiprocessing.connection.wait` 里被 Ctrl+C 打断时，`WaitForMultipleObjects` 跑完信号处理后抛
+    `InterruptedError`，不自动重试。
+  - 原来它冒出 `run()`，`finally` 把 worker 都强杀了。现在 `_poll`、`_receive` 接住它。
+- 中：管理进程被 kill -9 后，配了进程安全队列日志的 worker 退出时永久卡住。
+  - 每个 worker 都握着队列的读端，管理进程没了以后没人读，写方也收不到 EPIPE。
+  - 关服时的日志写满管道（约 64KB），队列的后台线程卡在写上，还拿着跨进程的写锁；退出时 `_finalize_join` 等它，
+    就永远等下去。
+  - 现在 worker 读到 EOF 后，退出前放弃队列的积压。
+- 中：开好服之后 worker 出错退出（关服时 `runtime.stop()` 出错等）的说明被吞了。现在管理进程只要收到说明就打出
+  来；管理进程没了时，worker 自己写 stderr。
+- 低：
+  - Windows 上 worker 也忽略 SIGBREAK；
+  - 重载途中要求关服，不再起新的；
+  - 重载期间别的序号就绪前失败，照常退避重启，只有正在重载的序号停住；
+  - 补了"重启出来的卡在开服里""稳定跑满之后从头计数"的测试（原来删掉这两条行为测试也照样过）；
+  - 信号测试改用 `signal.raise_signal`。
 
 ### 5.8 第 6 步：切换默认、删除 Sanic
 
