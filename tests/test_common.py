@@ -176,9 +176,12 @@ async def test_redis_keeper_detects_stolen_lease(mod_auto_backend):
     thief = RedisWorkerKeeper(501, redis_client)
     assert await thief.get_worker_id() == worker_id
 
-    # victim 醒来续约，必须发现自己已经不是持有者
+    # victim 醒来续约，必须发现自己已经不是持有者，并且马上停止发号：上层接着是优雅关服，期间还会
+    # 发号，等安全期自己过完就会和 thief 撞号
     with pytest.raises(SystemExit):
         await victim.keep_alive()
+    assert victim.lease_deadline is not None
+    assert time.monotonic() > victim.lease_deadline
 
     # 而且不能把 thief 的租约刷掉或删掉
     assert await redis_client.get(victim._key(worker_id)) is not None
@@ -706,6 +709,11 @@ async def test_snowflake_lease_fence():
     keeper.lease_deadline = time.monotonic() + 60
     assert generator.next_id() > 0
 
+    # 续约发现租约已经被接手：马上关掉，不等安全期过完
+    keeper.close_fence()
+    with pytest.raises(WorkerLeaseExpired):
+        generator.next_id()
+
     # 不提供租约的分配器（开发模式）不启用围栏
     keeper.lease_deadline = None
     assert generator.next_id() > 0
@@ -745,6 +753,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     time.sleep(0.01)
     await keeper.keep_alive()
     assert keeper.lease_deadline > old
+
+    # 释放之后别的进程马上就能拿走这个 id，不能再发号
+    await keeper.release_worker_id()
+    assert time.monotonic() > keeper.lease_deadline
 
 
 def test_batched():
@@ -919,6 +931,7 @@ async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
         assert master.run_sync_(SQLiteStore.kv_set_nx, key, b"thief", 60)
         with pytest.raises(SystemExit):
             await first.keep_alive()
+        assert time.monotonic() > first.lease_deadline  # 被抢就马上停止发号
         await first.release_worker_id()
         assert master.run_sync_(SQLiteStore.kv_get, key) == b"thief"
         master.run_sync_(SQLiteStore.kv_delete_if, key, b"thief")

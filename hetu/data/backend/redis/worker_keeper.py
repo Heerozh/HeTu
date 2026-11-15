@@ -112,7 +112,7 @@ class RedisWorkerKeeper(WorkerKeeper):
       不能用 `EXPIRE`——它只看 key 在不在、**不看 value**，key 被别人用 SET NX 抢走后
       它照样返回1，恰恰漏掉会产生重复ID的那种情况。
       副作用是"不是自己的"时会把对方的 TTL 也刷成满值，无害：对方本来每5秒就自己刷一次，
-      而我们这侧立刻退出，不会反复刷。
+      而我们这侧马上关掉发号围栏、退出，不会反复刷。
     * **接手标识相同的租约**（多半是自己重启前留下的）用 LUA_TAKE_OVER_IF_STALE，见下面"复用"。
     * **释放** 用 LUA_RELEASE_IF_MINE。原来是无条件 `DEL`：如果自己的租约早已过期并被别人
       接手，关服时会删掉**别人的**租约，对方瞬间变无主，第三个 worker 又能抢走同一个 id。
@@ -132,7 +132,7 @@ class RedisWorkerKeeper(WorkerKeeper):
     正常关服会释放租约，重启时没有这一步。
 
     "没被续约"只能说明它停住了，不能证明它死了：一个标识撞了的进程如果整个卡住超过 REUSE_STALE_SEC
-    秒，正好赶上另一个同标识的进程开服，会被当成死的接手。它醒来后下一次续约就会发现、退出，但在那之前
+    秒，正好赶上另一个同标识的进程开服，会被当成死的接手。它醒来后下一次续约就会发现、关围栏、退出，但在那之前
     发出的号可能和接手的进程重复。要完全排除，得等到它的发号围栏过了（45 秒）才接手，复用就失去了意义。
     正常情况下同一个标识的上一个进程一定已经退出了（容器重启、管理进程等旧 worker 退出才起新的），
     只有标识撞了（token 文件被打进镜像、几个容器共用 /var/tmp）才会遇到。
@@ -348,6 +348,8 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         if self.worker_id == -1:
             return
+        # 决定释放就不再发号：释放之后别的进程马上就能拿走这个 id
+        self.close_fence()
         deleted = await self.aio.eval(
             LUA_RELEASE_IF_MINE, 1, self._key(self.worker_id), self.node_id
         )
@@ -368,7 +370,7 @@ class RedisWorkerKeeper(WorkerKeeper):
     async def keep_alive(self):
         """
         续租 Worker ID 的有效期。用 `GETEX` 做 compare-and-expire，只有确认这把锁还是
-        自己的才算续约成功；被抢走或已消失则抛 SystemExit，由上层重启 worker。
+        自己的才算续约成功；被抢走或已消失则马上关掉发号围栏、抛 SystemExit，由上层重启 worker。
         此方法需要每5秒调用1次。
 
         时间戳高水位不在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
@@ -376,6 +378,8 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         worker_id = self.worker_id
         if not await self._getex_if_mine(worker_id):
+            # 上层收到 SystemExit 后是优雅关服，期间还会发号，围栏不关就会和接手的进程撞号
+            self.close_fence()
             logger.error(
                 _(
                     "[❄️ID] 续约 Worker ID {worker_id} 失败: "

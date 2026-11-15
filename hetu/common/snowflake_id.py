@@ -155,7 +155,8 @@ class SnowflakeID(metaclass=Singleton):
 
         围栏把这个窗口关掉：只在"最近一次续约成功后的安全期内"才肯发号。安全期由
         `WorkerKeeper.lease_deadline` 给出，算法见那里。keeper 不提供租约（开发模式）时
-        `lease_deadline` 恒为 None，围栏不启用。
+        `lease_deadline` 恒为 None，围栏不启用。续约发现租约已经被接手、或者已经释放时，keeper
+        马上关掉围栏（`WorkerKeeper.close_fence`），之后的关服过程里不再发号。
 
         这不引入新的故障模式：续约失败意味着后端master写不进去，而每一次 insert/update
         都要写master——那时服务器本来就已经干不了活了。围栏只是把"静默产生重复主键"换成
@@ -267,7 +268,21 @@ class WorkerKeeper:
         #     lease_deadline = 发起续约前的 monotonic 时刻 + TTL - 余量
         # 必须用**发起前**而不是完成后的时刻：请求在网络上飞的这段时间，数据库那边的
         # 过期时间已经开始走了，用完成时刻算会高估自己的安全期。余量再覆盖两边时钟漂移。
+        #
+        # 确定租约已经不是自己的了（续约发现被接手、已经释放），子类调 `close_fence` 马上关掉，
+        # 不等安全期过完。
         self.lease_deadline: float | None = None
+
+    def close_fence(self) -> None:
+        """
+        租约已经不是自己的了：马上停止发号。
+
+        续约发现被接手之后，上层是优雅关服（排空在途的 RPC、跑断线 System），这期间还会发号；
+        安全期没过完的话，发出的号会和接手的进程撞。
+
+        Stop minting ids right away: the lease is no longer ours.
+        """
+        self.lease_deadline = float("-inf")
 
     async def get_worker_id(self) -> int:
         raise NotImplementedError

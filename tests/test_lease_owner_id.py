@@ -334,6 +334,8 @@ async def test_renewal_detects_takeover_by_same_identity(mod_auto_backend, new_n
         await aio.set(key, twin.node_id, ex=60)  # 标识相同的进程用 SET NX 拿走
         with pytest.raises(SystemExit):
             await holder.keep_alive()
+        assert holder.lease_deadline is not None
+        assert time.monotonic() > holder.lease_deadline  # 发现了就马上停止发号
     finally:
         await aio.delete(key)
 
