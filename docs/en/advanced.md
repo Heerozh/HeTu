@@ -1268,20 +1268,28 @@ The numbers you actually care about:
 - Up to 1024 workers across the cluster (the lease pool).
 - 69 years of headroom from the epoch (`2025-12-18` UTC+8).
 
-Worker IDs are leased automatically by `WorkerKeeper`: on the Redis
-backend each lease is a Redis key renewed every 5 seconds, and if a
-process dies without releasing its lease, the slot is reclaimed after the
-lease expires. A container that restarts, or a worker restarted by the
-manager process under the same index, reuses its previous id. To tell apart
-containers that share a hostname on one host (host networking, for example),
-each container stores a random token in `/var/tmp/hetu-node-token` on first
-start; delete it before committing an image from a container that has run
-HeTu. The SQLite backend (development only) simply uses the process's index
-on the host. On startup, the engine restores the *last
-persisted timestamp* from the `WorkerLease` `Component` (a `core`/volatile
-table) and waits a short grace period if the system clock has gone
-backwards — that's HeTu's defense against duplicate ids when a host's NTP
-slews after a reboot.
+Worker IDs are leased automatically by `WorkerKeeper`: on the Redis backend
+each lease is a Redis key renewed every 5 seconds, and if a process dies
+without releasing its lease, the slot is reclaimed after the lease expires (60
+seconds). A container that restarts, or a worker restarted by the manager
+process under the same index, takes back its previous id, so that a few
+hundred workers restarting abnormally at once don't use up the 1024 ids with
+old and new leases combined (a normal shutdown releases the lease, so it has
+no such problem). Before taking an id back it makes sure the old lease has
+gone unrenewed for at least 7 seconds, so a restart after an abnormal exit can
+take up to 7 seconds longer to start serving. To tell apart containers that
+share a hostname on one host (host networking, for example), each container
+stores a random token in `/var/tmp/hetu-node-token` on first start; delete it
+before committing an image from a container that has run HeTu. When k8s
+restarts a container within the same pod, the container's writable layer is
+new, so the token changes and the old id can't be taken back; if you need
+that, mount `/var/tmp` as a pod-level `emptyDir` into one HeTu container of
+the pod only (containers that mount the same directory get the same token).
+The SQLite backend (development only) simply uses the process's index on the
+host. On startup, the engine restores the *last persisted timestamp* from the
+`WorkerLease` `Component` (a `core`/volatile table) and waits a short grace
+period if the system clock has gone backwards — that's HeTu's defense against
+duplicate ids when a host's NTP slews after a reboot.
 
 For your code, the practical implications are short:
 
