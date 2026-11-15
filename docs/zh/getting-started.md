@@ -131,7 +131,8 @@ uv run hetu start \
 
 ```csharp
 // Connect is a blocked async function, so we use fire and forget.
-_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
+// 路径最后一段是实例名，也就是开服时的 --instance
+_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/dev");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
 

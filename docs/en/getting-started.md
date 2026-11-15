@@ -148,7 +148,8 @@ Then, in any MonoBehaviour:
 
 ```csharp
 // Connect is a blocked async function, so we use fire and forget.
-_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
+// The last path segment is the instance name, i.e. --instance at startup
+_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/dev");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
 
