@@ -1404,10 +1404,4 @@ Headless can be created and used on an event loop in a non-main thread and does 
 - **[Operations](operations.md)** — production deployment, Redis topology,
   the `hetu` CLI, and the rest of `config.yml`.
 - **[API Reference](api/)** — every public symbol referenced on this page.
-  refer `new_rows(N)` so all ids come from
-  the same monotonic burst.
-- The clock-rollback guard means **a server with a wildly wrong clock
-  will refuse to issue ids and stall**. Run NTP. If you must fix a
-  rollback, restart the affected workers — the keeper will reseed the
-  timestamps automatically.
 
