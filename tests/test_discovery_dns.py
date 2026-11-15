@@ -723,7 +723,18 @@ async def test_refresh_loop_survives_unexpected_errors(monkeypatch, caplog):
 
 def test_listen_outside_loopback_is_warned():
     assert check_listen("127.0.0.1") == []
+    assert check_listen("localhost") == []  # 主机名按解析出的地址判断
     assert check_listen("0.0.0.0")
+
+
+async def test_once_reports_a_failed_read_instead_of_keeping_the_old_answer():
+    """--once 没有上一次的结果可答：读注册表失败就以 3 退出，如实说读失败了"""
+    client = FakeClient()
+    client.fail = True
+    service = DnsService(client, namespace="game")
+    with pytest.raises(DnsCheckFailed, match="读注册表失败") as e:
+        await service.refresh(keep_previous=False)
+    assert e.value.code == 3
 
 
 def test_bridge_network_is_rejected(tmp_path):
@@ -766,7 +777,7 @@ def replica(ses_redis_service):
     try:
         yield master, replica_url, replica_io
     finally:
-        for user in ("hetu-dns", "hetu-dns-noperm"):
+        for user in ("hetu-dns", "hetu-dns-noperm", "hetu-dns-admin"):
             replica_io.acl_deluser(user)
         replica_io.close()
         master.flushdb()
@@ -812,7 +823,9 @@ async def test_default_user_and_master_are_warned(replica, ses_redis_service):
         warnings = await check_redis(client, replica_url)
     finally:
         await client.aclose()
-    assert any("权限太大" in w for w in warnings), warnings
+    (too_powerful,) = [w for w in warnings if "权限太大" in w]
+    assert "别的 key 也能读" in too_powerful
+    assert "管理命令" in too_powerful
     assert not any("连的是 master" in w for w in warnings), warnings
     master_url = ses_redis_service[0].rsplit("/", 1)[0] + "/12"
     client = await _connect(master_url)
@@ -821,6 +834,31 @@ async def test_default_user_and_master_are_warned(replica, ses_redis_service):
     finally:
         await client.aclose()
     assert any("连的是 master" in w for w in warnings), warnings
+
+
+@pytest.mark.timeout(60)
+async def test_user_limited_only_by_key_is_still_too_powerful(replica):
+    """只限了 key 的用户（~hetu:nodes +@all）照样能 FLUSHALL、CONFIG SET、REPLICAOF：也算权限太大"""
+    _master, replica_url, replica_io = replica
+    replica_io.execute_command(
+        "ACL",
+        "SETUSER",
+        "hetu-dns-admin",
+        "on",
+        ">x",
+        "resetkeys",
+        "~hetu:nodes",
+        "+@all",
+    )
+    url = acl_url(replica_url, "hetu-dns-admin", "x")
+    client = await _connect(url)
+    try:
+        warnings = await check_redis(client, url)
+    finally:
+        await client.aclose()
+    (too_powerful,) = [w for w in warnings if "权限太大" in w]
+    assert "管理命令" in too_powerful
+    assert "别的 key 也能读" not in too_powerful
 
 
 @pytest.mark.timeout(60)
@@ -1018,13 +1056,20 @@ def test_once_reports_what_would_be_answered(replica):
             "game",
             "--port",
             str(node_port),
+            "--listen",
+            "0.0.0.0:11053",
             "--once",
             env={"HETU_DNS_REDIS": url},
         )
     finally:
         node.close()
     report = proc.stdout.decode("utf-8", "replace")
-    assert proc.returncode == 0, (report, proc.stderr.decode("utf-8", "replace"))
+    stderr = proc.stderr.decode("utf-8", "replace")
+    assert proc.returncode == 0, (report, stderr)
+    # 告警只打在报告里，不再进 stderr 的日志（测试用的副本 default 用户没设口令）
+    assert "不带口令也能连上" in report, report
+    assert "不带口令也能连上" not in stderr, stderr
+    assert "--listen 0.0.0.0 不是回环地址" in report, report
     assert "会答 1 个地址" in report, report
     assert "127.0.0.1  1 个 worker，12 个连接" in report, report
     assert "127.0.0.2  登记" in report, report

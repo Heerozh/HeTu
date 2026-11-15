@@ -608,14 +608,24 @@ class DnsService:
 
     # ------------------------------------------------------------ 重算
 
-    async def refresh(self, *, wait_probes: bool = False) -> Selection | None:
+    async def refresh(
+        self, *, wait_probes: bool = False, keep_previous: bool = True
+    ) -> Selection | None:
         """
-        读一次注册表、重算答案。读失败时一直答上一次的结果并打错误日志，返回 None。wait_probes：等新地址的
-        探测做完再算（第一次重算、--once 用），不然探测在后台做、下一次重算时生效
+        读一次注册表、重算答案。读失败时一直答上一次的结果并打错误日志，返回 None；keep_previous 为假时
+        （--once）抛 DnsCheckFailed（3）。wait_probes：等新地址的探测做完再算（第一次重算、--once 用），不然
+        探测在后台做、下一次重算时生效
+
+        Re-read the registry and recompute the answer.
         """
         try:
             raw = await self.client.hgetall(REGISTRY_KEY)
-        except Exception as e:  # noqa: BLE001 读失败就接着答上一次的
+        except Exception as e:  # 读失败：常驻时接着答上一次的，--once 时如实报
+            if not keep_previous:
+                raise DnsCheckFailed(
+                    EXIT_NOT_READY,
+                    _("❌ 读注册表失败：{err}").format(err=f"{type(e).__name__}: {e}"),
+                ) from e
             self._read_failing = True
             if is_master_down(e):
                 hint = _(
@@ -775,8 +785,10 @@ class _DnsProtocol(asyncio.DatagramProtocol):
 async def serve_udp(service: DnsService, host: str, port: int) -> Any:
     """在 host:port 上开始应答，返回 transport（关掉它就停止应答）"""
     loop = asyncio.get_running_loop()
+    # 写的是主机名（localhost）时只按 IPv4 解析：有的系统先解析出 ::1，Caddy 的 resolvers 写的是 127.0.0.1
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     transport, _protocol = await loop.create_datagram_endpoint(
-        lambda: _DnsProtocol(service), local_addr=(host, port)
+        lambda: _DnsProtocol(service), local_addr=(host, port), family=family
     )
     return transport
 
@@ -959,15 +971,25 @@ async def check_redis(client: Any, redis_url: str) -> list[str]:
             ),
         ) from e
     warnings = []
+    too_powerful = []
     try:
         await client.hgetall("hetu:dns-acl-probe")
     except errors.ResponseError:
         pass
     else:
+        too_powerful.append(_("除了 hetu:nodes 别的 key 也能读"))
+    # 只限了 key 的用户（~hetu:nodes +@all）照样能 FLUSHALL、CONFIG SET、REPLICAOF：拿一条无害的管理命令试
+    try:
+        await client.execute_command("CONFIG", "GET", "maxmemory")
+    except errors.ResponseError:
+        pass
+    else:
+        too_powerful.append(_("能执行管理命令（CONFIG、REPLICAOF 这些）"))
+    if too_powerful:
         warnings.append(
-            _(
-                "⚠️ Redis 用户的权限太大：除了 hetu:nodes 别的 key 也能读。网关暴露在公网，{hint}"
-            ).format(hint=_acl_hint())
+            _("⚠️ Redis 用户的权限太大：{what}。网关暴露在公网，{hint}").format(
+                what=_("；").join(too_powerful), hint=_acl_hint()
+            )
         )
     try:
         role = await client.execute_command("ROLE")
@@ -1028,12 +1050,22 @@ async def check_anonymous_access(
 
 
 def check_listen(host: str) -> list[str]:
-    """--listen 不是回环地址就告警：别人也能查到节点地址"""
+    """
+    --listen 不是回环地址就告警：别人也能查到节点地址。写的是主机名（localhost）时按解析出的地址判断
+
+    Warn unless --listen is a loopback address.
+    """
     try:
-        loopback = ipaddress.ip_address(host).is_loopback
+        addresses = {ipaddress.ip_address(host)}
     except ValueError:
-        loopback = False
-    if loopback:
+        try:
+            addresses = {
+                ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+                for info in socket.getaddrinfo(host, None, type=socket.SOCK_DGRAM)
+            }
+        except OSError, ValueError:
+            addresses = set()
+    if addresses and all(address.is_loopback for address in addresses):
         return []
     return [
         _(
@@ -1137,6 +1169,10 @@ async def _main(args: Any) -> int:
             _("❌ --name 要是一个 ASCII 域名，现在是 {name!r}").format(name=args.name),
         )
     host, port = parse_listen_arg(args.listen)
+    # 服务模式一开始就接住 SIGTERM / SIGINT：容器里作为 PID 1 时，没装处理的 SIGTERM 会被忽略
+    stop = asyncio.Event()
+    if not args.once:
+        _install_stop_signals(stop)
     check_network(url)
     try:
         client = _connect_redis(url)
@@ -1151,19 +1187,19 @@ async def _main(args: Any) -> int:
         warnings = await check_redis(client, url)
         warnings += await check_anonymous_access(url)
         warnings += check_listen(host)
-        for warning in warnings:
-            logger.warning(warning)
         service = DnsService(
             client, namespace=args.namespace, name=args.name, port=args.port
         )
         if args.once:
-            selection = await service.refresh(wait_probes=True)
-            if selection is None:
-                return EXIT_NOT_READY
+            # 告警只打在报告里，不再进 stderr 的日志，终端里不用看两遍
+            selection = await service.refresh(wait_probes=True, keep_previous=False)
+            assert selection is not None
             print(format_report(service, selection, url))
             for warning in warnings:
                 print(warning)
             return 0
+        for warning in warnings:
+            logger.warning(warning)
         try:
             transport = await serve_udp(service, host, port)
         except OSError as e:
@@ -1187,7 +1223,7 @@ async def _main(args: Any) -> int:
                     url=mask_url(url),
                 )
             )
-            await _serve_until_stopped(service)
+            await _serve_until_stopped(service, stop)
         finally:
             transport.close()
             service.prober.cancel()
@@ -1196,12 +1232,15 @@ async def _main(args: Any) -> int:
         await client.aclose()
 
 
-async def _serve_until_stopped(service: DnsService) -> None:
+def _install_stop_signals(stop: asyncio.Event) -> None:
+    """SIGINT / SIGTERM 到了就 set stop。Windows 的事件循环不支持，那里靠 KeyboardInterrupt"""
     loop = asyncio.get_running_loop()
-    stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
             loop.add_signal_handler(sig, stop.set)
+
+
+async def _serve_until_stopped(service: DnsService, stop: asyncio.Event) -> None:
     refresher = asyncio.create_task(service.run_refresh_loop(), name="hetu:dns-refresh")
     try:
         await stop.wait()
@@ -1225,4 +1264,5 @@ def main(args: Any) -> int:
         logger.error(str(e))
         return e.code
     except KeyboardInterrupt:
-        return 0
+        # 常驻时 Ctrl+C 是正常停止；--once 被打断了，没跑完
+        return 130 if args.once else 0
