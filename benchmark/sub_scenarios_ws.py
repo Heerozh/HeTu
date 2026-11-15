@@ -838,6 +838,15 @@ def redis_snap(urls: list[str]) -> dict[str, Any]:
     return out
 
 
+def _established(proc: psutil.Process, port: int) -> int:
+    """proc 手上已建立的、本端口是 port 的 TCP 连接数"""
+    return sum(
+        1
+        for c in proc.net_connections(kind="tcp")
+        if c.status == "ESTABLISHED" and c.laddr.port == port
+    )
+
+
 class PerfStat:
     """`perf stat` 数 worker 的 user 态周期与指令（混合架构只取 P 核的计数）"""
 
@@ -1162,6 +1171,11 @@ class Harness:
             "conns": args.conns,
             "limit": args.limit,
             "workers": args.workers,
+            # 各 worker 手上的连接数（共享一个监听 socket，看分得匀不匀）
+            "worker_conns": sorted(
+                (n for n in (_established(p, args.port) for p in self.workers) if n),
+                reverse=True,
+            ),
             "servants": len(args.replicas),
             "step": step,
             "target_rate": rate,
@@ -1200,6 +1214,8 @@ class Harness:
             "rpc_rtt_p999_ms": round(pct(rtts, 0.999) * 1000, 2),
             "rpc_rtt_max_ms": round(max(rtts, default=float("nan")) * 1000, 2),
             "rpc_probes": len(rtts),
+            # 比一轮扇出（约 30ms）长得多的离群点个数
+            "rpc_rtt_over_40ms": sum(1 for r in rtts if r > 0.040),
             "probe_random": args.probe_random,
         }
         for name in REDIS_CMDS:

@@ -48,7 +48,12 @@ def parse_args():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--seconds", type=float, default=10)
     parser.add_argument("--warmup", type=float, default=3)
-    parser.add_argument("--server-cpu", type=int, default=3)
+    parser.add_argument(
+        "--server-cpu",
+        default="3",
+        help="服务器绑这些核（逗号分隔）。多 worker 时各 worker 不单独绑核，在这些核上由系统调度",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="服务器的 WORKER_NUM")
     parser.add_argument("--client-cpus", default="4,6,8,10")
     parser.add_argument("--perf", action="store_true")
     parser.add_argument(
@@ -60,7 +65,9 @@ def parse_args():
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-cpu", type=int, default=1)
     parser.add_argument("--client", type=int, default=-1, help=argparse.SUPPRESS)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.server_cpus = [int(x) for x in args.server_cpu.split(",")]
+    return args
 
 
 def cpu_environment(cpu):
@@ -84,10 +91,10 @@ def cpu_environment(cpu):
     }
 
 
-def perf_stat(pid, seconds):
-    """数 pid 接下来 seconds 秒的 user 态周期和指令。
+def perf_stat(pids, seconds):
+    """数这些进程（pid，逗号分隔）接下来 seconds 秒的 user 态周期和指令，加总。
 
-    Count user-mode cycles and instructions of pid for the next seconds.
+    Count user-mode cycles and instructions of the given pids for the next seconds.
     """
     return subprocess.Popen(
         [
@@ -98,7 +105,7 @@ def perf_stat(pid, seconds):
             "-e",
             "cycles:u,instructions:u,ref-cycles:u",
             "-p",
-            str(pid),
+            str(pids),
             "--",
             "sleep",
             str(seconds),
@@ -137,20 +144,38 @@ def core_times(cpu):
     raise LookupError(cpu)
 
 
-def snapshot(proc, cpu):
-    """窗口起止时记下进程的 CPU 时间、服务器核的 /proc/stat、进程的读写类系统调用数。
+def snapshot(procs, cpus):
+    """窗口起止时记下服务器各进程的 CPU 时间、服务器各核的 /proc/stat、读写类系统调用数（都是加总）。
 
-    Snapshot process CPU time, the server core's /proc/stat and syscall counts.
+    Snapshot the summed CPU time, /proc/stat of the server cores and syscall counts.
     """
-    times = proc.cpu_times()
-    with open(f"/proc/{proc.pid}/io") as f:
-        io = dict(line.split(": ") for line in f.read().splitlines())
-    return {
-        "wall": time.monotonic(),
-        "cpu": times.user + times.system,
-        "core": core_times(cpu),
-        "syscalls": int(io["syscr"]) + int(io["syscw"]),
-    }
+    cpu = 0.0
+    syscalls = 0
+    for proc in procs:
+        times = proc.cpu_times()
+        cpu += times.user + times.system
+        with open(f"/proc/{proc.pid}/io") as f:
+            io = dict(line.split(": ") for line in f.read().splitlines())
+        syscalls += int(io["syscr"]) + int(io["syscw"])
+    core = [sum(col) for col in zip(*(core_times(c) for c in cpus), strict=True)]
+    return {"wall": time.monotonic(), "cpu": cpu, "core": core, "syscalls": syscalls}
+
+
+def server_processes(server):
+    """服务器的进程树：单 worker 时就是它自己，多 worker 时还有各 worker（和 multiprocessing 的辅助进程）"""
+    proc = psutil.Process(server.pid)
+    return [proc, *proc.children(recursive=True)]
+
+
+def worker_connections(procs, port):
+    """各进程手上已建立的、本端口是 port 的 TCP 连接数（看连接在各 worker 间分得匀不匀）"""
+    counts = {}
+    for proc in procs:
+        conns = proc.net_connections(kind="tcp")
+        counts[proc.pid] = sum(
+            1 for c in conns if c.status == "ESTABLISHED" and c.laddr.port == port
+        )
+    return counts
 
 
 async def client(args):
@@ -261,7 +286,7 @@ def main(args):
 NAMESPACE: bench
 INSTANCES: [bench]
 LISTEN: 127.0.0.1:{args.port}
-WORKER_NUM: 1
+WORKER_NUM: {args.workers}
 DEBUG: false
 CLIENT_SEND_LIMITS: []
 SERVER_SEND_LIMITS: []
@@ -292,7 +317,9 @@ BACKENDS:
             "--",
             *cmd,
         ]
-    cmd = ["taskset", "-c", str(args.server_cpu), *cmd]
+    if args.profile and args.workers > 1:
+        raise SystemExit("--profile 只支持单 worker")
+    cmd = ["taskset", "-c", args.server_cpu, *cmd]
     children = []
     logs = []
     perfs = []
@@ -319,6 +346,15 @@ BACKENDS:
                 if time.monotonic() > deadline:
                     raise TimeoutError("Server startup")
                 time.sleep(0.1)
+        # 多 worker 时端口由管理进程先 bind，worker 后起来：等每个 worker 都打出开好服的那行日志
+        while (args.output / "server.log").read_text(errors="replace").count(
+            "已启动 bench 应用"
+        ) < args.workers:
+            if server.poll() is not None:
+                raise RuntimeError("Server failed; see server.log")
+            if time.monotonic() > deadline:
+                raise TimeoutError("Worker startup")
+            time.sleep(0.1)
         seeded = {}
         if args.workload == "get":
             seed_get_rows(root, args.redis)
@@ -382,17 +418,18 @@ BACKENDS:
         tmp = args.output / "schedule.tmp"
         tmp.write_text(json.dumps(windows))
         tmp.rename(args.output / "schedule.json")
-        proc = psutil.Process(server.pid)
+        procs = server_processes(server)
         if args.profile:
-            proc = next(p for p in proc.children() if "python" in p.name())
+            procs = [next(p for p in procs[0].children() if "python" in p.name())]
         affinity = {
-            "server": proc.cpu_affinity(),
+            "server": [p.cpu_affinity() for p in procs],
             "clients": [psutil.Process(p.pid).cpu_affinity() for p in children],
         }
-        assert affinity["server"] == [args.server_cpu], affinity
+        assert all(a == args.server_cpus for a in affinity["server"]), affinity
         for i, actual in enumerate(affinity["clients"]):
             assert actual == [int(client_cpus[i % len(client_cpus)])], affinity
-        environment_start = cpu_environment(args.server_cpu)
+        environment_start = cpu_environment(args.server_cpus[0])
+        connections = None
         cpu_before = None
         cpu_after = None
         round_cpu_start = [None] * args.rounds
@@ -402,26 +439,30 @@ BACKENDS:
             now = time.monotonic()
             for i, (begin, end) in enumerate(windows):
                 if round_cpu_start[i] is None and now >= begin:
-                    round_cpu_start[i] = snapshot(proc, args.server_cpu)
+                    round_cpu_start[i] = snapshot(procs, args.server_cpus)
                     if args.perf:
-                        round_perf[i] = perf_stat(proc.pid, args.seconds)
+                        round_perf[i] = perf_stat(
+                            ",".join(str(p.pid) for p in procs), args.seconds
+                        )
                         perfs.append(round_perf[i])
+                    if connections is None:
+                        connections = worker_connections(procs, args.port)
                 if round_cpu_end[i] is None and now >= end:
-                    round_cpu_end[i] = snapshot(proc, args.server_cpu)
+                    round_cpu_end[i] = snapshot(procs, args.server_cpus)
             if cpu_before is None and now >= first:
-                cpu_before = sum(proc.cpu_times()[:2])
+                cpu_before = sum(sum(p.cpu_times()[:2]) for p in procs)
             if cpu_after is None and now >= windows[-1][1]:
-                cpu_after = sum(proc.cpu_times()[:2])
+                cpu_after = sum(sum(p.cpu_times()[:2]) for p in procs)
             if now > windows[-1][1] + 30:
                 raise TimeoutError("Client completion")
             time.sleep(0.05)
         if any(p.returncode != 0 for p in children):
             raise RuntimeError("Client failed; see client logs")
         if cpu_after is None:
-            cpu_after = sum(proc.cpu_times()[:2])
+            cpu_after = sum(sum(p.cpu_times()[:2]) for p in procs)
         assert cpu_before is not None
         if round_cpu_end[-1] is None:
-            round_cpu_end[-1] = snapshot(proc, args.server_cpu)
+            round_cpu_end[-1] = snapshot(procs, args.server_cpus)
         results = [
             json.loads((args.output / f"client-{i}.json").read_text())
             for i in range(args.processes)
@@ -492,8 +533,12 @@ BACKENDS:
             },
             "rounds": rounds,
             "verified_cpu_affinity": affinity,
+            # 有连接的进程各分到多少个（管理进程、multiprocessing 的辅助进程手上是 0，不列）
+            "worker_connections": sorted(
+                (n for n in (connections or {}).values() if n), reverse=True
+            ),
             "cpu_environment_start": environment_start,
-            "cpu_environment_end": cpu_environment(args.server_cpu),
+            "cpu_environment_end": cpu_environment(args.server_cpus[0]),
             "median_qps": statistics.median(r["qps"] for r in rounds),
             "medians": {
                 key: statistics.median(r[key] for r in rounds)
