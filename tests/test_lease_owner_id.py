@@ -166,6 +166,26 @@ async def test_containers_sharing_hostname_get_their_own_worker_ids(
 
 
 @use_redis_family_backend_only
+async def test_startup_scan_does_not_extend_other_leases(mod_auto_backend, new_node):
+    """
+    开服读所有租约时不续期。原来逐个 GETEX，会把扫到的租约（包括已经死掉的）都刷回 60 秒：池子被死租约
+    占满时，拿不到 id 的 worker 每秒重试、每次都把它们再续一遍，死租约就永远过不了期
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    dead = "snowflake:worker:1010"
+    await aio.set(dead, "dead-host:1", px=30_000)
+    keeper = RedisWorkerKeeper(1, aio)
+    try:
+        await keeper.get_worker_id()
+        assert 0 < await aio.pttl(dead) <= 30_000
+    finally:
+        await keeper.release_worker_id()
+        await aio.delete(dead)
+
+
+@use_redis_family_backend_only
 async def test_supervised_worker_restart_reuses_its_worker_id(
     mod_auto_backend, new_node, monkeypatch
 ):

@@ -42,6 +42,10 @@ return 0
 """
 
 
+def _decode(value: bytes | str | None) -> str | None:
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
 def live_worker_leases(io: redis.Redis | redis.RedisCluster) -> dict[int, str]:
     """
     还持有租约的 worker id → 持有者（node_id）：服务器在跑、hetu call / shell 在跑（持有者带
@@ -96,6 +100,10 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     `SET key node_id NX EX ttl`（抢新id）本身就是原子的，不需要额外处理。
 
+    开服时用一次 pipeline 读完所有 id 的租约，不续期，只给自己那把续期。原来是逐个 `GETEX`，会把
+    扫到的每个租约（包括已经死掉的）都刷回 60 秒：池子被死租约占满时，拿不到 id 的 worker 每秒重试、
+    每次都把它们再续一遍，死租约就永远过不了期；而且每次开服是对 master 最多 1024 次的串行写。
+
     ## 配套的本地围栏
 
     上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 跑到之间还有最长一个
@@ -141,11 +149,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         started_at = monotonic()
         value = await self.aio.getex(self._key(worker_id), ex=WORKER_ID_EXPIRE_SEC)
-        if value is None:
-            return False
-        if isinstance(value, bytes):
-            value = value.decode("ascii", errors="replace")
-        if value != self.node_id:
+        if _decode(value) != self.node_id:
             return False
         self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
         return True
@@ -154,10 +158,8 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         工具进程分配：从 MAX_WORKER_ID 往下 SET NX，常见情况下一次就拿到。
 
-        不做服务器那样的复用扫描：工具进程每次都是新 pid，扫描必然 1024 次全落空；而且扫描
-        用的 GETEX 会把**所有**现存租约（包括已死 worker 的）TTL 刷回满值，工具进程调用得
-        勤，死租约就永不过期，hetu upgrade 会一直以为有服务器在跑。从上往下分配让工具进程
-        远离服务器从 0 往上占用的 id。
+        不做服务器那样的复用：工具进程每次都是新 pid，不会有自己重启前留下的租约。从上往下分配
+        让工具进程远离服务器从 0 往上占用的 id。
         """
         if self.worker_id >= 0 and await self._getex_if_mine(self.worker_id):
             return self.worker_id
@@ -183,46 +185,57 @@ class RedisWorkerKeeper(WorkerKeeper):
             )
         )
 
+    async def _read_leases(self) -> list[str | None]:
+        """一次 pipeline 读完所有 worker id 的租约值，不续期。cluster 下按 slot 分发"""
+        pipe = self.aio.pipeline(transaction=False)
+        for worker_id in range(MAX_WORKER_ID + 1):
+            pipe.get(self._key(worker_id))
+        return [_decode(value) for value in await pipe.execute()]
+
+    async def _claim_free(self, worker_id: int) -> bool:
+        """SET NX 抢一个空着的 worker id（本身就是原子的抢占），抢到就武装围栏"""
+        started_at = monotonic()
+        result = await self.aio.set(
+            self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
+        )
+        if not result:
+            return False
+        # 抢到的这一刻就武装围栏，别等到第一次续约（那要5秒后）
+        self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+        logger.info(
+            _("[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}").format(
+                worker_id=worker_id, node_id=self.node_id
+            )
+        )
+        return True
+
     @override
     async def get_worker_id(self) -> int:
         """
-        从Redis中获取一个可用的 Worker ID。
+        从 Redis 中获取一个可用的 Worker ID：有自己重启前留下的就复用；否则在读到时空着的里面 SET NX
+        抢一个。都没有就抛 KeyError（服务器由上层每秒重试）。
         """
         if self.tool:
             return await self._get_tool_worker_id()
-        # 查找之前是否已经分配过自己的worker id
-        for worker_id in range(MAX_WORKER_ID + 1):
-            # node_id 相同说明是自己重启前的那个（同一个容器重启，或者管理进程以同一序号重启了
-            # worker），直接复用；它在同时活着的进程之间不会相同，见 lease_owner_id。GETEX 一条命令
-            # 原子完成"读值+续期"，拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
-            if not await self._getex_if_mine(worker_id):
-                continue
-            logger.info(
-                _(
-                    "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
-                    "(通过相同进程码 {node_id} )"
-                ).format(worker_id=worker_id, node_id=self.node_id)
-            )
-            self.worker_id = worker_id
-            return worker_id
-
-        # 尝试分配新的worker id
-        for worker_id in range(MAX_WORKER_ID + 1):
-            # SET NX 本身就是原子的抢占，不需要额外的CAS
-            started_at = monotonic()
-            result = await self.aio.set(
-                self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
-            )
-            if result:
-                # 抢到的这一刻就武装围栏，别等到第一次续约（那要5秒后）
-                self.lease_deadline = (
-                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
-                )
+        leases = await self._read_leases()
+        # node_id 相同说明是自己重启前的那个（同一个容器重启，或者管理进程以同一序号重启了
+        # worker），直接复用；它在同时活着的进程之间不会相同，见 lease_owner_id。GETEX 一条命令
+        # 原子完成"读值+续期"，拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
+        if self.node_id in leases:
+            worker_id = leases.index(self.node_id)
+            if await self._getex_if_mine(worker_id):
                 logger.info(
                     _(
-                        "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+                        "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
+                        "(通过相同进程码 {node_id} )"
                     ).format(worker_id=worker_id, node_id=self.node_id)
                 )
+                self.worker_id = worker_id
+                return worker_id
+
+        # 分配新的：只试读到时空着的
+        for worker_id, value in enumerate(leases):
+            if value is None and await self._claim_free(worker_id):
                 self.worker_id = worker_id
                 return worker_id
 
