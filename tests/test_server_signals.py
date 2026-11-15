@@ -1,8 +1,10 @@
 """
 真起 `hetu start` 的测试，Sanic、aiohttp 两个栈各跑一遍：
 
-- 按终端 Ctrl+C 的方式（SIGINT 发给整个进程组）停服：带着已登录的连接关服、关服时取消在途的 RPC、
-  关服途中再来的信号不打断关服；
+- 按终端 Ctrl+C 的方式（SIGINT 发给整个进程组）停服：带着已登录的连接关服、关服途中再来的信号不打断
+  关服；
+- 关服时在途的 RPC：Sanic 栈取消；aiohttp 栈排空（执行完、回复发出去再断开，没读的消息不执行，超出
+  排空预算的取消）；
 - aiohttp 栈：开服途中收到关服信号就不再开服；端口被占时在开服之前就失败。
 
 测试 harness 先关客户端再停服（harness 的语义 4），带着活连接关服的路径只有这里测得到。
@@ -192,6 +194,7 @@ async def login(ctx, user_id):
     namespace="lifecycle", components=(Mark,), permission=hetu.Permission.USER
 )
 async def slow_mark(ctx, seconds):
+    print("[lifecycle] slow_mark started", flush=True)
     await asyncio.sleep(seconds)
     async with ctx.repo[Mark].upsert(owner=ctx.caller) as row:
         row.count += 1
@@ -210,7 +213,9 @@ async def on_disconnect(ctx):
 class _Server:
     """一个 `hetu start` 子进程（生命周期 app、SQLite），输出写到 tmp_path/out.log"""
 
-    def __init__(self, tmp_path: Path, http_server: str, **env: str):
+    def __init__(
+        self, tmp_path: Path, http_server: str, extra_config: str = "", **env: str
+    ):
         self.tmp_path = tmp_path
         self.port = _free_port()
         (tmp_path / "lifecycle_app.py").write_text(LIFECYCLE_APP, encoding="utf-8")
@@ -231,6 +236,7 @@ BACKENDS:
   main:
     type: sqlite
     master: sqlite:///{tmp_path / "lifecycle.db"}
+{extra_config}
 """,
             encoding="utf-8",
         )
@@ -306,6 +312,17 @@ async def _close_code(ws: Any, timeout: float = 10) -> int | None:
         return None if e.rcvd is None else e.rcvd.code
 
 
+# LIFECYCLE_APP 的 slow_mark 一进来就打这一行（两处要一致）：测试等它出现，确定 RPC 已经在跑了
+SLOW_MARK_STARTED = "[lifecycle] slow_mark started"
+
+
+async def _wait_output(server: _Server, marker: str, timeout: float = 10) -> None:
+    """等服务器进程的输出里出现 marker"""
+    async with asyncio.timeout(timeout):
+        while marker not in server.output():
+            await asyncio.sleep(0.02)
+
+
 @pytest.mark.timeout(90)
 def test_shutdown_with_live_connections(tmp_path, http_server):
     """
@@ -339,11 +356,14 @@ def test_shutdown_with_live_connections(tmp_path, http_server):
     ]
 
 
+@pytest.mark.parametrize(
+    "http_server", [s for s in HTTP_SERVERS if s == "sanic"], indirect=True
+)
 @pytest.mark.timeout(90)
 def test_shutdown_cancels_inflight_rpc(tmp_path, http_server):
     """
-    关服时在途的 RPC 被取消，没有提交：不能提交了却发不出回复，客户端重连重试时就重复执行了。关服也
-    不等它跑完（关服排空是第 4b 步的事）
+    Sanic 栈：关服时在途的 RPC 被取消，没有提交（不能提交了却发不出回复，客户端重连重试时就重复执行
+    了），关服也不等它跑完。aiohttp 栈排空，见 test_aiohttp_shutdown_drains_inflight_rpc
     """
     server = _Server(tmp_path, http_server)
     try:
@@ -352,7 +372,7 @@ def test_shutdown_cancels_inflight_rpc(tmp_path, http_server):
         async def scenario() -> tuple[int | None, float]:
             ws, pipe, pipe_ctx = await _login(server.port, 21)
             await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 3]))
-            await asyncio.sleep(0.5)  # RPC 已经在跑了
+            await _wait_output(server, SLOW_MARK_STARTED)  # RPC 已经在跑了
             start = time.monotonic()
             server.signal(signal.SIGINT)
             code = await _close_code(ws)
@@ -426,3 +446,87 @@ def test_aiohttp_signal_during_startup_aborts_startup(tmp_path, http_server):
     assert took < 5, output
     assert "中止开服" in output, output
     assert "服务器已就绪" not in output, output
+
+
+# ==== aiohttp 栈的关服排空（第 4b 步）====
+
+AIOHTTP_ONLY = pytest.mark.parametrize(
+    "http_server", [s for s in HTTP_SERVERS if s == "aiohttp"], indirect=True
+)
+
+
+async def _messages_until_closed(
+    ws: Any, pipe: MessagePipeline, pipe_ctx: Any, timeout: float = 10
+) -> tuple[list[Any], int | None]:
+    """收到服务器断开为止，返回 (解码后的消息, close 码)"""
+    messages: list[Any] = []
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                messages.append(pipe.decode(pipe_ctx, await ws.recv()))
+    except ConnectionClosed as e:
+        return messages, None if e.rcvd is None else e.rcvd.code
+
+
+@AIOHTTP_ONLY
+@pytest.mark.timeout(90)
+def test_aiohttp_shutdown_drains_inflight_rpc(tmp_path, http_server):
+    """
+    aiohttp 栈关服排空：在途的 RPC 照常执行完、提交，回复发到客户端之后才以 1001 断开；排在后面、
+    还没读的消息不执行，客户端重连后重发也不会重复执行
+    """
+    server = _Server(tmp_path, http_server)
+    try:
+        _wait_port(server.port, server.proc)
+
+        async def scenario() -> tuple[list[Any], int | None]:
+            ws, pipe, pipe_ctx = await _login(server.port, 41)
+            await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 1]))
+            await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 0]))
+            await _wait_output(server, SLOW_MARK_STARTED)  # 第一个在跑，第二个还没读
+            server.signal(signal.SIGINT)
+            return await _messages_until_closed(ws, pipe, pipe_ctx)
+
+        messages, code = asyncio.run(scenario())
+        server.proc.wait(30)
+    finally:
+        server.close()
+    output = server.output()
+    assert messages == [["rsp", "marked"]], output
+    assert code == 1001, output
+    assert server.proc.returncode == 0, output
+    marks = server.rows("Mark", "owner")
+    assert [(r["owner"], r["count"]) for r in marks] == [(41, 1)], output
+
+
+@AIOHTTP_ONLY
+@pytest.mark.timeout(90)
+def test_aiohttp_drain_budget_cancels_long_rpc(tmp_path, http_server):
+    """
+    排空有预算（SHUTDOWN_DRAIN_TIMEOUT）：超出预算还没执行完的 RPC 被取消、没有提交，客户端收到 1001
+    但没有回复（重连后重发），关服不等它跑完
+    """
+    server = _Server(tmp_path, http_server, extra_config="SHUTDOWN_DRAIN_TIMEOUT: 1")
+    try:
+        _wait_port(server.port, server.proc)
+
+        async def scenario() -> tuple[list[Any], int | None, float]:
+            ws, pipe, pipe_ctx = await _login(server.port, 51)
+            await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 5]))
+            await _wait_output(server, SLOW_MARK_STARTED)
+            start = time.monotonic()
+            server.signal(signal.SIGINT)
+            messages, code = await _messages_until_closed(ws, pipe, pipe_ctx)
+            await asyncio.to_thread(server.proc.wait, 30)
+            return messages, code, time.monotonic() - start
+
+        messages, code, took = asyncio.run(scenario())
+    finally:
+        server.close()
+    output = server.output()
+    assert messages == [], output
+    assert code == 1001, output
+    assert server.proc.returncode == 0, output
+    assert took < 3, output  # RPC 要跑 5 秒
+    assert "关服排空" in output, output
+    assert server.rows("Mark", "owner") == [], output

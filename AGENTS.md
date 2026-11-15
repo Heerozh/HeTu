@@ -125,7 +125,8 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - `adapters/sanic_app.py`：Sanic 适配（`worker_main`），只把 `WorkerRuntime` 接到 Sanic 的
   生命周期上，把 ws 连接包成 `SanicWsConnection` 交给 `serve_connection`。
 - `adapters/aiohttp_app.py`：aiohttp 适配，目前只支持单进程。`AiohttpServer` 管一次开服到关服，
-  `hetu start` 和测试 harness 共用。过渡期由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用，默认仍是 Sanic。
+  `hetu start` 和测试 harness 共用；关服时先排空（在途的 RPC 处理完、回复发出去再断开）。过渡期由环境
+  变量 `HETU_HTTP_SERVER=aiohttp` 选用，默认仍是 Sanic。
 - `forwarded.py`：从反向代理头取客户端地址，规则同 Sanic。
 - `conn.py`：`WsConnection` 接口（recv / send / fail / protocol_error）和 `ConnectionClosed`，
   处理连接的代码只经它收发，不碰 Web 框架。

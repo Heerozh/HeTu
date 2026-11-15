@@ -24,12 +24,23 @@ class ConnectionClosed(Exception):
     """
 
 
+class Draining(ConnectionClosed):
+    """
+    服务器在关服排空（第 4b 步），这条连接不再收新消息：适配层要求停止接收之后，`recv` 抛它。连接还
+    开着，发送照常，排在前面的回复发完之后由发送循环断开。不认识它的地方当成 ConnectionClosed 处理
+    也安全：停下来、不再收。
+
+    The server is draining: stop receiving, keep sending queued replies.
+    """
+
+
 class WsConnection(Protocol):
     """
     一个已经完成 ws 握手（HTTP upgrade）的连接。
 
     - `recv`：收一整条消息（分片已经重组），文本帧是 str、二进制帧是 bytes；给了 timeout 时超时返回
-      None。连接断开之后，各框架的行为不同：aiohttp 在有限时间内抛 `ConnectionClosed`（本端 fail
+      None。适配层要求停止接收（关服排空）之后抛 `Draining`，正在等的 recv 也要醒来抛它；没读的消息
+      不再交出去。连接断开之后，各框架的行为不同：aiohttp 在有限时间内抛 `ConnectionClosed`（本端 fail
       之后对端又不读数据的，已经在等的 recv 要到 fail 的 abort 兜底时才醒）；Sanic 可能一直挂着
       （对端关闭后 recv_streaming 不返回），靠框架取消 handler、拆连接时取消接收协程兜底。
     - `send`：发一条消息，str 发文本帧、bytes 发二进制帧。连接已断开或已 fail 时抛 `ConnectionClosed`。

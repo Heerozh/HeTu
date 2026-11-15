@@ -21,6 +21,9 @@ DEFAULTS: dict[str, Any] = {
     "DEBUG": False,
     # 关服时等连接拆完、等后台任务停下各自的上限（秒）
     "GRACEFUL_SHUTDOWN_TIMEOUT": 15.0,
+    # 关服排空的上限（秒）：各连接不再收新消息，已经收到的处理完、回复发出去再断开。超时还没排空的
+    # 直接断开，在途的 RPC 随之取消。目前只在 aiohttp 栈上生效（设计稿 §5.5）
+    "SHUTDOWN_DRAIN_TIMEOUT": 5.0,
     # 一条 ws 消息的最大字节数（模板里设的是 0.5MB）
     "WEBSOCKET_MAX_SIZE": 2**20,
     # ws ping 的间隔、等 pong 的超时（秒）

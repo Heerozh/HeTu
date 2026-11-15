@@ -23,9 +23,9 @@ from ..endpoint.executor import EndpointExecutor
 from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
-from .conn import ConnectionClosed
+from .conn import ConnectionClosed, Draining
 from .pipeline import ServerMessagePipeline
-from .receiver import PUSH_CLOSE, client_handler, close_connection
+from .receiver import PUSH_CLOSE, PUSH_DRAINED, client_handler, close_connection
 
 if TYPE_CHECKING:
     from .conn import WsConnection
@@ -75,8 +75,9 @@ async def serve_connection(
     处理一个 ws 连接，适配层在 ws 握手（HTTP upgrade）完成之后调用，instance 是路径里的实例名。
 
     握手、建连接上下文之后，收、发各起一个协程，任意一边结束就拆连接（停收发协程、断线 System、
-    删 Connection 行、退订）。返回时连接已经拆完。收发期间本协程被框架取消（Sanic：传输层断开、
-    关服）时照常拆完再返回，取消不往外抛；拆连接的任务受 shield 保护，本协程再被取消也会跑完。
+    删 Connection 行、退订）；关服排空时接收那一边先停，等发送那一边发完回复再拆。返回时连接已经
+    拆完。收发期间本协程被框架取消（Sanic：传输层断开、关服）时照常拆完再返回，取消不往外抛；拆连接的
+    任务受 shield 保护，本协程再被取消也会跑完。
 
     Serve one WebSocket connection after the framework finished the opening handshake.
     Returns once the connection is torn down.
@@ -94,6 +95,9 @@ async def serve_connection(
     msg_pipe = ServerMessagePipeline()
     try:
         handshake_msg = await conn.recv(timeout=HANDSHAKE_TIMEOUT)
+    except Draining:
+        logger.info("New Connect Error: server shutting down before handshake")
+        return
     except ConnectionClosed:
         logger.info("New Connect Error: closed before handshake")
         return
@@ -323,6 +327,11 @@ async def serve_connection(
             await asyncio.wait(
                 (recv_task, send_task), return_when=asyncio.FIRST_COMPLETED
             )
+            if not send_task.done() and _drained(recv_task):
+                # 关服排空：接收协程停下了、不再收新消息，等发送协程把排在前面的回复发完、以 1001
+                # 断开。不能接收协程一停就拆：发送协程会被取消，回复就发不出去了。排空超时由适配层
+                # 兜底（fail 再取消收发协程）
+                await asyncio.wait((send_task,))
         except asyncio.CancelledError:
             # 框架取消了本协程（Sanic：传输层断开、关服）：照常拆连接，取消不往外抛（撤销这次
             # 取消请求，免得 cancelling() 一直留着计数）。wait 被取消时不会取消它在等的协程，
@@ -354,6 +363,16 @@ async def serve_connection(
         runtime.cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
         cleanup_task.add_done_callback(runtime.cleanup_tasks.discard)
         await asyncio.shield(cleanup_task)
+
+
+def _drained(recv_task: asyncio.Task) -> bool:
+    """接收协程是因为关服排空停下的（client_handler 返回 True）"""
+    return (
+        recv_task.done()
+        and not recv_task.cancelled()
+        and recv_task.exception() is None
+        and recv_task.result() is True
+    )
 
 
 async def _send_side(
@@ -397,8 +416,9 @@ async def send_loop(
     2026-10-10-rpcs-sync §4.5），先后规则与推送相同。
     pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真（sync 帧
     不记，见下）。
-    返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经 fail 了连接）、发送超限、订阅初始化失败。
-    连接已断开时 send 抛出的 ConnectionClosed 不接，交给调用方
+    返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经 fail 了连接）、发送超限、订阅初始化失败、关服
+    排空（收到 PUSH_DRAINED，发完排在前面的回复和待发区的推送之后以 1001 断开）。连接已断开时 send
+    抛出的 ConnectionClosed 不接，交给调用方
     """
     loop = asyncio.get_running_loop()
     # 推送开始被排着的回复压住的时刻；待发区空了、或推送发出去了就清掉
@@ -445,6 +465,10 @@ async def send_loop(
         # 接收协程结束时会塞这个哨兵进来（它已经 fail 了连接）
         if reply is PUSH_CLOSE:
             return
+        if reply is PUSH_DRAINED:
+            await _send_pending_pushes(conn, broker, pack)
+            close_connection(conn, connection.CLOSE_GOING_AWAY)
+            return
         if isinstance(reply, asyncio.Future):
             # 在后台完成的订阅占住的回复位：等它填好再发。回复没有请求 id、SDK 按顺序对应，排在它
             # 后面的回复都得跟着等。等的期间推送不算卡住：hub 照常读、合并进待发区，回复发出之后再推
@@ -464,6 +488,24 @@ async def send_loop(
         await conn.send(pack(reply))
         if flooded():
             return
+
+
+async def _send_pending_pushes(
+    conn: WsConnection, broker: SubscriptionBroker, pack: Callable[[Any], bytes]
+) -> None:
+    """
+    关服排空：排在前面的回复都发完了，把待发区里的推送、sync 也发掉再断开。不计发送频率上限：是服务端
+    要关，超限断开的话客户端收到的是 4002（别重连）而不是 1001。之后才交来的推送不等了，客户端重连、
+    重新订阅时会拿到最新的数据
+    """
+    # 同 send_loop，在同一个同步段里取待发区和 sync：发推送的时候 hub 又交来的 tick，它的推送不发，它的
+    # sync 也不能发（客户端会以为那次调用引起的推送都到了）
+    updates = broker.take_updates_()
+    synced = broker.take_synced_()
+    for sub_id, data in updates.items():
+        await conn.send(pack(["updt", sub_id, data]))
+    for sync_id in synced:
+        await conn.send(pack(["sync", sync_id]))
 
 
 async def _cleanup_connection(
