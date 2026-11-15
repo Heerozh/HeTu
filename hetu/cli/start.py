@@ -190,6 +190,12 @@ class StartCommand(CommandInterface):
     @classmethod
     def execute(cls, args):
         from ..common.helper import WORKER_INDEX_ENV
+        from ..discovery.netcheck import (
+            ADVERTISED_ADDRESS_CONFIG_KEY,
+            DiscoveryCheckFailed,
+            discovery_enabled,
+            preflight,
+        )
         from ..server.config import HeTuConfig, listen_backlog
         from ..server.runtime import LoggingConfigError, check_logging_config
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
@@ -219,9 +225,19 @@ class StartCommand(CommandInterface):
                 sys.exit(2)
             try:
                 listen_backlog(config)
+                discovery = discovery_enabled(config)
             except ValueError as e:
                 print(e)
                 sys.exit(2)
+            # 节点发现的部署检查（bridge 网络、LISTEN 绑在回环上、PROXIES_COUNT 为 0……）：在这里做，多进程
+            # 时也只报一次，什么都还没开。算出的广播地址经配置传给各 worker（设计稿
+            # docs/superpowers/specs/2026-11-15-node-discovery-design.md §5.3）
+            if discovery:
+                try:
+                    config[ADVERTISED_ADDRESS_CONFIG_KEY] = preflight(config)
+                except DiscoveryCheckFailed as e:
+                    print(e)
+                    sys.exit(2)
         else:
             args.app_file = args.app_file or DEFAULT_APP_FILE
             args.db = args.db or DEFAULT_DB
