@@ -210,7 +210,12 @@ job. Three things to get right:
   address, and the per-IP limit on anonymous connections
   (`MAX_ANONYMOUS_CONNECTION_BY_IP`) depends on it. HeTu only reads
   `X-Forwarded-For` (or the header named by `REAL_IP_HEADER`), not the RFC 7239
-  `Forwarded` header.
+  `Forwarded` header. If a CDN or load balancer sits in front of Caddy, add its
+  addresses to Caddy's `trusted_proxies`: by default Caddy drops an
+  `X-Forwarded-For` that arrives from an untrusted peer and writes only the
+  peer it sees, so HeTu gets a single entry, a larger `PROXIES_COUNT` runs out
+  of entries and falls back to Caddy's own address, and the per-IP limit hits
+  the wrong address.
 - **Block direct access.** Use a firewall or a private network so that only
   Caddy can reach HeTu's port. A client that bypasses Caddy can forge
   `X-Forwarded-For` freely, which defeats the per-IP limit.
@@ -255,8 +260,14 @@ shuts down in this order:
    is closed with close code 1001 (the SDK reconnects automatically). Messages
    queued behind them are not executed, so resending them after reconnecting
    does not run anything twice. This waits at most `SHUTDOWN_DRAIN_TIMEOUT`
-   (5 seconds by default); RPCs still running then are cancelled and not
-   committed.
+   (5 seconds by default); RPCs still running then are cancelled. A
+   cancellation that lands before the commit means nothing is committed, but
+   one that lands in the middle of the commit may leave it committed with the
+   reply lost, so the client's retry after reconnecting runs it again. For
+   calls that must not run twice (charges, item grants), have the client send an
+   order id and call a `call_lock=True` System from an Endpoint with
+   `ctx.systems.call(..., uuid=order_id)` to deduplicate (see
+   [Advanced](advanced.md)).
 3. Run the disconnect System and delete the Connection rows, waiting at most
    `GRACEFUL_SHUTDOWN_TIMEOUT` (15 seconds by default).
 4. Stop FutureCalls, release the Worker ID lease and disconnect from the

@@ -31,8 +31,9 @@ CLI_ALLOW_WRITE: true
 CLI_AUDIT_LOG: logs/hetu_cli_audit.jsonl
 
 # 前置反向代理的数量，一般为1，除非是多级代理。用于从 X-Forwarded-For 取客户端的真实IP（按IP限制
-# 匿名连接数靠它），只认这个头，不认 RFC 7239 的 Forwarded 头。请用防火墙挡住绕过代理的直连，否则
-# X-Forwarded-For 可以伪造。HeTu 不处理 TLS 和访问日志，都交给前面的反向代理（推荐 Caddy）
+# 匿名连接数靠它），只认这个头，不认 RFC 7239 的 Forwarded 头。多级代理时外层代理（CDN 等）要配进
+# Caddy 的 trusted_proxies，否则 Caddy 会丢掉它们带来的 X-Forwarded-For。请用防火墙挡住绕过代理的
+# 直连，否则 X-Forwarded-For 可以伪造。HeTu 不处理 TLS 和访问日志，都交给前面的反向代理（推荐 Caddy）
 PROXIES_COUNT: 1
 
 # 服务器Websocket监听地址

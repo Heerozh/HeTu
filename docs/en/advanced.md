@@ -1149,9 +1149,9 @@ import hetu
 from aiohttp import web
 
 
-@hetu.define_route("/download/{name}")
-async def download(request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(f"/data/{request.match_info['name']}")
+@hetu.define_route("/hello/{name}")
+async def hello(request: web.Request) -> web.StreamResponse:
+    return web.Response(text=f"hello {request.match_info['name']}")
 ```
 
 The decorated function is a plain aiohttp handler: it takes a single
@@ -1168,6 +1168,11 @@ same as `@define_system`.
   `UrlDispatcher.add_route` (`name`, for example).
 - Request bodies are capped by the `REQUEST_MAX_SIZE` setting (100 MB by
   default); anything larger gets a 413.
+- **Never build a file path from a path parameter.** Values in `match_info`
+  are already URL-decoded, so `/download/..%2Fconfig.yml` hands you
+  `../config.yml`, and joining that onto a directory reads files outside it.
+  Serve downloads with `add_static` from an `on_server_setup` callback (see
+  below), which normalizes the path and stays inside the directory.
 
 These are plain web endpoints and nothing more. They do not go through HeTu's
 `Permission` system, they get no `SystemContext`, and they have no database
@@ -1191,9 +1196,10 @@ Three things to know:
   it. `/` is *not* reserved: register it (with `define_route` or from a setup
   callback) and your page quietly replaces HeTu's default welcome text.
 - Setup callbacks run once in every worker process each time the server
-  starts, before it starts listening; the manager process of a multi-worker
-  server never runs them. They run after the `define_route` routes are
-  mounted. Anything that needs per-worker initialization or cleanup (a
+  starts, before the backends are connected and before it starts listening;
+  the manager process of a multi-worker server never runs them. They run
+  after the `define_route` routes are mounted, and an exception in one aborts
+  the startup. Anything that needs per-worker initialization or cleanup (a
   connection pool, say) belongs in `app.on_startup` / `app.on_cleanup`,
   registered from the callback.
 - Your routes share the event loop with websocket game traffic, and every
@@ -1201,7 +1207,14 @@ Three things to know:
   slow downloads behind Caddy or a CDN instead of through the game workers.
 
 Upgrading from an earlier HeTu, which ran on Sanic, means rewriting handlers
-the aiohttp way:
+the aiohttp way. Two behaviours differ as well:
+
+- aiohttp is strict about trailing slashes: `/ping/` no longer matches `/ping`
+  (Sanic matched it by default). Register both if you need both.
+- Handlers have no overall time limit any more (Sanic's `RESPONSE_TIMEOUT` was
+  60 seconds, answering 503); wrap the work in `asyncio.timeout` yourself if
+  you need one.
+
 
 ```python
 # Before (Sanic)

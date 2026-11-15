@@ -749,9 +749,9 @@ import hetu
 from aiohttp import web
 
 
-@hetu.define_route("/download/{name}")
-async def download(request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(f"/data/{request.match_info['name']}")
+@hetu.define_route("/hello/{name}")
+async def hello(request: web.Request) -> web.StreamResponse:
+    return web.Response(text=f"hello {request.match_info['name']}")
 ```
 
 被装饰的函数就是 aiohttp 的 handler：唯一的参数是 `web.Request`，返回 `web.Response`、`web.json_response(...)`、`web.FileResponse` 之类。路径参数写成 `{name}`（可以带正则，如 `{id:\d+}`），在函数里从 `request.match_info` 取。装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。
@@ -759,6 +759,9 @@ async def download(request: web.Request) -> web.StreamResponse:
 - `methods` 指定接受哪些 HTTP 方法，默认只有 `GET`，比如 `@hetu.define_route("/upload", methods=["POST"])`。用别的方法请求这个路径会得到 405。
 - 其余关键字参数原样透传给 aiohttp 的 `UrlDispatcher.add_route`（如 `name`）。
 - 请求体的上限是配置项 `REQUEST_MAX_SIZE`（默认 100MB），超过返回 413。
+- **不要拿路径参数拼文件路径**：`match_info` 里的值已经 URL 解码过，`/download/..%2Fconfig.yml` 拿到的
+  就是 `../config.yml`，照拼就会读到目录外的文件。提供文件下载请用下面 `on_server_setup` 里的
+  `add_static`，它会规范化路径、不出目录。
 
 它们就只是普通的 web 端点：不经过 HeTu 的 `Permission` 权限体系，拿不到 `SystemContext`，也没有数据库访问——鉴权、限流、输入校验都需要你自己写。需要客户端 SDK 调用的游戏逻辑，请用 `define_system` / `define_endpoint`。
 
@@ -773,10 +776,15 @@ def setup(app: web.Application):
 需要记住的三件事：
 
 - `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它（`define_route` 或在 setup 回调里注册都行），你的页面就会顶掉 HeTu 的默认欢迎页。
-- setup 回调在每个 worker 进程里、每次开服建 app 时执行一次，此时还没开始监听；多进程时管理进程不执行它。它在 `define_route` 的路由挂好之后执行。需要每个 worker 初始化、清理的东西（比如一个连接池），在回调里挂到 `app.on_startup` / `app.on_cleanup` 上。
+- setup 回调在每个 worker 进程里、每次开服建 app 时执行一次，此时后端还没连接、也还没开始监听；多进程时管理进程不执行它。它在 `define_route` 的路由挂好之后执行，出错就中止开服。需要每个 worker 初始化、清理的东西（比如一个连接池），在回调里挂到 `app.on_startup` / `app.on_cleanup` 上。
 - 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 Caddy/CDN，而不是穿过游戏 worker。
 
-从 Sanic 版本升级时（之前的 HeTu 用的是 Sanic），处理函数要按 aiohttp 的写法改：
+从 Sanic 版本升级时（之前的 HeTu 用的是 Sanic），处理函数要按 aiohttp 的写法改。另外有两处行为不同：
+
+- aiohttp 严格区分尾斜杠：`/ping/` 不会再命中 `/ping`（Sanic 默认会）。两种都要的话就两个都注册；
+- 处理函数没有总时长的上限了（Sanic 的 `RESPONSE_TIMEOUT` 是 60 秒，超时回 503），需要的话在函数里自己
+  用 `asyncio.timeout`。
+
 
 ```python
 # 之前（Sanic）

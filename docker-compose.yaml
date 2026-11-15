@@ -13,6 +13,8 @@ services:
   application:
     build:
       dockerfile: Dockerfile
+    # 关服时要排空连接、跑断线 System、释放租约，docker 默认只等 10 秒就强杀（见运维文档的"停服"）
+    stop_grace_period: 70s
     ports:
       - "2466:2466"
     env_file:

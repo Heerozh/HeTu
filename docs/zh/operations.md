@@ -140,6 +140,9 @@ HeTu 自己只监听明文的 ws（`ws://`），TLS 和访问日志都交给 Cad
   前面反向代理的层数（只有一层 Caddy 就是 1，配置模板里就是这个值），HeTu 取 `X-Forwarded-For` 的倒数第
   `PROXIES_COUNT` 项作为客户端地址，按 IP 限制匿名连接数（`MAX_ANONYMOUS_CONNECTION_BY_IP`）靠的就是它。
   HeTu 只认 `X-Forwarded-For`（或 `REAL_IP_HEADER` 指定的头），不认 RFC 7239 的 `Forwarded` 头。
+  Caddy 前面还有 CDN、负载均衡时，要把它们的地址配进 Caddy 的 `trusted_proxies`：Caddy 默认丢掉不可信来源
+  带来的 `X-Forwarded-For`，只写它直接看到的对端，HeTu 就只能拿到一项，`PROXIES_COUNT` 设大了条目不够，退回
+  Caddy 自己的地址，按 IP 的限制就错位了。
 - **挡住直连**：用防火墙或内网只让 Caddy 访问 HeTu 的端口。绕过 Caddy 直接连 HeTu 时，`X-Forwarded-For`
   可以随便伪造，按 IP 的限制就失效了。
 - **`stream_close_delay`**：Caddy 每次重载配置，默认会马上断开所有经它转发的 WebSocket。用
@@ -175,7 +178,10 @@ Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模�
 1. 不再接受新连接；
 2. **排空**：各连接不再读新消息，已经收到的 RPC 照常执行完、回复发出去，再以 close 码 1001 断开（SDK 会自动
    重连）。排在后面、还没读的消息不执行，客户端重连后重发不会重复执行。最多等 `SHUTDOWN_DRAIN_TIMEOUT`
-   （默认 5 秒），到时还没执行完的 RPC 被取消、不提交；
+   （默认 5 秒），到时还没执行完的 RPC 被取消：取消落在提交之前的不会提交，正好落在提交途中的可能已经
+   提交、回复却发不出去，客户端重连后重发就会再执行一次。不能重复执行的调用（扣款、发货），让客户端带上
+   单号，在 Endpoint 里用 `ctx.systems.call(..., uuid=单号)` 调声明了 `call_lock=True` 的 System 去重（见
+   [高级功能](advanced.md)）；
 3. 跑断线 System、删掉 Connection 行，最多等 `GRACEFUL_SHUTDOWN_TIMEOUT`（默认 15 秒）；
 4. 停掉未来调用（FutureCalls），释放 Worker ID 租约，断开后端。
 
