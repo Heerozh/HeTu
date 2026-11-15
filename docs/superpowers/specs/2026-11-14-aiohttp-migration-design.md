@@ -1495,13 +1495,19 @@ abort。所以：
 - `benchmark/hypothesis/ws_bench_servers.py` 里还有一个 Sanic 服务器（函数里才 import），是当时框架对比的实验
   脚本，留着不动；要重跑 Sanic 那一项得自己装 sanic。各 `*_report.md`、`*_result.md` 里的 Sanic 是历史记录。
 - dev 组的 `trustme` 从第 2 步删掉 TLS 之后就没人用了，不属于这一步，没删。
-- `getting-started.md` 里客户端示例连的是 `ws://127.0.0.1:2466/hetu/Hello`，而开服命令是 `--instance=dev`：
-  路径最后一段是实例名，这样连会被拒。现存问题，不在这一步的范围里，没改。
-- 审查顺带发现的现存问题，也没改：`docker-compose.yaml` 里 `depends_on: - redis` 和服务名 `database` 对不上；
-  `hetu/__init__.py` 按包名 `hetu` 取版本，发行包名是 `hetudb`，默认欢迎页显示
-  `Powered by HeTu(vhetu is not installed in a proper way)`。
 - LOGGING 的检查不看用户自己装没装 sanic：装了的话，一份本来能用的老配置也会被拒（以 2 退出）。符合"不做兼容"的
   原则（§13 第 9 条），有意如此。
+
+**顺手修的现存问题**（和迁移无关，各一个提交）：
+
+- `getting-started.md` 的客户端示例连 `ws://127.0.0.1:2466/hetu/Hello`，开服命令却是 `--instance=dev`：路径最后
+  一段是实例名，这样连服务器以 4002 拒绝（"实例名不存在"）。改连 `/hetu/dev`，照文档实测能调通。聊天室教程是同一个
+  错：命令行用 `--instance=dev`、示例的 `config.yml` 用 `chat-room-1`，客户端连的 `/hetu/Chat` 两个都对不上；命令行也
+  改成 `chat-room-1`，客户端连 `/hetu/chat-room-1`（示例客户端的默认地址），两种开服方式都能连。
+- `docker-compose.yaml`：`depends_on: - redis` 和服务名 `database` 对不上，compose 直接拒绝这个文件；改好之后又卡在
+  `.env` 不存在（它在 .gitignore 里，仓库里也没说要先建），改成 `required: false`。`docker compose config` 校验通过。
+- `hetu/__init__.py` 一直按 `hetu` 取版本，发行包名是 `hetudb`，默认欢迎页、motd 显示的都是兜底的
+  "hetu is not installed in a proper way"。改按 `hetudb` 取，加了直接比对 `importlib.metadata` 的测试。
 
 **PR #234 审查后的修改**：
 
