@@ -2,6 +2,10 @@
 
 真实 WebSocket RPC 基准；固定客户端源码，避免把客户端优化算作服务端收益。
 Run with --help. Requires an isolated Redis database. Logs/results go to --output.
+
+--http-server 选服务器的 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）。--perf 让每个窗口
+另用 perf stat 数服务器的 user 态周期和指令：笔记本 P 核的频率随负载变，CPU 时间跨代码比较会失真，
+周期数不受频率影响。每个窗口还记下服务器那个核的平均频率。
 """
 
 import argparse
@@ -42,6 +46,12 @@ def parse_args():
     parser.add_argument("--warmup", type=float, default=3)
     parser.add_argument("--server-cpu", type=int, default=3)
     parser.add_argument("--client-cpus", default="4,6,8,10")
+    parser.add_argument(
+        "--http-server",
+        choices=("sanic", "aiohttp"),
+        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
+    )
+    parser.add_argument("--perf", action="store_true")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-cpu", type=int, default=1)
     parser.add_argument("--client", type=int, default=-1, help=argparse.SUPPRESS)
@@ -67,6 +77,47 @@ def cpu_environment(cpu):
         for name, path in paths.items()
         if Path(path).exists()
     }
+
+
+def perf_stat(pid, seconds):
+    """数 pid 接下来 seconds 秒的 user 态周期和指令。
+
+    Count user-mode cycles and instructions of pid for the next seconds.
+    """
+    return subprocess.Popen(
+        [
+            "perf",
+            "stat",
+            "-x",
+            ",",
+            "-e",
+            "cycles:u,instructions:u",
+            "-p",
+            str(pid),
+            "--",
+            "sleep",
+            str(seconds),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def perf_counts(proc):
+    """读 perf_stat 的结果；混合架构只取 P 核的计数，没数到的事件不出现。
+
+    Parse perf_stat output, keeping only P-core counts on hybrid CPUs.
+    """
+    _out, err = proc.communicate(timeout=60)
+    counts = {}
+    for line in err.splitlines():
+        parts = line.split(",")
+        if len(parts) > 2 and parts[0][:1].isdigit() and "cpu_atom" not in parts[2]:
+            event = parts[2].replace("cpu_core/", "").replace("/u", "")
+            event = event.replace(":u", "")
+            counts[event] = counts.get(event, 0.0) + float(parts[0])
+    return counts
 
 
 async def client(args):
@@ -181,7 +232,7 @@ BACKENDS:
     type: Redis
     master: {args.redis}
 """)
-    env = dict(os.environ, PYTHONPATH=str(root))
+    env = dict(os.environ, PYTHONPATH=str(root), HETU_HTTP_SERVER=args.http_server)
     cmd = [sys.executable, "-m", "hetu", "start", "--config", str(config)]
     if args.profile:
         cmd = [
@@ -200,6 +251,7 @@ BACKENDS:
     cmd = ["taskset", "-c", str(args.server_cpu), *cmd]
     children = []
     logs = []
+    perfs = []
     server = None
     try:
         log = (args.output / "server.log").open("w")
@@ -297,13 +349,23 @@ BACKENDS:
         cpu_after = None
         round_cpu_start = [None] * args.rounds
         round_cpu_end = [None] * args.rounds
+        round_perf = [None] * args.rounds
+        round_freqs = [[] for _ in range(args.rounds)]
+        freq_path = Path(
+            f"/sys/devices/system/cpu/cpu{args.server_cpu}/cpufreq/scaling_cur_freq"
+        )
         while any(p.poll() is None for p in children):
             now = time.monotonic()
             for i, (begin, end) in enumerate(windows):
                 if round_cpu_start[i] is None and now >= begin:
                     round_cpu_start[i] = (now, sum(proc.cpu_times()[:2]))
+                    if args.perf:
+                        round_perf[i] = perf_stat(proc.pid, args.seconds)
+                        perfs.append(round_perf[i])
                 if round_cpu_end[i] is None and now >= end:
                     round_cpu_end[i] = (now, sum(proc.cpu_times()[:2]))
+                if begin <= now < end and freq_path.exists():
+                    round_freqs[i].append(int(freq_path.read_text()) / 1e6)
             if cpu_before is None and now >= first:
                 cpu_before = sum(proc.cpu_times()[:2])
             if cpu_after is None and now >= windows[-1][1]:
@@ -328,6 +390,10 @@ BACKENDS:
             qps = sum(r["counts"][i] for r in results) / args.seconds
             begin, end = round_cpu_start[i], round_cpu_end[i]
             cpu_fraction = (end[1] - begin[1]) / (end[0] - begin[0])
+            counts = perf_counts(round_perf[i]) if round_perf[i] else {}
+            # perf 数的时长与窗口相同（起点晚不到一个轮询间隔），按窗口的调用数折算
+            rpcs = qps * args.seconds
+            freqs = round_freqs[i]
             rounds.append(
                 {
                     "qps": qps,
@@ -339,6 +405,15 @@ BACKENDS:
                     "server_cpu_us_per_rpc": cpu_fraction * 1e6 / qps,
                     "p50_ms": samples[len(samples) // 2],
                     "p99_ms": samples[int(len(samples) * 0.99)],
+                    "server_kcycles_u_per_rpc": counts["cycles"] / rpcs / 1e3
+                    if "cycles" in counts
+                    else None,
+                    "server_kinstructions_u_per_rpc": counts["instructions"]
+                    / rpcs
+                    / 1e3
+                    if "instructions" in counts
+                    else None,
+                    "server_cpu_ghz_avg": statistics.fmean(freqs) if freqs else None,
                 }
             )
         data_check = {}
@@ -366,6 +441,11 @@ BACKENDS:
             "cpu_environment_start": environment_start,
             "cpu_environment_end": cpu_environment(args.server_cpu),
             "median_qps": statistics.median(r["qps"] for r in rounds),
+            "medians": {
+                key: statistics.median(r[key] for r in rounds)
+                for key in rounds[0]
+                if all(isinstance(r[key], (int, float)) for r in rounds)
+            },
             "server_cpu_percent": 100
             * (cpu_after - cpu_before)
             / (windows[-1][1] - first),
@@ -374,6 +454,10 @@ BACKENDS:
         (args.output / "result.json").write_text(json.dumps(result, indent=2))
         print(json.dumps(result, indent=2), flush=True)
     finally:
+        for perf in perfs:
+            if perf.poll() is None:
+                perf.terminate()
+            perf.wait(timeout=10)
         for child in children:
             if child.poll() is None:
                 child.terminate()

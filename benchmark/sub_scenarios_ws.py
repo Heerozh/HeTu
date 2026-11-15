@@ -94,12 +94,13 @@ REDIS_CMDS = ("zrange", "hgetall", "subscribe", "unsubscribe", "evalsha", "publi
 # --show 默认打印的列
 SHOW_KEYS = {
     "item": (
-        "tag,item_op,target_rate,write_rate,worker_cores,worker_kcycles_u_per_op,"
+        "tag,http_server,item_op,target_rate,write_rate,worker_cores,"
+        "worker_kcycles_u_per_op,"
         "ticks_ps,items_per_tick,ins_lat_p50_ms,ins_lat_p99_ms,del_lat_p99_ms,"
         "rpc_rtt_p99_ms,rpc_rtt_max_ms,replica_cmds_ps,cons_bad_conns"
     ),
     "chat": (
-        "tag,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
+        "tag,http_server,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
         "worker_us_per_msg_conn,lat_p50_ms,lat_p99_ms,fanout_done_p50_ms,"
         "fanout_done_p99_ms,rpc_rtt_p99_ms,rpc_rtt_max_ms,worker_rss_mb,cons_bad_conns"
     ),
@@ -978,7 +979,7 @@ class Harness:
     def start_server(self) -> None:
         args = self.args
         cfg = write_config(args, self.workdir)
-        env = dict(os.environ, PYTHONUTF8="1")
+        env = dict(os.environ, PYTHONUTF8="1", HETU_HTTP_SERVER=args.http_server)
         if args.server_pythonpath:
             env["PYTHONPATH"] = args.server_pythonpath
         log = open(os.path.join(self.workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115
@@ -995,7 +996,8 @@ class Harness:
         self.sproc = psutil.Process(self.server.pid)
         wait_port(args.port)
         time.sleep(2)
-        # WORKER_NUM=1 时 Sanic 单进程运行，主进程就是 worker；多 worker 时是子进程
+        # WORKER_NUM=1 时单进程运行（Sanic、aiohttp 都是），主进程就是 worker；多 worker 时
+        # 是子进程
         self.workers = (
             [self.sproc] if args.workers == 1 else self.sproc.children(recursive=True)
         )
@@ -1149,6 +1151,7 @@ class Harness:
         res: dict[str, Any] = {
             "scenario": args.scenario,
             "tag": args.tag,
+            "http_server": args.http_server,
             "conns": args.conns,
             "limit": args.limit,
             "workers": args.workers,
@@ -1406,6 +1409,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--show", default="", help="只打印这个结果文件（JSONL）的主要列")
     ap.add_argument("--show-keys", default="", help="--show 打印哪些列（逗号分隔）")
     ap.add_argument("--tag", default="", help="写进结果的标签（区分代码版本等）")
+    ap.add_argument(
+        "--http-server",
+        choices=("sanic", "aiohttp"),
+        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
+        help="服务器用哪个 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）",
+    )
     ap.add_argument("--master", default="redis://127.0.0.1:23400/0")
     ap.add_argument(
         "--replica",

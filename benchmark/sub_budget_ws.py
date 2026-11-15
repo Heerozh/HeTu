@@ -16,7 +16,8 @@ sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 wor
         --client-cpus 4,5,6,7,8,9,10,11 --writer-cpus 12,13,14,15
 
 Redis 连接数：每个 worker 每个副本 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数
-无关。服务器的 CPU 是 CPU 时间；笔记本 P 核频率随负载变，跨负载比较时以 sub_scenarios_ws.py 的周期数为准。
+无关。服务器的 CPU 是 CPU 时间；笔记本 P 核频率随负载变，CPU 时间跨负载、跨代码比较会失真，所以计时窗口里
+另用 `perf stat` 数服务器的 user 态周期（没装 perf 时这几列为空），并记下服务器所在核的平均频率。
 """
 
 import argparse
@@ -181,6 +182,74 @@ def wait_port(port: int, timeout: float = 120) -> None:
     raise TimeoutError(f"server port {port} not ready")
 
 
+def perf_stat(procs: list[psutil.Process], seconds: float) -> subprocess.Popen | None:
+    """`perf stat` 数这些进程接下来 seconds 秒的 user 态周期与指令"""
+    try:
+        return subprocess.Popen(
+            [
+                "perf",
+                "stat",
+                "-x",
+                ",",
+                "-e",
+                "cycles:u,instructions:u",
+                "-p",
+                ",".join(str(p.pid) for p in procs),
+                "--",
+                "sleep",
+                str(seconds),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as e:  # 没装 perf：不影响别的统计
+        print("perf stat failed", e, flush=True)
+        return None
+
+
+def perf_counts(proc: subprocess.Popen | None) -> dict[str, float]:
+    """读 perf_stat 的结果；混合架构只取 P 核的计数，没数到的事件不出现"""
+    counts: dict[str, float] = {}
+    if proc is None:
+        return counts
+    _out, err = proc.communicate(timeout=60)
+    for line in err.splitlines():
+        parts = line.split(",")
+        if len(parts) > 2 and parts[0][:1].isdigit() and "cpu_atom" not in parts[2]:
+            ev = parts[2].replace("cpu_core/", "").replace("/u", "").replace(":u", "")
+            counts[ev] = counts.get(ev, 0.0) + float(parts[0])
+    return counts
+
+
+def taskset_cpus(spec: str) -> list[int]:
+    """taskset -c 的写法（如 0,2-3）展开成核号"""
+    cpus: list[int] = []
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-")
+            cpus.extend(range(int(lo), int(hi) + 1))
+        elif part:
+            cpus.append(int(part))
+    return cpus
+
+
+def sleep_sampling_freq(cpus: list[int], seconds: float) -> list[float]:
+    """睡 seconds 秒，其间每 0.5 秒读一次这些核的当前频率（GHz）"""
+    freqs: list[float] = []
+    end = time.perf_counter() + seconds
+    while (left := end - time.perf_counter()) > 0:
+        for c in cpus:
+            path = f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq"
+            try:
+                with open(path, encoding="ascii") as fh:
+                    freqs.append(int(fh.read()) / 1e6)
+            except OSError:
+                pass
+        time.sleep(min(0.5, left))
+    return freqs
+
+
 def tree_cpu(proc: psutil.Process) -> float:
     total = 0.0
     for p in [proc, *proc.children(recursive=True)]:
@@ -209,6 +278,12 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=15)
     ap.add_argument("--tag", default="")
     ap.add_argument(
+        "--http-server",
+        choices=("sanic", "aiohttp"),
+        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
+        help="服务器用哪个 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）",
+    )
+    ap.add_argument(
         "--server-cpus", default="", help="服务器绑这些核（taskset -c 的写法）"
     )
     ap.add_argument("--client-cpus", default="", help="客户端进程绑这些核（逗号分隔）")
@@ -223,7 +298,7 @@ def main() -> None:
 
     # 起服务器
     cfg = write_config(args, workdir)
-    env = dict(os.environ, PYTHONUTF8="1")
+    env = dict(os.environ, PYTHONUTF8="1", HETU_HTTP_SERVER=args.http_server)
     server_log = open(os.path.join(workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115 进程结束后再关
     taskset = ["taskset", "-c", args.server_cpus] if args.server_cpus else []
     server = subprocess.Popen(
@@ -308,12 +383,14 @@ def main() -> None:
             written.value = 0
         rep_a = base.redis_snapshot(args.replica)
         cpu_a = tree_cpu(sproc)
+        perf = perf_stat([sproc, *sproc.children(recursive=True)], args.duration)
         wall_a = time.perf_counter()
         window[0] = time.time()
         window[1] = window[0] + args.duration
-        time.sleep(args.duration)
+        freqs = sleep_sampling_freq(taskset_cpus(args.server_cpus), args.duration)
         wall = time.perf_counter() - wall_a
         cpu = tree_cpu(sproc) - cpu_a
+        counts = perf_counts(perf)
         rep_b = base.redis_snapshot(args.replica)
         with written.get_lock():
             n_written = written.value
@@ -376,6 +453,11 @@ def main() -> None:
         "server_us_per_delivered": round(cpu * 1e6 / delivered, 1)
         if delivered
         else None,
+        "server_us_per_frame": round(cpu * 1e6 / frames, 1) if frames else None,
+        "server_kcycles_u_per_frame": round(counts["cycles"] / frames / 1e3, 1)
+        if frames and "cycles" in counts
+        else None,
+        "server_cpu_ghz_avg": round(sum(freqs) / len(freqs), 2) if freqs else None,
         "replica_cores": round(rep_cpu / wall, 3),
         "replica_cmds_ps": round((rep_b["cmds"] - rep_a["cmds"]) / wall),
         "lat_p50_ms": round(base.pct(lat, 0.5) * 1000, 1),
@@ -383,6 +465,7 @@ def main() -> None:
         "lat_p99_ms": round(base.pct(lat, 0.99) * 1000, 1),
         "lat_max_ms": round(max(lat, default=float("nan")) * 1000, 1),
         "tag": args.tag,
+        "http_server": args.http_server,
         "server_log": os.path.join(workdir, "server.log"),
     }
     width = max(len(k) for k in res)
