@@ -278,8 +278,9 @@ Proxy，Redis Cluster。
 ### 负载均衡
 
 生产环境下，河图前面要有一层 Caddy 网关（自动 HTTPS、负载均衡）。参考部署是云上多机：网关一台固定的机器，
-河图跑在弹性伸缩组里（可以用抢占式实例），网关用 Caddy 自带的动态上游 `dynamic a` 从内网 DNS 发现河图节点，
-扩缩容不用改网关的配置。游戏客户端需要自动重连（官方 SDK 的 `HeTuSessionClient` 自带）。详见
+河图跑在弹性伸缩组里（可以用抢占式实例），用 host 网络、打开 `DISCOVERY`：每个节点开好服后把自己登记进 Redis，
+停服前先注销；网关上的 `hetu dns` 把注册表答给 Caddy 自带的动态上游 `dynamic a`，扩缩容不用改配置、不用脚本、
+不用云 API 凭据。游戏客户端需要自动重连（官方 SDK 的 `HeTuSessionClient` 自带）。详见
 [运维文档](docs/zh/operations.md)。
 
 ## ⚙️ 客户端 SDK 安装

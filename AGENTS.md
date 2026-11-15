@@ -162,7 +162,8 @@ Client (Unity/JS/C#) ─WebSocket─► aiohttp Worker ──► EndpointExecuto
 | `hetu/data/sub.py`       | `SubscriptionHub`（worker 级）, `SubscriptionBroker`（每连接）, 三种 Subscription      |
 | `hetu/server/`           | aiohttp workers、多进程 supervisor、WebSocket handler、message pipeline                 |
 | `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables                          |
-| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK）；调试用 `call` / `get` / `range` / `shell` |
+| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK）；调试用 `call` / `get` / `range` / `shell`；节点发现用 `dns`（网关上的 DNS 桥）/ `nodes` |
+| `hetu/discovery/`        | 节点发现：注册表 `hetu:nodes`（`registry`，开好服登记、关服先注销）、开服检查（`netcheck`，广播地址、只支持 host 网络）、`hetu dns`（`dns`，手写的 DNS 报文），设计见 `docs/superpowers/specs/2026-11-15-node-discovery-design.md` |
 | `hetu/local.py`          | `LocalApp` / `open_local_app` —— 进程内直连后端跑 System、读写组件表（`hetu call` / `shell` 与 `Sandbox` 共用） |
 | `hetu/data/backend/snowflake_lease.py` | `SnowflakeLease` —— 雪花号租约生命周期（worker id + 时间戳水位 + 续约），服务器与 CLI 共用 |
 | `hetu/sourcegen/`        | Client SDK code generation（C#）；由 `hetu build` 调用                                  |

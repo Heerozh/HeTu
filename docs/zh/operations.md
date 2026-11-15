@@ -36,7 +36,8 @@ docker build -t my-game .
 docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
-Docker 工作流的主要目的是让您能够在网关后面运行廉价的 Spot 实例：机器可以随时创建或销毁，网关会自动发现它们（见下面的负载均衡）。
+Docker 工作流的主要目的是让您能够在网关后面运行廉价的 Spot 实例：机器可以随时创建或销毁，网关会自动发现它们（见下面的负载均衡）。多机部署时打开节点发现（`DISCOVERY`），用 host 网络运行
+（`docker run --network host`，不用 `-p`）。
 
 ### `pip` 原生安装（无容器）
 
@@ -127,22 +128,81 @@ HeTu 仅使用 Redis 的基本功能（哈希、有序集合、发布/订阅）�
 HeTu 可以起任意多台来并行扩容，前面要有一层网关。参考部署（云上多机）：
 
 - **网关**：一台固定的机器（不用抢占式实例），绑公网 IP，跑官方 Caddy 镜像：自动申请证书、终止 TLS、记访问日志，
-  再把 ws 转给后面的 HeTu。
-- **HeTu**：跑在弹性伸缩组里，可以用便宜的抢占式实例，每台机器一个容器（`WORKER_NUM` 按 CPU 数）。伸缩组的健康
-  检查可以探 HeTu 的根路径 `/`。
-- **发现后端**：在云厂商的内网 DNS（阿里云 PrivateZone、AWS Route 53 私有托管区等）里维护一个名字，比如
-  `hetu.internal`，HeTu 开好服之后（根路径 `/` 能访问了）再把自己的内网 IP 加进去，停服前删掉。不要开机就加：
-  还没开好服时 Caddy 连过去会被拒，被拒一次就把这台摘掉 30 秒（下面的 `fail_duration`）。Caddy 用自带的动态上游
-  `dynamic a` 定时查这个名字，扩缩容不用改 Caddy 的配置，Caddy 不重载，别的机器上的连接都不受影响。
+  再把 ws 转给后面的 HeTu。旁边再跑一个 `hetu dns`，告诉 Caddy 现在有哪些 HeTu 节点。
+- **HeTu**：跑在弹性伸缩组里，可以用便宜的抢占式实例，每台机器一个容器（`WORKER_NUM` 按 CPU 数），用 host 网络，
+  配置里打开 `DISCOVERY`。伸缩组的健康检查可以探 HeTu 的根路径 `/`。
+- **发现节点**：每个节点开好服之后把自己的内网地址登记进 Redis（默认后端，`hetu:nodes`），每 5 秒更新一次，关服
+  时先注销；`hetu dns` 每秒读一次，把它答成 `hetu.internal` 的 A 记录，Caddy 用自带的动态上游 `dynamic a` 每 2 秒
+  查一次。扩缩容不用改 Caddy 的配置、不用写脚本，节点也不用带云 API 的凭据；Caddy 不重载，别的机器上的连接都不受
+  影响。
+
+### 节点
+
+配置里打开节点发现：
+
+```yaml
+DISCOVERY: true
+PROXIES_COUNT: 1        # 节点在网关后面，从 X-Forwarded-For 取玩家的地址
+LISTEN: 0.0.0.0:2466    # 所有节点用同一个端口
+```
+
+用 host 网络运行（不用 `-p`）：
+
+```bash
+docker run -d --restart always --network host --name game-srv my-game
+```
+
+**只支持 host 网络**：bridge 网络里节点看到的是 docker 网桥分的地址，别的机器上的网关连不上；host 网络还省掉了
+端口映射这一层转发，性能最好。compose 里写 `network_mode: host`，k8s 里写 `hostNetwork: true`。
+
+节点登记的地址：`LISTEN` 写了具体的 IP 就用它；写 `0.0.0.0` 时，用本机连 Redis master 时的源地址（网关和 Redis
+一般在同一个内网，这个地址网关连得到）。多网卡、到 Redis 和到网关不走同一张网卡时，在 `LISTEN` 里写明，比如
+`LISTEN: ${HOST_IP}:2466`。
+
+`hetu start` 在开服之前检查部署，不过就打出原因和改法、以 2 退出，什么都还没开：
+
+- 不是 host 网络（地址在容器网络的虚拟网卡上），或者地址在本机的容器网桥（docker0 等）上；
+- `LISTEN` 绑在回环地址上、写成了主机名，或者写的 IP 本机没有；
+- `PROXIES_COUNT` 是 0：所有玩家的地址都会是网关的，同 IP 的匿名连接上限会把玩家挡在外面；
+- 默认后端不是 Redis，或者推不出地址（Redis 在本机、经 unix socket 连），这时在 `LISTEN` 里写明 IP。
+
+### 网关
+
+compose：
+
+```yaml
+services:
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: always
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+  hetu-dns:
+    image: heerozh/hetu:latest
+    network_mode: host
+    restart: always
+    command: ["dns", "--namespace", "my_game"]
+    environment:
+      # 指向 Redis 的副本，用下面建的只读用户
+      HETU_DNS_REDIS: redis://hetu-dns:${DNS_REDIS_PASSWORD}@10.0.1.20:6379/0
+volumes:
+  caddy_data:
+```
+
+Caddyfile：
 
 ```
 game.example.com {
 	reverse_proxy {
-		# 每 2 秒查一次内网 DNS，拿到当前所有 HeTu 节点
+		# 每 2 秒问一次 hetu dns，拿到当前所有 HeTu 节点
 		dynamic a {
 			name hetu.internal
 			port 2466
 			refresh 2s
+			resolvers 127.0.0.1:1053
+			versions ipv4
 		}
 		# ws 是长连接：新连接给连接数最少的那台
 		lb_policy least_conn
@@ -158,39 +218,67 @@ game.example.com {
 }
 ```
 
-要点：
+- `--namespace` 是节点配置里的 `NAMESPACE`。`port` 要和节点的 `LISTEN` 端口一致，不是 2466 时 `hetu dns` 也要加
+  `--port`；`name` 不是 `hetu.internal` 时 `hetu dns` 加 `--name`。
+- `refresh` 保持 2s：节点注销后照常服务 4 秒再停止监听，是按它算的。
+- `versions ipv4`：不写的话 Caddy 每次同时查 A 和 AAAA。
+
+`hetu dns` 用的 Redis 用户只要能读 `hetu:nodes`。网关暴露在公网，不要用能读写别的数据的用户。在 `hetu dns` 连的
+那台副本上建（ACL 不随复制同步；云厂商的托管 Redis 在控制台建账号），用的不是 0 号库时再加 `+select`：
+
+```
+ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgetall +ping
+```
+
+`hetu dns` 启动时同样检查部署：不是 host 网络（Caddy 查的 127.0.0.1 是宿主机的回环，bridge 网络里收不到）、Redis
+是原生集群（第一版不支持，请经代理层连）以 2 退出；Redis 连不上、口令不对、被 ACL 拒绝（会打出要建的用户）以 3
+退出；用户权限太大、连的是 master、`--listen` 不是回环地址时告警。运行时，新出现的节点先从网关 TCP 连一次，连不上
+就先不答，日志里提示检查安全组。
+
+排查：
+
+- 网关上：`hetu dns --namespace my_game --once`（同样的环境变量）打印会答哪些地址、哪些不答、为什么；
+- 节点或运维机上：`hetu nodes --config config.yml` 输出注册表的汇总：各地址的 worker 数、连接数、状态，过期的登记。
+
+### 要点
 
 - **客户端的真实 IP**：Caddy 会加上 `X-Forwarded-For`，HeTu 按 `PROXIES_COUNT: 1`（配置模板的默认值）从里面取
   客户端地址，按 IP 限制匿名连接数靠它；HeTu 只认这个头，不认 `Forwarded` 头。用安全组只让网关访问 HeTu 的端口，
   否则 `X-Forwarded-For` 可以伪造。网关前面再加 CDN、负载均衡的话，把它们的地址配进 Caddy 的 `trusted_proxies`，
   `PROXIES_COUNT` 设成总层数。
-- **停一台 HeTu**（缩容、抢占式实例收到回收通知）：先从 DNS 里删掉，等 Caddy 刷新过（`refresh` 的间隔，再加上
-  记录的 TTL，TTL 宜设得短）再停服（见下面"停服"），它上面的玩家收到 1001 后自动重连到别的机器。
-- **没来得及删记录就没了的机器**：Caddy 连不上会换别的，玩家只是多等一下；残留的记录用定时对账或伸缩组的缩容
-  钩子清掉。
+- **停一台 HeTu**（缩容、抢占式实例收到回收通知、升级版本）：直接停服（见下面"停服"）。节点先在注册表里注销、
+  照常服务 4 秒，等 Caddy 刷新过、不再把新连接发过来，才停止监听；它上面的玩家收到 1001 后自动重连到别的机器。原地
+  重启的节点开好服马上就有新连接。
+- **没来得及关服就没了的机器**（宕机、被强杀、抢占回收）：它的登记 15 秒没更新，`hetu dns` 就不再答它；这期间
+  Caddy 连不上会换别的，玩家只是多等一下。
 - **大批玩家同时重连**（网关重启、所有节点一起重启）：HeTu 的监听队列排不下的连接会被内核丢掉，Caddy 2 秒连不上
   也会把这台摘掉 30 秒。监听队列默认 2048（`LISTEN_BACKLOG`），Linux 上还受 `net.core.somaxconn` 限制（5.4 起的
-  内核默认 4096），单台同时连得更多时两个一起调大。SDK 重连时带随机抖动，会把同时掉线的玩家打散。
-- **网关是单点**：用稳定的机器，挂了玩家会自动重连；规模大了再加网关、在前面放云厂商的负载均衡。
+  内核默认 4096），单台同时连得更多时两个一起调大。SDK 重连时带随机抖动，会把同时掉线的玩家打散。计划内的停服、
+  重启不会被摘掉（开好服才登记，注销后等 Caddy 刷新过才停止监听），会被摘掉的只剩崩溃、被强杀的节点。
+- **网关是单点**：用稳定的机器，挂了玩家会自动重连；规模大了再加网关、在前面放云厂商的负载均衡。`hetu dns` 挂了
+  的话新连接进不来（已有的不受影响），compose 里配 `restart: always`。
+- **只在一家云上跑**：也可以让伸缩组直接关联云负载均衡，同样不用写脚本；代价是负载均衡的月费，也绑死了一家云。
 
 ## 停服
 
 `hetu start` 收到 SIGTERM（`docker stop`、systemd、k8s 停容器时发的）或 Ctrl+C 后，按这个顺序关服：
 
-1. 不再接受新连接；
-2. **排空**：各连接不再读新消息，已经收到的 RPC 照常执行完、回复发出去，再以 close 码 1001 断开（SDK 会自动
+1. 打开了节点发现（`DISCOVERY`）时，先在注册表里注销，照常服务 4 秒、等网关刷新过（见上面的负载均衡）；
+2. 不再接受新连接；
+3. **排空**：各连接不再读新消息，已经收到的 RPC 照常执行完、回复发出去，再以 close 码 1001 断开（SDK 会自动
    重连）。排在后面、还没读的消息不执行，客户端重连后重发不会重复执行。最多等 `SHUTDOWN_DRAIN_TIMEOUT`
    （默认 5 秒），到时还没执行完的 RPC 被取消：取消落在提交之前的不会提交，正好落在提交途中的可能已经
    提交、回复却发不出去，客户端重连后重发就会再执行一次。不能重复执行的调用（扣款、发货），让客户端带上
    单号，在 Endpoint 里用 `ctx.systems.call(..., uuid=单号)` 调声明了 `call_lock=True` 的 System 去重（见
    [高级功能](advanced.md)）；
-3. 跑断线 System、删掉 Connection 行，最多等 `GRACEFUL_SHUTDOWN_TIMEOUT`（默认 15 秒）；
-4. 停掉未来调用（FutureCalls），释放 Worker ID 租约，断开后端。
+4. 跑断线 System、删掉 Connection 行，最多等 `GRACEFUL_SHUTDOWN_TIMEOUT`（默认 15 秒）；
+5. 停掉未来调用（FutureCalls），删掉注册表里的登记，释放 Worker ID 租约，断开后端。
 
 关服途中再来的 SIGTERM / Ctrl+C 不会打断它（例外：Windows 上单进程运行时，第二次 Ctrl+C 是强制退出）。
 
 多进程时，管理进程通知各 worker 停服，每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 ×
-GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒），超时还没退出的强制结束。平时关服远用不了这么久，这是最坏
+GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒；打开了节点发现时再加 5 秒，默认 65 秒），超时还没退出的
+强制结束。平时关服远用不了这么久，这是最坏
 情况：排空之后，取消收发、等连接拆完、停未来调用各有一份 `GRACEFUL_SHUTDOWN_TIMEOUT` 的预算。
 
 **编排器的停机宽限期要比它长。** docker 默认只等 10 秒、k8s 默认 30 秒就发 SIGKILL，强杀会跳过上面的清理：
@@ -236,7 +324,8 @@ GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒），超时还没退出的�
 ## `hetu` CLI
 
 `hetu` 命令（通过 `uv run hetu` 运行）是您的运维入口点：`start`（启动）、`upgrade`（迁移）、`build`
-（生成客户端代码），以及调试用的 `call` / `get` / `range` / `shell`（见 [命令行调试](#命令行调试)）。
+（生成客户端代码），调试用的 `call` / `get` / `range` / `shell`（见 [命令行调试](#命令行调试)），以及节点
+发现用的 `dns`（网关上的 DNS 桥，不读配置文件）/ `nodes`（看注册表），见 [负载均衡](#负载均衡)。
 
 需要配置的子命令按这个顺序找配置：`--config` > 命令行参数模式（给了 `--app-file` / `--namespace` /
 `--db` 之一）> 环境变量 `HETU_CONFIG` > 当前目录的 `config.yml`。官方 Docker 镜像设了

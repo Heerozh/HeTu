@@ -1,7 +1,7 @@
 # 节点发现：Redis 注册表 + 网关上的 DNS — 设计稿
 
 - 日期：2026-11-15；2026-11-16 按之后合并进 dev 的 PR #235、#236 修订（§15）
-- 状态：草稿，待审查。已定事项见 §13（原 §14 的三个问题 2026-11-16 已定），没有待定问题。
+- 状态：已实现（分支 `feat/node-discovery`），实现记录和手工测试见 §16。已定事项见 §13，没有待定问题。
 - 基线：dev `2a144728`（初稿是 `8caa6a48`；`7a6a353a` 之后的几个提交只改了文档和翻译脚本）
 - 影响范围：`hetu/server/runtime.py`、`hetu/server/adapters/aiohttp_app.py`、`hetu/server/supervisor.py`
   （§9 第 0 步；关服上限加上注销等待，§4.3）、`hetu/cli/start.py`；新增 `hetu/discovery/`、`hetu/cli/dns.py`、
@@ -499,3 +499,57 @@ ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgeta
   - 第 0 步的现存问题照旧（§9）。
 - 原 §14 的三个问题定了（§13 第 6~8 条），§6.5 加上连到原生集群时的检查。§6.6 的探测改成地址每次重新出现都探：
   云上回收的实例的内网 IP 会分给新实例。
+
+## 16. 实现记录（2026-11-16，分支 `feat/node-discovery`）
+
+按 §9 分步提交：
+
+| 步 | 提交 | 内容 |
+|---|---|---|
+| 0 | `fix(supervisor)` | 管理进程在 `_shutdown` 开始时关掉自己那份监听 socket。先写的测试在修之前失败（Windows 上，两个假 worker 都关掉自己那份之后新连接照样连得上），按代码的推断成立 |
+| 1 | `feat(discovery)` × 2、`feat(cli)` | `hetu/discovery/netcheck.py`（开服检查）、`registry.py`（注册表、`NodeRegistrar`），`WorkerRuntime.start_registration` / `withdraw`、`close_backends` 里删登记，`worker_stop_timeout`，`hetu nodes` |
+| 2 | `feat(discovery)` | `hetu/discovery/dns.py`、`hetu dns`；dnspython 进 dev 组 |
+| 3 | `fix(build)`、`docs` | 见下面的"顺带修的"；operations.md（中英）、README（中英）、`hetu/llms.txt`、AGENTS.md、CONFIG_TEMPLATE.yml |
+
+和设计不一样、或者设计里没写细的地方：
+
+- 广播地址经内部配置项 `DISCOVERY_ADVERTISED_ADDRESS` 传给 worker（同 `ON_START_UUID`）。`hetu start` 打开
+  DISCOVERY 时总是用检查算出的值覆盖它，所以它不是给用户的 ADVERTISE（§12）。不是经 `hetu start` 开的服（嵌入、
+  测试）没有这一项时，worker 在 `WorkerRuntime.start()` 里自己做开服检查，不过就 `StartupAborted`。
+- `PROXIES_COUNT ≥ 1` 的检查，配了 `REAL_IP_HEADER` 也算过：那时客户端地址从它取。`DISCOVERY` 不是布尔值
+  （比如写成 `"true"`、`${VAR}` 插值）以 2 退出，同 `LISTEN_BACKLOG`。
+- 登记的写、删在一把锁里排队：关服时登记循环正好在写 `ready`，`draining` 会排在它后面落地，不会被它盖掉（有测试）。
+  写 `draining` 失败就不做注销等待。
+- `hetu nodes` 用 `--config` 或 `--db`，过期只按 `ts` 判断（`|本机时钟 - ts| > 15 秒`），坏的登记单独列出。
+- 原生集群的判断按异常类型（`MovedError`、`ClusterDownError` 等）：redis-py 解析错误时会去掉开头的错误码，按消息
+  前缀认不出来。刚建好的集群里，没收敛完的节点回的是 CLUSTERDOWN，也当成集群。
+- §6.5 的 ACL 命令（加 `+select`，用的是 12 号库）用 Redis 8.10.3 实测：redis-py 8 默认的 RESP3 握手（HELLO）、
+  `CLIENT SETINFO` 都不受影响，`HGETALL hetu:nodes` 能读，别的 key、`ROLE` 被拒（测试里按 `ACL_COMMAND` 建用户）。
+- `--once` 打印的是给人看的报告（会答哪些地址、哪些不答和原因、解析不了的登记、别的 namespace），不是一行 JSON。
+
+**顺带修的现存问题**：用 Dockerfile 构建的镜像里没有 `hetu/data/backend/redis/commit_v2.lua`（构建时没有 .git，
+setuptools-scm 列不出文件，package-data 又没列它），已发布的 `heerozh/hetu:latest`（2026-11-09 构建）也是这样，
+Redis 后端开服就报 FileNotFoundError。手工测试时发现，单独一个提交加进 package-data，`tests/test_packaging.py`
+守门。同一个原因，镜像里的版本号是 setuptools-scm 的兜底值 0.0.0（注册表里的 `ver` 也是它），要在 CD 里把 tag 作为
+`SETUPTOOLS_SCM_PRETEND_VERSION` 传进构建，没改。
+
+### 16.1 手工测试（2026-11-16）
+
+Docker Desktop（WSL2）的虚拟机里全用 host 网络：dummy 网卡上的 10.99.0.11~13 三个地址各跑一个节点（这个分支构建的
+镜像，`WORKER_NUM: 2`，`LISTEN` 写明 IP），Redis 8.10.3 一主一从，`hetu dns`（受限 ACL 用户读副本，
+`--listen 127.0.0.1:11053`），Caddy 2.11.9 官方镜像（参考配置，HTTP），客户端经 Caddy 保持 30~60 个 ws 连接
+（握手后调一个返回节点地址的 Endpoint，断了 0.2~0.5 秒后重连）。
+
+| 场景 | 结果 |
+|---|---|
+| 三台都在 | 30 个连接 10 / 10 / 10 |
+| 正常停一台（SIGTERM） | 停服开始约 0.5 秒后 `hetu dns` 去掉它；4 秒后它的 10 个连接收到 1001，1 秒内都重连到另外两台；整个停服约 4.7 秒 |
+| 原地重启一台 | 停止监听 18:48:41、就绪 :42、`hetu dns` 加回 :43.9（登记、每秒读、探测），:47.1 开的 10 个新连接全落在它上面：离它停止监听 6 秒，没有被 Caddy 摘掉 30 秒。就绪后 1 秒内开的连接还落在别的节点上（Caddy 的 2 秒缓存），属于正常的传播延迟 |
+| `kill -9` 一台 | 12.0 秒后从答案里去掉；它的 25 个连接收到 1006，都重连到另外两台，没有失败 |
+| 三台一起重启 | 0.9 秒后答空；4.3 秒后 60 个连接收到 1001；三台 +5 秒就绪，`hetu dns` +6.9 秒答回三台，+7.9 秒 60 个连接全部连回（就绪后约 3 秒），没有一次连接失败：Caddy 在 `lb_try_duration` 的 5 秒内等到了答案。对照 aiohttp 迁移设计稿 §12.5 按旧文档的流程是 35 秒以上 |
+| bridge 网络的节点 | 以 2 退出：`广播地址 172.17.0.3 在 eth0 上，eth0 是容器网络的虚拟网卡（veth 之类：iflink 77 ≠ ifindex 2）……` |
+| bridge 网络的 `hetu dns` | 以 2 退出，说明 Caddy 查的 127.0.0.1 是宿主机的回环 |
+| host 网络、Redis 在本机 bridge 容器里 | 节点以 2 退出：广播地址 172.17.0.1 在本机的容器网桥 docker0 上 |
+| `hetu dns --once`、`hetu nodes` | 报告和汇总都对；全程 `hetu dns` 和节点的日志里没有告警、错误 |
+
+没测的：k8s 的 hostNetwork、AWS / 阿里云上真实的伸缩组和安全组、多个网关。
