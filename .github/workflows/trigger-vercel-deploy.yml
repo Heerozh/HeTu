@@ -3,8 +3,9 @@ name: Trigger Vercel rebuild on API docs change
 on:
   push:
     branches: [ main ]
+    # 文档站只发英文版（docs/zh 不在站上）。要写 **：* 不跨目录，docs/en/tutorial/ 下的改动会漏掉
     paths:
-      - "docs/en/*.md"
+      - "docs/en/**"
       - "docs/api/**"
 
 jobs:
