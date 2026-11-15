@@ -92,7 +92,9 @@ include = ["hetu*"]
 exclude = ["tests*", "benchmark*", "docs*"]
 
 [tool.setuptools.package-data]
-hetu = ["CONFIG_TEMPLATE.yml", "llms.txt", "skills/*/*"]
+# Docker 镜像构建时没有 .git，setuptools-scm 列不出受版本控制的文件，包里只有这里列出的数据文件
+# （tests/test_packaging.py 检查有没有漏）
+hetu = ["CONFIG_TEMPLATE.yml", "llms.txt", "skills/*/*", "data/backend/redis/*.lua"]
 
 [tool.pytest.ini_options]
 # 限定 collect 路径，避免 9p mount 下 pytest 递归扫描整个仓库（hetu/、examples/、build/ 等）
