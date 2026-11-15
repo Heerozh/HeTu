@@ -1271,22 +1271,33 @@ The numbers you actually care about:
 Worker IDs are leased automatically by `WorkerKeeper`: on the Redis backend
 each lease is a Redis key renewed every 5 seconds, and if a process dies
 without releasing its lease, the slot is reclaimed after the lease expires (60
-seconds). A container that restarts, or a worker restarted by the manager
-process under the same index, takes back its previous id, so that a few
-hundred workers restarting abnormally at once don't use up the 1024 ids with
-old and new leases combined (a normal shutdown releases the lease, so it has
-no such problem). Before taking an id back it makes sure the old lease has
-gone unrenewed for at least 7 seconds, so a restart after an abnormal exit can
-take up to 7 seconds longer to start serving. To tell apart containers that
-share a hostname on one host (host networking, for example), each container
-stores a random token in `/var/tmp/hetu-node-token` on first start; delete it
-before committing an image from a container that has run HeTu. When k8s
-restarts a container within the same pod, the container's writable layer is
-new, so the token changes and the old id can't be taken back; if you need
-that, mount `/var/tmp` as a pod-level `emptyDir` into one HeTu container of
-the pod only (containers that mount the same directory get the same token).
-The SQLite backend (development only) simply uses the process's index on the
-host. On startup, the engine restores the *last persisted timestamp* from the
+seconds). The SQLite backend (development only) simply uses the process's
+index on the host.
+
+A container that restarts, or a worker restarted by the manager process under
+the same index, takes back its previous id, so that a few hundred workers
+restarting abnormally at once don't use up the 1024 ids with old and new
+leases combined (a normal shutdown releases the lease, so it has no such
+problem). Before taking an id back it makes sure the old lease has gone
+unrenewed for at least 20 seconds, so a restart right after an abnormal exit
+can take up to 20 seconds longer to start serving.
+
+To tell apart containers that share a hostname on one host (host networking,
+for example), each container stores a random token in
+`/var/tmp/hetu-node-token` on first start:
+
+- Keep this file out of images. Committing an image from a container that has
+  run HeTu, or running `hetu start` / `call` / `shell` during an image build,
+  bakes it in. Containers that end up with the same token never issue
+  duplicate ids, but they can't take their ids back, start more slowly, and
+  log an ERROR.
+- If the restart creates a new container (as k8s does when it restarts a
+  container within a pod, and many orchestrators do when they restart a task),
+  or `/var/tmp` is a tmpfs, the token changes and the old id can't be taken
+  back. On k8s, if you need that, mount `/var/tmp` as a pod-level `emptyDir`
+  into one HeTu container of the pod only.
+
+On startup, the engine restores the *last persisted timestamp* from the
 `WorkerLease` `Component` (a `core`/volatile table) and waits a short grace
 period if the system clock has gone backwards — that's HeTu's defense against
 duplicate ids when a host's NTP slews after a reboot.
@@ -1301,6 +1312,11 @@ For your code, the practical implications are short:
   will refuse to issue ids and stall**. Run NTP. If you must fix a
   rollback, restart the affected workers — the keeper will reseed the
   timestamps automatically.
+- An id is only issued within 15 seconds of the last confirmed lease renewal
+  (renewals run every 5 seconds). If renewals keep failing, or a `System`
+  blocks the event loop with synchronous work for more than about 10 seconds,
+  issuing ids raises `WorkerLeaseExpired` until the next renewal succeeds.
+  Move long synchronous computations to a thread or process pool.
 
 ## Reading and writing tables from a non-server process (`hetu.headless`)
 
