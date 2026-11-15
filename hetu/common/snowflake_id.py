@@ -44,6 +44,8 @@ WORKER_ID_KEY = "snowflake:worker"
 # 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
 # 数据库时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
 FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
+# 续约间隔（秒）。租约 TTL 60 秒、围栏余量 15 秒，5 秒一次留足了重试的余地
+RENEW_INTERVAL = 5
 # hetu call / shell 这类工具进程持有的租约，node_id 带这个前缀，hetu upgrade 据此认出来
 TOOL_NODE_PREFIX = "cli:"
 # SQLite 后端给工具进程预留的 worker id 段 [TOOL_WORKER_ID_FLOOR, MAX_WORKER_ID]：SQLite 上的

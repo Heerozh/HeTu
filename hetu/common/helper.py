@@ -20,6 +20,8 @@ WORKER_INDEX_ENV = "HETU_WORKER_INDEX"
 NODE_TOKEN_PATH = "/var/tmp/hetu-node-token"
 # 本进程读到（或生成）的 token，第一次用到时才读
 _node_token: str | None = None
+# 租约值里持有者标识和本进程随机部分之间的分隔符（标识里只有冒号，见 lease_owner_id）
+LEASE_NONCE_SEP = "#"
 
 # OpenProcess 查询进程状态所需的最小权限
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -203,14 +205,15 @@ def node_token() -> str | None:
 
 def lease_owner_id(pid: int, *, tool: bool = False) -> str:
     """
-    Worker ID 租约的持有者标识（node_id），由冒号连接：`机器码[:节点 token]:进程部分`，工具进程再带
-    `cli:` 前缀。租约的续约、释放都按它比对，开服时还按它认出"自己重启前的那个"直接复用，所以要满足：
+    Worker ID 租约的持有者标识，由冒号连接：`机器码[:节点 token]:进程部分`，工具进程再带 `cli:` 前缀。
+    租约里存的是它加上本进程随机生成的部分（`lease_value`），续约、释放按整个值比对；开服时按标识认出
+    "自己重启前留下的"租约，确认没人在续约了才接手（见 RedisWorkerKeeper 的"复用"）。所以要满足：
 
-    1. **同时活着的进程之间不能相同**。相同的话，后启动的会把先启动的正在用的 Worker ID 当成自己重启前
-       的直接复用，两边续约都成功、永远发现不了，静默发出重复的雪花 ID。host 网络下同一台宿主机上的
-       容器主机名都和宿主机一样、pid 都是 1（实测），多个副本设了同一个 hostname、k8s 的 hostNetwork
-       也一样，原来的 `主机名:pid` 就会撞。节点 token 每个容器各一个（`node_token`），把它们分开；
-    2. **同一个位置重启前后尽量不变**，才能复用原来的 Worker ID（不复用也不影响正确性，只是旧的要等
+    1. **同时活着的进程之间尽量不同**。相同的话，后启动的每次开服都要多等几秒、确认对方还在续约后另拿
+       一个；对方要是正好整个卡住了，还会被当成死的接手。host 网络下同一台宿主机上的容器主机名都和宿主机
+       一样、pid 都是 1（实测），多个副本设了同一个 hostname、k8s 的 hostNetwork 也一样，原来的
+       `主机名:pid` 就会撞。节点 token 每个容器各一个（`node_token`），把它们分开；
+    2. **同一个位置重启前后尽量不变**，才能接回原来的 Worker ID（接不回也不影响正确性，只是旧的要等
        过期）。
 
     进程部分：
@@ -231,11 +234,29 @@ def lease_owner_id(pid: int, *, tool: bool = False) -> str:
         parts.append(token)
     index = None if tool else worker_index()
     if index is not None:
-        parts += [f"w{index}", str(os.getppid())]
+        parts += [f"w{index}", str(os.getppid())]  # 这个是管理进程pid
     else:
         parts.append(str(pid))
     owner = ":".join(parts)
     return TOOL_NODE_PREFIX + owner if tool else owner
+
+
+def lease_value(identity: str) -> str:
+    """
+    租约里存的值：持有者标识 + "#" + 本进程启动时随机生成、不落盘的部分。
+
+    续约、释放都按整个值比对：标识就算撞了，换一个进程随机部分也不同，比对不上。只存标识的话，本进程
+    卡住超过租约的 60 秒、key 过期后被标识相同的另一个进程拿走，醒来续约照样比对得上，两边用同一个
+    Worker ID。认"自己重启前留下的"只看标识（`lease_identity`），见 RedisWorkerKeeper.get_worker_id。
+
+    The stored lease value: owner id plus a random per-process part.
+    """
+    return f"{identity}{LEASE_NONCE_SEP}{secrets.token_hex(4)}"
+
+
+def lease_identity(value: str) -> str:
+    """租约值里的持有者标识（去掉本进程的随机部分）"""
+    return value.split(LEASE_NONCE_SEP, 1)[0]
 
 
 def windows_pid_exited(pid: int) -> bool:
@@ -294,7 +315,7 @@ def lease_owner_exited(owner: bytes | str) -> bool:
         owner = owner.decode("ascii", errors="replace")
     from .snowflake_id import TOOL_NODE_PREFIX
 
-    parts = owner.removeprefix(TOOL_NODE_PREFIX).split(":")
+    parts = lease_identity(owner).removeprefix(TOOL_NODE_PREFIX).split(":")
     machine_id, pid = parts[0], parts[-1]
     return (
         len(parts) >= 2

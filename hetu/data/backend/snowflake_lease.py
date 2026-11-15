@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Self
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from ...common.snowflake_id import SnowflakeID, WorkerKeeper
+from ...common.snowflake_id import RENEW_INTERVAL, SnowflakeID, WorkerKeeper
 from ...i18n import _
 from .snowflake_timestamp import TIMESTAMP_SAVE_INTERVAL, SnowflakeTimestampKeeper
 
@@ -21,9 +21,6 @@ if TYPE_CHECKING:
     from .table import Table
 
 logger = logging.getLogger("HeTu.root")
-
-# 续约间隔（秒）。租约 TTL 60 秒、围栏余量 15 秒，5 秒一次留足了重试的余地
-RENEW_INTERVAL = 5
 
 
 class SnowflakeLease:

@@ -435,7 +435,7 @@ def _server_runtime(backend_config: dict) -> WorkerRuntime:
 
 
 async def test_restart_resumes_from_snowflake_watermark(
-    mod_test_app, mod_backend_config
+    mod_test_app, mod_backend_config, monkeypatch
 ):
     """开关服的水位接线：正常关服后马上重启不该被钳在未来，崩溃后重启要从开服时预留的
     水位接着发。
@@ -467,6 +467,11 @@ async def test_restart_resumes_from_snowflake_watermark(
     await runtime.snowflake_lease.stop_loops()
     await runtime.default_backend.close()
 
+    # 崩溃后马上重启，要确认旧租约没人续约了才接回同一个 worker id（水位是按 id 存的），默认等 7 秒，
+    # 这里缩到 1 秒
+    from hetu.data.backend.redis import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
     runtime = _server_runtime(mod_backend_config)
     await runtime.start_backends()
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000

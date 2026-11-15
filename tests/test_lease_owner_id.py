@@ -1,16 +1,21 @@
 """
-Worker ID 租约的持有者标识（hetu/common/helper.py 的 lease_owner_id、node_token）：同时活着的进程之间
-不能相同，同一个位置重启前后尽量不变。
+Worker ID 租约的持有者标识和复用（hetu/common/helper.py 的 lease_owner_id、node_token、lease_value，
+hetu/data/backend/redis/worker_keeper.py 的 get_worker_id）。
 
-撞了的后果：后启动的进程会把先启动的正在用的 Worker ID 当成自己重启前的直接复用，两边续约都成功，静默
-发出重复的雪花 ID。host 网络下同一台宿主机上的容器主机名都和宿主机一样、pid 都是 1（实测），原来的
-"主机名:pid" 就会撞。
+- 持有者标识：同时活着的进程之间尽量不同，同一个位置重启前后不变。host 网络下同一台宿主机上的容器主机名
+  都和宿主机一样、pid 都是 1（实测），原来的"主机名:pid"就会撞；
+- 租约值 = 标识 + 本进程随机的部分：续约、释放按整个值比对，标识撞了也比对不上；
+- 复用：接手标识相同的租约之前，确认它已经没人在续约了；
+- 开服读租约不续期。
 """
 
+import asyncio
+import contextlib
 import logging
 import multiprocessing
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +45,36 @@ def new_node(monkeypatch, tmp_path):
 
     switch()
     return switch
+
+
+@pytest.fixture
+def fast_reuse(monkeypatch):
+    """确认旧租约没人续约的等待从 7 秒缩到 1 秒，测试不用等那么久"""
+    from hetu.data.backend.redis import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
+
+
+@contextlib.asynccontextmanager
+async def renewing(keepers):
+    """with 里这些 keeper 每 0.2 秒续一次约（活着的进程）。产出续约时发现租约丢了的那些"""
+    lost = []
+
+    async def renew_forever(keeper):
+        try:
+            while True:
+                await asyncio.sleep(0.2)
+                await keeper.keep_alive()
+        except SystemExit:
+            lost.append(keeper)
+
+    tasks = [asyncio.create_task(renew_forever(keeper)) for keeper in keepers]
+    try:
+        yield lost
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @posix_only
@@ -116,6 +151,29 @@ def test_node_token_falls_back_when_not_writable(new_node, monkeypatch, caplog):
     assert "只在本进程有效" in caplog.text
 
 
+def test_lease_value_adds_per_process_part():
+    """租约值 = 持有者标识 + "#" + 本进程随机的部分，每个进程都不同；去掉随机部分就是标识"""
+    value = helper.lease_value("host-a:tok:1")
+    assert value.startswith("host-a:tok:1#")
+    assert value != helper.lease_value("host-a:tok:1")
+    assert helper.lease_identity(value) == "host-a:tok:1"
+    assert helper.lease_identity("host-a:1") == "host-a:1"
+
+
+@posix_only
+def test_sqlite_tool_lease_value_has_per_process_part(new_node):
+    """SQLite 上工具进程的租约值同样是 标识 + 本进程随机的部分"""
+    from typing import Any, cast
+
+    from hetu.data.backend.worker_keeper import SQLiteToolWorkerKeeper
+
+    first = SQLiteToolWorkerKeeper(cast(Any, None), 123)
+    second = SQLiteToolWorkerKeeper(cast(Any, None), 123)
+    token = helper.node_token()
+    assert helper.lease_identity(first.node_id) == f"cli:host-a:{token}:123"
+    assert first.node_id != second.node_id
+
+
 def test_lease_owner_exited_parses_owner_ids(monkeypatch):
     """
     Windows 上认"租约主人已经退出"：第一段是机器码，最后一段是 pid。管理进程起的 worker 最后一段是管理
@@ -131,6 +189,8 @@ def test_lease_owner_exited_parses_owner_ids(monkeypatch):
     assert helper.lease_owner_exited("host-a:w0:111")
     assert not helper.lease_owner_exited("host-a:w0:333")
     assert helper.lease_owner_exited("host-a:9bbe2386a56e66d1:111")
+    assert helper.lease_owner_exited("host-a:w0:111#ab12cd34")
+    assert not helper.lease_owner_exited("host-a:w0:333#ab12cd34")
     assert not helper.lease_owner_exited("host-b:111")
     assert not helper.lease_owner_exited("pytest-node")
 
@@ -138,11 +198,12 @@ def test_lease_owner_exited_parses_owner_ids(monkeypatch):
 @posix_only
 @use_redis_family_backend_only
 async def test_containers_sharing_hostname_get_their_own_worker_ids(
-    mod_auto_backend, new_node
+    mod_auto_backend, new_node, fast_reuse
 ):
     """
-    主机名一样、pid 都是 1 的两个容器（host 网络）：各拿各的 Worker ID，不会复用对方正在用的；同一个容器
-    重启后照样复用自己原来的
+    主机名一样、pid 都是 1 的两个容器（host 网络）：各拿各的 Worker ID。容器 a 被强杀后重启：同一个 token
+    文件、pid 还是 1，旧租约还没过期也没人续约，确认之后接回原来的 id；原来那个进程要是其实还活着，续约会
+    发现租约已经不是自己的
     """
     from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
@@ -151,18 +212,130 @@ async def test_containers_sharing_hostname_get_their_own_worker_ids(
     a = RedisWorkerKeeper(1, aio)
     new_node("container-b")
     b = RedisWorkerKeeper(1, aio)
+    keepers = [a, b]
     try:
         id_a = await a.get_worker_id()
         id_b = await b.get_worker_id()
         assert id_b != id_a
 
-        new_node("container-a")  # 容器 a 重启：同一个 token 文件，pid 还是 1
-        restarted = RedisWorkerKeeper(1, aio)
-        assert restarted.node_id == a.node_id
+        new_node("container-a")
+        keepers.append(restarted := RedisWorkerKeeper(1, aio))
+        assert restarted.identity == a.identity
+        assert restarted.node_id != a.node_id
         assert await restarted.get_worker_id() == id_a
+        assert await aio.get(a._key(id_a)) == restarted.node_id.encode()
+        with pytest.raises(SystemExit):
+            await a.keep_alive()
     finally:
-        await a.release_worker_id()
-        await b.release_worker_id()
+        for keeper in keepers:
+            await keeper.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_stale_lease_is_taken_over_without_waiting(mod_auto_backend, new_node):
+    """重启前的进程早就没在续约了（比如 10 秒前就死了）：不用等，马上接回原来的 id"""
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("container-a")
+    dead = RedisWorkerKeeper(1, aio)
+    worker_id = await dead.get_worker_id()
+    await aio.pexpire(dead._key(worker_id), 50_000)  # 最后一次续约在 10 秒前
+
+    new_node("container-a")
+    restarted = RedisWorkerKeeper(1, aio)
+    started = time.monotonic()
+    try:
+        assert await restarted.get_worker_id() == worker_id
+        assert time.monotonic() - started < 2
+    finally:
+        await restarted.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_live_twin_lease_is_not_taken_over(
+    mod_auto_backend, new_node, fast_reuse
+):
+    """
+    标识撞了的两个进程（比如 token 文件被打进了镜像），先起的那个还活着、照常续约：后起的不能把它的 id 当成
+    自己重启前的接手，另拿一个；先起的照常续约
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("baked")
+    alive = RedisWorkerKeeper(1, aio)
+    new_node("baked")
+    twin = RedisWorkerKeeper(1, aio)
+    assert twin.identity == alive.identity
+    try:
+        id_alive = await alive.get_worker_id()
+        async with renewing([alive]) as lost:
+            assert await twin.get_worker_id() != id_alive
+        assert not lost
+        await alive.keep_alive()
+    finally:
+        await alive.release_worker_id()
+        await twin.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_restart_waits_once_for_all_same_identity_leases(
+    mod_auto_backend, new_node, fast_reuse
+):
+    """
+    标识相同的租约有好几把：三个标识撞了的、活着的进程的（id 小），加上本进程重启前留下的（id 最大）。几把
+    一起等一次就够，接回重启前那把，活着的都不碰。挨个等的话，每个活着的都要等差不多一整个 REUSE_STALE_SEC
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("baked")
+    twins = [RedisWorkerKeeper(1, aio) for _ in range(3)]
+    dead = RedisWorkerKeeper(1, aio)
+    restarted = RedisWorkerKeeper(1, aio)
+    keepers = [*twins, dead, restarted]
+    try:
+        for worker_id, keeper in enumerate([*twins, dead], start=900):
+            await aio.set(keeper._key(worker_id), keeper.node_id, ex=60)
+            keeper.worker_id = worker_id
+        async with renewing(twins) as lost:
+            started = time.monotonic()
+            assert await restarted.get_worker_id() == dead.worker_id
+            assert time.monotonic() - started < 2
+        assert not lost
+    finally:
+        for keeper in keepers:
+            await keeper.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_renewal_detects_takeover_by_same_identity(mod_auto_backend, new_node):
+    """
+    本进程卡住超过 60 秒，租约过期后被一个标识相同的进程拿走了同一个 id：续约照样能发现。原来租约值只有
+    标识，比对得上，两边接着用同一个 Worker ID
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("baked")
+    holder = RedisWorkerKeeper(1, aio)
+    worker_id = await holder.get_worker_id()
+    key = holder._key(worker_id)
+    new_node("baked")
+    twin = RedisWorkerKeeper(1, aio)
+    assert twin.identity == holder.identity
+    try:
+        await aio.delete(key)  # 过期了
+        await aio.set(key, twin.node_id, ex=60)  # 标识相同的进程用 SET NX 拿走
+        with pytest.raises(SystemExit):
+            await holder.keep_alive()
+    finally:
+        await aio.delete(key)
 
 
 @use_redis_family_backend_only
@@ -175,7 +348,7 @@ async def test_startup_scan_does_not_extend_other_leases(mod_auto_backend, new_n
 
     aio = mod_auto_backend().master.aio
     dead = "snowflake:worker:1010"
-    await aio.set(dead, "dead-host:1", px=30_000)
+    await aio.set(dead, "dead-host:1#00000000", px=30_000)
     keeper = RedisWorkerKeeper(1, aio)
     try:
         await keeper.get_worker_id()
@@ -187,11 +360,11 @@ async def test_startup_scan_does_not_extend_other_leases(mod_auto_backend, new_n
 
 @use_redis_family_backend_only
 async def test_supervised_worker_restart_reuses_its_worker_id(
-    mod_auto_backend, new_node, monkeypatch
+    mod_auto_backend, new_node, monkeypatch, fast_reuse
 ):
     """
-    管理进程以同一个序号重启的 worker（pid 变了）复用原来的 Worker ID；别的序号不复用；换了管理进程
-    （裸机上重启了 hetu start，旧 worker 可能还在退出）也不复用
+    管理进程以同一个序号重启的 worker（pid 变了）接回原来的 Worker ID；别的序号不接；换了管理进程（裸机上
+    重启了 hetu start，旧 worker 可能还在退出）也不接
     """
     from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
@@ -202,7 +375,7 @@ async def test_supervised_worker_restart_reuses_its_worker_id(
     keepers = [first]
     try:
         worker_id = await first.get_worker_id()
-        restarted = RedisWorkerKeeper(101, aio)
+        keepers.append(restarted := RedisWorkerKeeper(101, aio))
         assert await restarted.get_worker_id() == worker_id
 
         monkeypatch.setenv(helper.WORKER_INDEX_ENV, "1")

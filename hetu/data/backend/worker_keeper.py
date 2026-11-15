@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
-from ...common.helper import lease_owner_exited, lease_owner_id, worker_index
+from ...common.helper import (
+    lease_owner_exited,
+    lease_owner_id,
+    lease_value,
+    worker_index,
+)
 from ...common.permission import Permission
 from ...common.snowflake_id import (
     FENCE_MARGIN_SEC,
@@ -134,7 +139,8 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
         super().__init__()
         self.client = client
         self.worker_id = -1
-        self.node_id = lease_owner_id(pid, tool=True)
+        # 持有者标识 + 本进程随机生成的部分，续约、释放按整个值比对，见 lease_value
+        self.node_id = lease_value(lease_owner_id(pid, tool=True))
         self._token = self.node_id.encode()
 
     @staticmethod

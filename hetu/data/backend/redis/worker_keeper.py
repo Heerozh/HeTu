@@ -1,14 +1,16 @@
+import asyncio
 import logging
 from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
+from ....common.helper import lease_identity, lease_owner_id, lease_value
 from ....common.helper import lease_owner_exited as _owner_exited
-from ....common.helper import lease_owner_id
 from ....common.snowflake_id import (
     FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
+    RENEW_INTERVAL,
     WORKER_ID_EXPIRE_SEC,
     WORKER_ID_KEY,
     WorkerKeeper,
@@ -40,6 +42,24 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+
+# 接手持有者标识和自己相同的租约（多半是自己重启前留下的）：值还是读到时的那个（ARGV[1]）、而且至少
+# REUSE_STALE_SEC 秒没被续约（剩余 TTL 不超过 ARGV[3] 毫秒），才换成自己的值。判断和改写在同一条单 key
+# 脚本里，中间不会被续约插进来。返回 1 接手了；0 值已经变了（过期了，或者被别人拿走了）；-1 还有人在续
+LUA_TAKE_OVER_IF_STALE = """
+if redis.call('get', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+if redis.call('pttl', KEYS[1]) > tonumber(ARGV[3]) then
+    return -1
+end
+redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[4])
+return 1
+"""
+
+# 接手标识相同的租约之前，要确认它至少这么多秒没被续约：活着的持有者每 RENEW_INTERVAL 秒续一次（TTL
+# 刷回满值），多留 2 秒给续约的抖动。非正常退出后马上重启的，开服最多因此多等这么久
+REUSE_STALE_SEC = RENEW_INTERVAL + 2
 
 
 def _decode(value: bytes | str | None) -> str | None:
@@ -93,27 +113,46 @@ class RedisWorkerKeeper(WorkerKeeper):
       它照样返回1，恰恰漏掉会产生重复ID的那种情况。
       副作用是"不是自己的"时会把对方的 TTL 也刷成满值，无害：对方本来每5秒就自己刷一次，
       而我们这侧立刻退出，不会反复刷。
-    * **复用自己的id** 同样用 `GETEX`。原来是 `GET` 判断 node_id 后再 `EXPIRE`，两条命令
-      非原子——中间 key 可能过期并被别人抢走，然后我们给对方续了期还以为拿到了自己的 id。
+    * **接手标识相同的租约**（多半是自己重启前留下的）用 LUA_TAKE_OVER_IF_STALE，见下面"复用"。
     * **释放** 用 LUA_RELEASE_IF_MINE。原来是无条件 `DEL`：如果自己的租约早已过期并被别人
       接手，关服时会删掉**别人的**租约，对方瞬间变无主，第三个 worker 又能抢走同一个 id。
 
     `SET key node_id NX EX ttl`（抢新id）本身就是原子的，不需要额外处理。
 
-    开服时用一次 pipeline 读完所有 id 的租约，不续期，只给自己那把续期。原来是逐个 `GETEX`，会把
-    扫到的每个租约（包括已经死掉的）都刷回 60 秒：池子被死租约占满时，拿不到 id 的 worker 每秒重试、
-    每次都把它们再续一遍，死租约就永远过不了期；而且每次开服是对 master 最多 1024 次的串行写。
+    比对用的值（node_id）是"持有者标识 + 本进程随机生成的部分"（`lease_value`）：标识就算撞了，
+    换了一个进程也比对不上。
+
+    ## 复用
+
+    worker id 一共 1024 个。非正常退出（kill -9、OOM、崩溃）留下的租约要等 60 秒才过期，几百个
+    worker 一起非正常重启时，新旧两份加起来就可能把池子用光，所以重启后要尽量接回自己原来的 id。
+    "自己原来的"按持有者标识认（`lease_owner_id`：同一个容器重启、管理进程以同一序号重启 worker 时
+    不变）。但标识相同、随机部分不同的租约，也可能属于一个标识撞了的、还活着的进程，所以接手之前
+    要确认它至少 REUSE_STALE_SEC 秒没被续约（活着的每 5 秒续一次）；还在续的不碰，另拿一个空的。
+    正常关服会释放租约，重启时没有这一步。
+
+    "没被续约"只能说明它停住了，不能证明它死了：一个标识撞了的进程如果整个卡住超过 REUSE_STALE_SEC
+    秒，正好赶上另一个同标识的进程开服，会被当成死的接手。它醒来后下一次续约就会发现、退出，但在那之前
+    发出的号可能和接手的进程重复。要完全排除，得等到它的发号围栏过了（45 秒）才接手，复用就失去了意义。
+    正常情况下同一个标识的上一个进程一定已经退出了（容器重启、管理进程等旧 worker 退出才起新的），
+    只有标识撞了（token 文件被打进镜像、几个容器共用 /var/tmp）才会遇到。
+
+    开服时用一次 pipeline 读完所有 id 的租约，不续期。原来是逐个 `GETEX`，会把扫到的每个租约
+    （包括已经死掉的）都刷回 60 秒：池子被死租约占满时，拿不到 id 的 worker 每秒重试、每次都把它们
+    再续一遍，死租约就永远过不了期；而且每次开服是对 master 最多 1024 次的串行写。
 
     ## 配套的本地围栏
 
     上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 跑到之间还有最长一个
     续约周期，这期间它照样拿旧 worker_id 发号。所以每次确认"租约还是我的"时都会推进
     `lease_deadline`（基类属性），`SnowflakeID` 在超过它之后直接拒绝发号，把这个窗口关掉。
-    见 `SnowflakeID._check_lease_fence`。
+    见 `SnowflakeID._check_lease_fence`。标识相同时的接手不等租约过期，例外见上面"复用"。
 
-    Redis-native worker id lease. All three operations (renew / reuse / release) are
-    compare-and-swap against the owner token, because lease takeover after expiry is a
-    normal event and an unchecked operation silently yields duplicate snowflake ids.
+    Redis-native worker id lease. Renew / take over / release are compare-and-swap against
+    the full lease value (owner id plus a per-process random part), because lease takeover
+    after expiry is a normal event and an unchecked operation silently yields duplicate
+    snowflake ids. A lease left with the same owner id (a restart) is taken over only after
+    nobody has renewed it for REUSE_STALE_SEC.
     """
 
     def __init__(
@@ -126,17 +165,18 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         初始化 RedisWorkerKeeper。
 
-        tool: 工具进程模式（hetu call / shell）。node_id 带 `cli:` 前缀；分配时**不做**复用
-        扫描、从 MAX_WORKER_ID 往下 SET NX，见 `get_worker_id`。续约、释放、围栏不变。
+        tool: 工具进程模式（hetu call / shell）。node_id 带 `cli:` 前缀；分配时**不做**复用、
+        从 MAX_WORKER_ID 往下 SET NX，见 `get_worker_id`。续约、释放、围栏不变。
         """
         super().__init__()
         self.aio = aio
         self.worker_id_key = WORKER_ID_KEY
         self.worker_id = -1
         self.tool = tool
-        # 持有者标识：同时活着的进程之间互不相同，同一个位置重启前后不变（才能复用自己原来的 id），
-        # 格式见 lease_owner_id。tool 模式带 cli: 前缀
-        self.node_id = lease_owner_id(pid, tool=tool)
+        # 持有者标识：同一个位置重启前后不变，认"自己重启前留下的"租约靠它，格式见 lease_owner_id。
+        # 租约里存的是它加上本进程随机生成的部分，续约、释放按整个值比对
+        self.identity = lease_owner_id(pid, tool=tool)
+        self.node_id = lease_value(self.identity)
 
     def _key(self, worker_id: int) -> str:
         return f"{self.worker_id_key}:{worker_id}"
@@ -192,6 +232,57 @@ class RedisWorkerKeeper(WorkerKeeper):
             pipe.get(self._key(worker_id))
         return [_decode(value) for value in await pipe.execute()]
 
+    async def _take_over_stale(self, candidates: dict[int, str]) -> int | None:
+        """
+        接手一把持有者标识和自己相同的租约（worker id → 读到的值），确认没人在续约了才换成自己的值
+        （LUA_TAKE_OVER_IF_STALE）。最近续过的先等到它"该续却没续"再看，几把一起等，最多等
+        REUSE_STALE_SEC 秒。接手了就武装围栏、返回 worker id；都还有人在续、或者已经不在了，返回 None
+        """
+        stale_pttl = (WORKER_ID_EXPIRE_SEC - REUSE_STALE_SEC) * 1000
+        pipe = self.aio.pipeline(transaction=False)
+        for worker_id in candidates:
+            pipe.pttl(self._key(worker_id))
+        wait = max((pttl - stale_pttl for pttl in await pipe.execute()), default=0)
+        if wait > 0:
+            logger.info(
+                _(
+                    "[❄️ID] 有持有者标识和本进程相同的 Worker ID 租约 {worker_ids}（多半是重启前"
+                    "留下的），等 {wait} 秒确认没有进程在续约后接手"
+                ).format(worker_ids=list(candidates), wait=f"{wait / 1000:.1f}")
+            )
+            await asyncio.sleep(wait / 1000 + 0.1)
+        for worker_id, old_value in candidates.items():
+            started_at = monotonic()
+            result = await self.aio.eval(
+                LUA_TAKE_OVER_IF_STALE,
+                1,
+                self._key(worker_id),
+                old_value,
+                self.node_id,
+                stale_pttl,
+                WORKER_ID_EXPIRE_SEC,
+            )
+            if result == 1:
+                self.lease_deadline = (
+                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+                )
+                logger.info(
+                    _(
+                        "[❄️ID] 接手持有者标识和本进程相同的 Worker ID: {worker_id}"
+                        "（原来的值 {old}，现在 {node_id}）"
+                    ).format(worker_id=worker_id, old=old_value, node_id=self.node_id)
+                )
+                return worker_id
+            if result == -1:
+                logger.warning(
+                    _(
+                        "[❄️ID] Worker ID {worker_id} 的持有者标识和本进程相同，但还有进程在续约，"
+                        "不接手。可能有两个进程的持有者标识撞了（{owner}），比如节点 token 文件被"
+                        "打进了镜像，或者几个容器共用了 /var/tmp"
+                    ).format(worker_id=worker_id, owner=old_value)
+                )
+        return None
+
     async def _claim_free(self, worker_id: int) -> bool:
         """SET NX 抢一个空着的 worker id（本身就是原子的抢占），抢到就武装围栏"""
         started_at = monotonic()
@@ -212,28 +303,33 @@ class RedisWorkerKeeper(WorkerKeeper):
     @override
     async def get_worker_id(self) -> int:
         """
-        从 Redis 中获取一个可用的 Worker ID：有自己重启前留下的就复用；否则在读到时空着的里面 SET NX
-        抢一个。都没有就抛 KeyError（服务器由上层每秒重试）。
+        从 Redis 中获取一个可用的 Worker ID：本进程已经拿着的直接用；有持有者标识和自己相同的（多半是
+        自己重启前留下的），确认没人在续约了就接手；否则在读到时空着的里面 SET NX 抢一个。都没有就抛
+        KeyError（服务器由上层每秒重试）。复用的设计见类文档
         """
         if self.tool:
             return await self._get_tool_worker_id()
         leases = await self._read_leases()
-        # node_id 相同说明是自己重启前的那个（同一个容器重启，或者管理进程以同一序号重启了
-        # worker），直接复用；它在同时活着的进程之间不会相同，见 lease_owner_id。GETEX 一条命令
-        # 原子完成"读值+续期"，拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
+        # 本进程已经拿着的（同一个进程又调了一次）
         if self.node_id in leases:
             worker_id = leases.index(self.node_id)
             if await self._getex_if_mine(worker_id):
-                logger.info(
-                    _(
-                        "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
-                        "(通过相同进程码 {node_id} )"
-                    ).format(worker_id=worker_id, node_id=self.node_id)
-                )
                 self.worker_id = worker_id
                 return worker_id
-
-        # 分配新的：只试读到时空着的
+        # 标识相同、随机部分不同：自己重启前留下的，或者一个标识撞了的进程的
+        candidates = {
+            worker_id: value
+            for worker_id, value in enumerate(leases)
+            if value is not None
+            and value != self.node_id
+            and lease_identity(value) == self.identity
+        }
+        if candidates:
+            worker_id = await self._take_over_stale(candidates)
+            if worker_id is not None:
+                self.worker_id = worker_id
+                return worker_id
+        # 分配新的：只试读到时空着的（等的那几秒里刚过期的，抛 KeyError 后重试时会读到）
         for worker_id, value in enumerate(leases):
             if value is None and await self._claim_free(worker_id):
                 self.worker_id = worker_id
