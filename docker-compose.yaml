@@ -5,7 +5,9 @@ services:
     ports:
       - "6379:6379"
     env_file:
-      - .env
+      # 有就读（比如给配置文件里的 ${AUTH_KEY} 之类插值），没有也能起
+      - path: .env
+        required: false
     volumes:
       - ./data:/data
     restart: always
@@ -18,9 +20,11 @@ services:
     ports:
       - "2466:2466"
     env_file:
-      - .env
+      # 有就读（比如给配置文件里的 ${AUTH_KEY} 之类插值），没有也能起
+      - path: .env
+        required: false
     volumes:
       - ./app:/app
     depends_on:
-      - redis
+      - database
     restart: always
