@@ -742,35 +742,57 @@ Unity SDK 附带了匹配的默认值。如果你添加了自定义层，你需�
 
 ## 自定义 HTTP 端点
 
-HeTu 内置的 web 服务器就是 Sanic，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
+HeTu 内置的 web 服务器是 aiohttp，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
 
 ```python
 import hetu
-from sanic import Request, response
+from aiohttp import web
 
 
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return await response.file(f"/data/{name}")
+@hetu.define_route("/download/{name}")
+async def download(request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(f"/data/{request.match_info['name']}")
 ```
 
-装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。uri 之后的参数会原样透传给 Sanic 的 `Blueprint.route`，所以 `methods=["POST"]`、`stream=True` 等的行为和 Sanic 文档完全一致。
+被装饰的函数就是 aiohttp 的 handler：唯一的参数是 `web.Request`，返回 `web.Response`、`web.json_response(...)`、`web.FileResponse` 之类。路径参数写成 `{name}`（可以带正则，如 `{id:\d+}`），在函数里从 `request.match_info` 取。装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。
+
+- `methods` 指定接受哪些 HTTP 方法，默认只有 `GET`，比如 `@hetu.define_route("/upload", methods=["POST"])`。用别的方法请求这个路径会得到 405。
+- 其余关键字参数原样透传给 aiohttp 的 `UrlDispatcher.add_route`（如 `name`）。
+- 请求体的上限是配置项 `REQUEST_MAX_SIZE`（默认 100MB），超过返回 413。
 
 它们就只是普通的 web 端点：不经过 HeTu 的 `Permission` 权限体系，拿不到 `SystemContext`，也没有数据库访问——鉴权、限流、输入校验都需要你自己写。需要客户端 SDK 调用的游戏逻辑，请用 `define_system` / `define_endpoint`。
 
-单条路由表达不了的场景——静态文件目录、中间件、异常处理器、带 `url_prefix` 的自建 Blueprint——用 `@hetu.on_server_setup`，它会在 Sanic app 创建后立即把 app 交给你：
+单条路由表达不了的场景——静态文件目录、中间件、子应用、开服 / 关服时要做的事——用 `@hetu.on_server_setup`，它把 aiohttp 的 `web.Application` 交给你：
 
 ```python
 @hetu.on_server_setup
-def setup(app):
-    app.static("/download", "/data/files")
+def setup(app: web.Application):
+    app.router.add_static("/download", "/data/files")
 ```
 
 需要记住的三件事：
 
-- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它，你的页面就会顶掉 HeTu 的默认欢迎页。
-- 两个钩子都会在管理进程执行一次、每个 worker 进程再各执行一次，且此时后端还没连接。所以只做注册类操作；需要每个 worker 初始化的东西，请在 setup 回调里用 `app.before_server_start(...)` 挂钩子。
-- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 nginx/CDN，而不是穿过游戏 worker。
+- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它（`define_route` 或在 setup 回调里注册都行），你的页面就会顶掉 HeTu 的默认欢迎页。
+- setup 回调在每个 worker 进程里、每次开服建 app 时执行一次，此时还没开始监听；多进程时管理进程不执行它。它在 `define_route` 的路由挂好之后执行。需要每个 worker 初始化、清理的东西（比如一个连接池），在回调里挂到 `app.on_startup` / `app.on_cleanup` 上。
+- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 Caddy/CDN，而不是穿过游戏 worker。
+
+从 Sanic 版本升级时（之前的 HeTu 用的是 Sanic），处理函数要按 aiohttp 的写法改：
+
+```python
+# 之前（Sanic）
+from sanic import Request, response
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return response.text(f"downloaded {name}")
+
+# 之后（aiohttp）
+from aiohttp import web
+
+@hetu.define_route("/download/{name}")
+async def download(request: web.Request):
+    return web.Response(text=f"downloaded {request.match_info['name']}")
+```
 
 ## 可操作性可见性：重放与慢日志
 
@@ -805,7 +827,7 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 
 ## 非服务器进程读写表（`hetu.headless`）
 
-有些进程需要和 HeTu 服务器共用同一个后端，却**不是** HeTu 应用：比如独立的战斗模拟进程——它不跑 Sanic、不定义 `System`、不收客户端连接，只想读一张命令表、写一张回报表、和服务器双向维护一张租约表。`hetu.headless` 就是给这类**可信内部进程**用的表直读写客户端。
+有些进程需要和 HeTu 服务器共用同一个后端，却**不是** HeTu 应用：比如独立的战斗模拟进程——它不起 Web 服务器、不定义 `System`、不收客户端连接，只想读一张命令表、写一张回报表、和服务器双向维护一张租约表。`hetu.headless` 就是给这类**可信内部进程**用的表直读写客户端。
 
 ```python
 import hetu.headless
@@ -817,7 +839,7 @@ client = await hetu.headless.connect(
 )
 ```
 
-它的原则只有一条：**写入走与 `System` 完全相同的 `Session.commit()` 提交路径**。表级 PUBLISH、keyspace 通知、乐观锁版本检查、unique 校验都在那一层，所以客户端的 `WatchRow` / `WatchRange` / 整表订阅，以及服务器自己的订阅和 FutureCall，都分不出一行是 `System` 写的还是 headless 进程写的。为此它**不做**的事同样明确：不 import sanic、不需要 app 文件、不建簇、不建表、不迁移、不发雪花 id、**不做权限 / RLS 检查**——把它当成一条可信的内部数据库连接，只给你自己的进程用。
+它的原则只有一条：**写入走与 `System` 完全相同的 `Session.commit()` 提交路径**。表级 PUBLISH、keyspace 通知、乐观锁版本检查、unique 校验都在那一层，所以客户端的 `WatchRow` / `WatchRange` / 整表订阅，以及服务器自己的订阅和 FutureCall，都分不出一行是 `System` 写的还是 headless 进程写的。为此它**不做**的事同样明确：不 import aiohttp、不需要 app 文件、不建簇、不建表、不迁移、不发雪花 id、**不做权限 / RLS 检查**——把它当成一条可信的内部数据库连接，只给你自己的进程用。
 
 ### 认表：cluster_id 与 schema 来自服务器 meta
 
@@ -882,7 +904,7 @@ async def lease_loop():
 
 ### 线程与 event loop
 
-headless 可以在非主线程的 event loop 上创建与使用，不依赖 Sanic；典型部署是 sim 线程跑同步 numpy 循环、HeTu 跑在旁边一个线程的 loop 上。唯一的约束：**`connect` / 使用 / `close` 必须在同一个 loop 上**（Redis 异步连接绑定 loop），一个 loop 一个 client。`await client.close()` 只关连接，无租约、无消息队列，进程被 kill 不留任何跨进程状态。
+headless 可以在非主线程的 event loop 上创建与使用，不依赖 Web 服务器；典型部署是 sim 线程跑同步 numpy 循环、HeTu 跑在旁边一个线程的 loop 上。唯一的约束：**`connect` / 使用 / `close` 必须在同一个 loop 上**（Redis 异步连接绑定 loop），一个 loop 一个 client。`await client.close()` 只关连接，无租约、无消息队列，进程被 kill 不留任何跨进程状态。
 
 ## 接下来去哪儿
 

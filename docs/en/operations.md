@@ -200,10 +200,87 @@ own orchestration code.
 *You can use the HeTu server root path（http://localhost/） as the health check
 endpoint.*
 
+HeTu itself only listens for plain `ws://`; TLS and access logs are Caddy's
+job. Three things to get right:
+
+- **The client's real IP.** Caddy adds `X-Forwarded-For` by default. Set
+  `PROXIES_COUNT` to the number of reverse proxies in front of HeTu (1 for a
+  single Caddy, which is what the config template uses): HeTu takes the
+  `PROXIES_COUNT`-th entry from the end of `X-Forwarded-For` as the client
+  address, and the per-IP limit on anonymous connections
+  (`MAX_ANONYMOUS_CONNECTION_BY_IP`) depends on it. HeTu only reads
+  `X-Forwarded-For` (or the header named by `REAL_IP_HEADER`), not the RFC 7239
+  `Forwarded` header.
+- **Block direct access.** Use a firewall or a private network so that only
+  Caddy can reach HeTu's port. A client that bypasses Caddy can forge
+  `X-Forwarded-For` freely, which defeats the per-IP limit.
+- **`stream_close_delay`.** By default Caddy closes every proxied WebSocket as
+  soon as it reloads its config, and `caddy-docker-proxy` reloads on every
+  container that comes or goes, so each scale-up or scale-down would drop and
+  reconnect every player. Set `stream_close_delay` on `reverse_proxy`: after a
+  reload, existing connections are kept for up to that long before Caddy closes
+  them (clients reconnect as usual):
+
+  ```
+  game.example.com {
+      reverse_proxy hetu1:2466 hetu2:2466 {
+          stream_close_delay 2h
+      }
+  }
+  ```
+
+  With `caddy-docker-proxy`, put it in the HeTu container's labels (dots mark
+  sub-directives):
+
+  ```yaml
+  labels:
+    caddy: game.example.com
+    caddy.reverse_proxy: "{{upstreams 2466}}"
+    caddy.reverse_proxy.stream_close_delay: 2h
+  ```
+
 ### Why not Nginx
 
 Nginx works, but its config syntax for the dynamic add/remove pattern HeTu
 encourages is verbose and easy to get wrong. Caddy fits the workload better.
+
+## Shutting down
+
+On SIGTERM (what `docker stop`, systemd and k8s send) or Ctrl+C, `hetu start`
+shuts down in this order:
+
+1. Stop accepting new connections.
+2. **Drain**: every connection stops reading new messages; RPCs already
+   received run to completion and their replies are sent, then the connection
+   is closed with close code 1001 (the SDK reconnects automatically). Messages
+   queued behind them are not executed, so resending them after reconnecting
+   does not run anything twice. This waits at most `SHUTDOWN_DRAIN_TIMEOUT`
+   (5 seconds by default); RPCs still running then are cancelled and not
+   committed.
+3. Run the disconnect System and delete the Connection rows, waiting at most
+   `GRACEFUL_SHUTDOWN_TIMEOUT` (15 seconds by default).
+4. Stop FutureCalls, release the Worker ID lease and disconnect from the
+   backends.
+
+Further SIGTERMs or Ctrl+Cs during shutdown do not interrupt it (the exception
+is a single-process server on Windows, where a second Ctrl+C forces an exit).
+
+With several workers, the manager process tells each worker to stop and waits
+up to `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` seconds
+(60 by default) for it, then kills any worker still running. A normal shutdown
+takes nowhere near that long; it is the worst case, because after draining,
+cancelling the connections, waiting for them to be torn down and stopping
+FutureCalls each get their own `GRACEFUL_SHUTDOWN_TIMEOUT`.
+
+**Give your orchestrator a longer grace period than that.** Docker waits only
+10 seconds and k8s 30 before sending SIGKILL, and a kill skips the cleanup
+above: disconnect Systems don't run, and `hetu upgrade` has to wait for the
+Worker ID leases to expire (at most 60 seconds). With the default settings, set
+the grace period to 70 seconds or more, or lower the two timeouts accordingly:
+
+- docker compose: `stop_grace_period: 70s`
+- `docker stop -t 70`
+- k8s: `terminationGracePeriodSeconds: 70`
 
 ## Migrations
 
@@ -432,9 +509,10 @@ Before doing anything, `upgrade` checks whether any server is still running
 leaving everything untouched: migrating, wiping volatile tables and rebuilding
 indexes all corrupt data while servers are running. If a server crashed, wait
 for its lease to expire (at most 60 seconds) and try again. On Windows there is
-no need to wait for servers on the same machine that have already exited:
-Sanic stops Windows workers with a hard kill, so they never get to release
-their leases, and such leases are not counted. Servers on the SQLite backend
+no need to wait for servers on the same machine that have already exited: a
+process that is force-killed (ended from Task Manager, or a second Ctrl+C on a
+single-process server) never gets to release its lease, and such leases are
+not counted. Servers on the SQLite backend
 have no leases, so the check can't see them; make sure they are stopped
 yourself. `hetu call` / `hetu shell` hold leases too (on Redis and SQLite), so
 `upgrade` also refuses while they run and lists them separately.

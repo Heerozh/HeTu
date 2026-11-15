@@ -1140,24 +1140,34 @@ auto-discovery on the wire.
 
 ## Custom HTTP endpoints
 
-HeTu's built-in web server is Sanic, and the client SDK's websocket entry is
+HeTu's built-in web server is aiohttp, and the client SDK's websocket entry is
 just one route on it. You can mount your own plain HTTP routes next to it —
 file downloads, an admin page, a health check — with `@hetu.define_route`:
 
 ```python
 import hetu
-from sanic import Request, response
+from aiohttp import web
 
 
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return await response.file(f"/data/{name}")
+@hetu.define_route("/download/{name}")
+async def download(request: web.Request) -> web.StreamResponse:
+    return web.FileResponse(f"/data/{request.match_info['name']}")
 ```
 
-The decorator has to run while the engine loads your app file, i.e. at module
-top level, the same as `@define_system`. Everything after the uri is passed
-straight through to Sanic's `Blueprint.route`, so `methods=["POST"]`,
-`stream=True` and friends behave exactly as Sanic documents them.
+The decorated function is a plain aiohttp handler: it takes a single
+`web.Request` and returns a `web.Response`, `web.json_response(...)`,
+`web.FileResponse` and the like. Path parameters are written `{name}` (a regex
+is allowed, e.g. `{id:\d+}`) and read from `request.match_info`. The decorator
+has to run while the engine loads your app file, i.e. at module top level, the
+same as `@define_system`.
+
+- `methods` lists the HTTP methods the route accepts and defaults to `GET`
+  only, e.g. `@hetu.define_route("/upload", methods=["POST"])`. Any other
+  method on that path gets a 405.
+- Any other keyword arguments are passed straight through to aiohttp's
+  `UrlDispatcher.add_route` (`name`, for example).
+- Request bodies are capped by the `REQUEST_MAX_SIZE` setting (100 MB by
+  default); anything larger gets a 413.
 
 These are plain web endpoints and nothing more. They do not go through HeTu's
 `Permission` system, they get no `SystemContext`, and they have no database
@@ -1165,29 +1175,49 @@ access — authentication, rate limiting and input validation are yours to
 write. Game logic that the client SDK calls belongs in `define_system` /
 `define_endpoint` instead.
 
-For anything a single route can't express — a static directory, middleware, an
-error handler, your own Blueprint with a `url_prefix` — use
-`@hetu.on_server_setup`, which hands you the Sanic app right after it is
-created:
+For anything a single route can't express — a static directory, middleware, a
+sub-application, work to do at startup or shutdown — use
+`@hetu.on_server_setup`, which hands you the aiohttp `web.Application`:
 
 ```python
 @hetu.on_server_setup
-def setup(app):
-    app.static("/download", "/data/files")
+def setup(app: web.Application):
+    app.router.add_static("/download", "/data/files")
 ```
 
 Three things to know:
 
 - `/hetu/...` is reserved for the websocket entry, and `define_route` refuses
-  it. `/` is *not* reserved: register it and your page quietly replaces
-  HeTu's default welcome text.
-- Both hooks run once in the manager process and once per worker, before any
-  backend is connected. Do registration only; anything that needs per-worker
-  initialization should be hung off `app.before_server_start(...)` from
-  inside the setup callback.
+  it. `/` is *not* reserved: register it (with `define_route` or from a setup
+  callback) and your page quietly replaces HeTu's default welcome text.
+- Setup callbacks run once in every worker process each time the server
+  starts, before it starts listening; the manager process of a multi-worker
+  server never runs them. They run after the `define_route` routes are
+  mounted. Anything that needs per-worker initialization or cleanup (a
+  connection pool, say) belongs in `app.on_startup` / `app.on_cleanup`,
+  registered from the callback.
 - Your routes share the event loop with websocket game traffic, and every
   worker serves them. Keep handlers stateless, and in production put large or
-  slow downloads behind nginx or a CDN instead of through the game workers.
+  slow downloads behind Caddy or a CDN instead of through the game workers.
+
+Upgrading from an earlier HeTu, which ran on Sanic, means rewriting handlers
+the aiohttp way:
+
+```python
+# Before (Sanic)
+from sanic import Request, response
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return response.text(f"downloaded {name}")
+
+# After (aiohttp)
+from aiohttp import web
+
+@hetu.define_route("/download/{name}")
+async def download(request: web.Request):
+    return web.Response(text=f"downloaded {request.match_info['name']}")
+```
 
 ## Operational visibility: replay and slow logs
 
@@ -1248,7 +1278,7 @@ For your code, the practical implications are short:
 
 ## Reading and writing tables from a non-server process (`hetu.headless`)
 
-Some processes must share a backend with a HeTu server without *being* a HeTu app: a standalone battle simulation, say — it runs no Sanic, defines no `System`, accepts no client connections, and only wants to read a command table, write a report table, and maintain a lease table together with the server. `hetu.headless` is the table client for such **trusted internal processes**.
+Some processes must share a backend with a HeTu server without *being* a HeTu app: a standalone battle simulation, say — it runs no web server, defines no `System`, accepts no client connections, and only wants to read a command table, write a report table, and maintain a lease table together with the server. `hetu.headless` is the table client for such **trusted internal processes**.
 
 ```python
 import hetu.headless
@@ -1260,7 +1290,7 @@ client = await hetu.headless.connect(
 )
 ```
 
-It has exactly one principle: **writes go through the very same `Session.commit()` path a `System` uses**. Table-level PUBLISH, keyspace notifications, optimistic version checks and unique validation all live in that layer, so a client's `WatchRow` / `WatchRange` / table subscriptions — and the server's own subscriptions and FutureCalls — cannot tell whether a row was written by a `System` or by a headless process. What it deliberately does *not* do is just as clear: no sanic import, no app file, no cluster building, no table creation or migration, no snowflake ids, and **no permission / RLS checks** — treat it as a trusted internal database connection for your own processes only.
+It has exactly one principle: **writes go through the very same `Session.commit()` path a `System` uses**. Table-level PUBLISH, keyspace notifications, optimistic version checks and unique validation all live in that layer, so a client's `WatchRow` / `WatchRange` / table subscriptions — and the server's own subscriptions and FutureCalls — cannot tell whether a row was written by a `System` or by a headless process. What it deliberately does *not* do is just as clear: no aiohttp import, no app file, no cluster building, no table creation or migration, no snowflake ids, and **no permission / RLS checks** — treat it as a trusted internal database connection for your own processes only.
 
 ### Resolving tables: cluster ids and schemas come from the server's meta
 
@@ -1325,7 +1355,7 @@ async def lease_loop():
 
 ### Threads and event loops
 
-Headless can be created and used on an event loop in a non-main thread and does not depend on Sanic; the typical deployment runs the sim thread as a synchronous numpy loop with HeTu on a loop in a side thread. The one constraint: **`connect`, use and `close` must happen on the same loop** (Redis async connections are bound to a loop) — one client per loop. `await client.close()` only closes connections; there is no lease and no message queue, so a killed process leaves no cross-process state behind.
+Headless can be created and used on an event loop in a non-main thread and does not depend on the web server; the typical deployment runs the sim thread as a synchronous numpy loop with HeTu on a loop in a side thread. The one constraint: **`connect`, use and `close` must happen on the same loop** (Redis async connections are bound to a loop) — one client per loop. `await client.close()` only closes connections; there is no lease and no message queue, so a killed process leaves no cross-process state behind.
 
 ## Where to next
 

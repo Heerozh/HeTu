@@ -124,8 +124,8 @@ uv run hetu start \
   --instance=dev
 ```
 
-You should see Sanic's startup banner and a `WebSocket listening on
-ws://0.0.0.0:2466` line.
+You should see HeTu's logo, a `Listening address: http://0.0.0.0:2466` line,
+and finally a line saying the server is ready to accept connections.
 
 If you want Redis instead (recommended past the first run), install Redis
 locally and substitute:
