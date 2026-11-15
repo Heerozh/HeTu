@@ -5,6 +5,7 @@
 报文、选地址、探测的用例不需要 Docker；启动检查和真跑的用例要 Redis 一主一从（原生集群那条要集群）。
 """
 
+import contextlib
 import os
 import socket
 import struct
@@ -74,6 +75,17 @@ def answers(response: dns.message.Message) -> list[str]:
 def a_query(name: str = NAME, rdtype: str = "A", **kwargs: Any) -> dns.message.Message:
     kwargs.setdefault("use_edns", False)
     return dns.message.make_query(name, rdtype, **kwargs)
+
+
+@contextlib.contextmanager
+def hetu_logs(caplog, level: str = "WARNING"):
+    """收 HeTu.root 的日志：起服类测试会把它的 propagate 关掉，caplog 收不到"""
+    propagate, hdns.logger.propagate = hdns.logger.propagate, True
+    try:
+        with caplog.at_level(level, logger="HeTu.root"):
+            yield
+    finally:
+        hdns.logger.propagate = propagate
 
 
 # ---------------------------------------------------------------- 报文
@@ -518,6 +530,65 @@ async def test_anonymous_probe_drops_the_credentials():
     assert len(warnings) == 1
     assert "dns-secret" not in warnings[0]
     assert await check_anonymous_access("unix:///run/redis.sock") == []
+
+
+class _ErrorClient:
+    """每条命令都抛同一个异常"""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    async def hgetall(self, key: str) -> Any:
+        raise self.error
+
+    async def execute_command(self, *args: Any) -> Any:
+        raise self.error
+
+
+MASTER_DOWN = "Link with MASTER is down and replica-serve-stale-data is set to 'no'."
+
+
+async def test_master_down_is_not_a_native_cluster():
+    """
+    副本和 master 断开、配了 replica-serve-stale-data no 时读命令回 MASTERDOWN。redis-py 把它归成集群错误的子类，
+    但它是环境未就绪（3），不是原生集群（2）
+    """
+    import redis.exceptions as errors
+
+    url = "redis://10.0.1.20:6379/0"
+    with pytest.raises(DnsCheckFailed, match="和 master 断开") as e:
+        await check_redis(_ErrorClient(errors.MasterDownError(MASTER_DOWN)), url)
+    assert e.value.code == 3
+    assert "原生集群" not in str(e.value)
+    with pytest.raises(DnsCheckFailed, match="原生集群") as e:
+        await check_redis(_ErrorClient(errors.MovedError("1234 10.0.1.21:6379")), url)
+    assert e.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "error,words,not_words",
+    [
+        ("master_down", "和 master 断开", "原生集群"),
+        ("moved", "原生集群", "和 master 断开"),
+    ],
+)
+async def test_read_errors_at_run_time_say_why(caplog, error, words, not_words):
+    """运行时读注册表失败（副本断开、集群的槽位迁走了）：接着答上一次的结果，日志说清是哪种"""
+    import redis.exceptions as errors
+
+    exc = (
+        errors.MasterDownError(MASTER_DOWN)
+        if error == "master_down"
+        else errors.MovedError("1234 10.0.1.21:6379")
+    )
+    service = DnsService(_ErrorClient(exc), namespace="game")
+    with hetu_logs(caplog, "ERROR"):
+        assert await service.refresh() is None
+    (message,) = [
+        r.getMessage() for r in caplog.records if "读注册表失败" in r.getMessage()
+    ]
+    assert words in message
+    assert not_words not in message
 
 
 def test_listen_outside_loopback_is_warned():

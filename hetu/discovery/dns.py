@@ -572,13 +572,16 @@ class DnsService:
             raw = await self.client.hgetall(REGISTRY_KEY)
         except Exception as e:  # noqa: BLE001 读失败就接着答上一次的
             self._read_failing = True
-            hint = (
-                _(
+            if is_master_down(e):
+                hint = _(
+                    "副本和 master 断开了（配了 replica-serve-stale-data no，断开期间不给读）。"
+                )
+            elif is_cluster_error(e):
+                hint = _(
                     "连到的是原生集群（槽位迁走了？），hetu dns 第一版不支持原生集群，请经代理层连。"
                 )
-                if is_cluster_error(e)
-                else ""
-            )
+            else:
+                hint = ""
             logger.error(
                 _("❌ [📣DNS] 读注册表失败，接着答上一次的结果。{hint}{err}").format(
                     hint=hint, err=f"{type(e).__name__}: {e}"
@@ -807,12 +810,29 @@ def check_network(
     )
 
 
-def is_cluster_error(error: BaseException) -> bool:
+def is_master_down(error: BaseException) -> bool:
     """
-    连到的是原生集群：MOVED、ASK、CLUSTERDOWN 这些。redis-py 解析错误时会去掉开头的错误码，只能按异常类型认
+    副本和 master 断开了、又配了 replica-serve-stale-data no：读命令回 MASTERDOWN。redis-py 把它归成
+    ClusterDownError 的子类，但它和原生集群无关，单机副本也会回
+
+    Whether the error is MASTERDOWN (a replica cut off from its master).
     """
     import redis.exceptions as errors
 
+    return isinstance(error, errors.MasterDownError)
+
+
+def is_cluster_error(error: BaseException) -> bool:
+    """
+    连到的是原生集群：MOVED、ASK、CLUSTERDOWN 这些（不含 MASTERDOWN，见 `is_master_down`）。redis-py 解析
+    错误时会去掉开头的错误码，只能按异常类型认
+
+    Whether the error means a native Redis Cluster (MOVED, ASK, CLUSTERDOWN, ...).
+    """
+    import redis.exceptions as errors
+
+    if is_master_down(error):
+        return False
     return isinstance(
         error,
         (
@@ -855,6 +875,14 @@ async def check_redis(client: Any, redis_url: str) -> list[str]:
             ),
         ) from e
     except errors.ResponseError as e:
+        if is_master_down(e):
+            raise DnsCheckFailed(
+                EXIT_NOT_READY,
+                _(
+                    "❌ Redis {url} 是和 master 断开了的副本（{err}）：配了 replica-serve-stale-data "
+                    "no，断开期间不给读。等它重新连上 master，或者指向别的副本"
+                ).format(url=masked, err=e),
+            ) from e
         if is_cluster_error(e):
             raise DnsCheckFailed(
                 EXIT_USAGE,
