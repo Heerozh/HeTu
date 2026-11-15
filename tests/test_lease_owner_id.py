@@ -395,6 +395,112 @@ async def test_takeover_wait_is_capped(mod_auto_backend, new_node, fast_reuse):
         await aio.delete(key)
 
 
+def slow_replies(monkeypatch, aio, *names: str, delay: float = 0.5):
+    """让 aio 的这几个命令收到回复后再多等 delay 秒（回复在路上走了这么久）"""
+    for name in names:
+        real = getattr(aio, name)
+
+        async def slow(*args, _real=real, **kwargs):
+            result = await _real(*args, **kwargs)
+            await asyncio.sleep(delay)
+            return result
+
+        monkeypatch.setattr(aio, name, slow)
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_takeover_does_not_overwrite_a_lease_that_changed_hands(
+    mod_auto_backend, new_node, fast_reuse
+):
+    """
+    等着确认没人续约的这段时间里，那把租约过期、被别的节点拿走了（而且也有一阵没续约了）：不能把别人的
+    覆盖掉，另拿一个
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("container-a")
+    dead = RedisWorkerKeeper(1, aio)
+    restarted = RedisWorkerKeeper(1, aio)
+    worker_id = await dead.get_worker_id()
+    key = dead._key(worker_id)
+    other = "host-b:ffffffffffffffff:1#2.00000000"
+
+    async def hand_over():
+        await asyncio.sleep(0.3)
+        await aio.set(key, other, px=30_000)
+
+    handing = asyncio.create_task(hand_over())
+    try:
+        assert await restarted.get_worker_id() != worker_id
+        await handing
+        assert await aio.get(key) == other.encode()
+    finally:
+        await restarted.release_worker_id()
+        await aio.delete(key)
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_takeover_sets_ttl_and_arms_fence_from_before_the_request(
+    mod_auto_backend, new_node, monkeypatch
+):
+    """
+    接手之后：租约带上完整的过期时间（不然接手的进程第一次续约前就崩了，这把租约永不过期）；发号围栏马上
+    武装，安全期从发出接手请求之前算起——回复在路上的这段时间，Redis 那边已经开始计时了
+    """
+    from hetu.common.snowflake_id import (
+        LEASE_SAFE_SEC,
+        REUSE_STALE_SEC,
+        WORKER_ID_EXPIRE_SEC,
+    )
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("container-a")
+    dead = RedisWorkerKeeper(1, aio)
+    restarted = RedisWorkerKeeper(1, aio)
+    worker_id = await dead.get_worker_id()
+    key = dead._key(worker_id)
+    # 早就没人续约了，不用等
+    await aio.pexpire(key, (WORKER_ID_EXPIRE_SEC - REUSE_STALE_SEC - 5) * 1000)
+    slow_replies(monkeypatch, aio, "eval")
+    try:
+        assert restarted.lease_deadline is None
+        before = time.monotonic()
+        assert await restarted.get_worker_id() == worker_id
+        assert 50_000 < await aio.pttl(key) <= WORKER_ID_EXPIRE_SEC * 1000
+        assert restarted.lease_deadline is not None
+        assert restarted.lease_deadline < before + LEASE_SAFE_SEC + 0.3
+    finally:
+        await restarted.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_fence_counts_from_before_each_request(
+    mod_auto_backend, new_node, monkeypatch
+):
+    """抢空着的 id（SET NX）、续约（GETEX）之后，安全期也都从发出请求之前算起，不是收到回复之后"""
+    from hetu.common.snowflake_id import LEASE_SAFE_SEC
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    keeper = RedisWorkerKeeper(1, aio)
+    slow_replies(monkeypatch, aio, "set", "getex")
+    try:
+        before = time.monotonic()
+        await keeper.get_worker_id()
+        assert keeper.lease_deadline is not None
+        assert keeper.lease_deadline < before + LEASE_SAFE_SEC + 0.3
+        before = time.monotonic()
+        await keeper.keep_alive()
+        assert keeper.lease_deadline < before + LEASE_SAFE_SEC + 0.3
+    finally:
+        await keeper.release_worker_id()
+
+
 @posix_only
 @use_redis_family_backend_only
 async def test_renewal_detects_takeover_by_same_identity(mod_auto_backend, new_node):
