@@ -1419,17 +1419,20 @@ abort。所以：
     `add_get` 那样顺带注册 HEAD；
   - 其余参数透传给 `UrlDispatcher.add_route`。同一路径的几个方法连着加，aiohttp 会复用刚建的 resource，带
     `name` 也不会撞名。
-- `build_app` 的注册顺序：HeTu 的 ws 入口（排最前，aiohttp 按注册顺序匹配，用户的通配路由抢不走它）→
-  `webext.apply_to`（先路由，再按注册顺序调 setup 回调）→ 默认欢迎页。
+- `build_app` 的注册顺序：HeTu 的 ws 入口 → `webext.apply_to`（先路由，再按注册顺序调 setup 回调）→ 默认欢迎页。
+  aiohttp（3.10 起）先按路径前缀的索引找 resource，从最具体的前缀往上找，同一个前缀里才按注册顺序。所以用户
+  在 "/" 下注册的通配路由本来就抢不走 /hetu 下的 ws 入口；ws 入口排最前，防的是用户在 `on_server_setup` 里绕过
+  `define_route` 的检查、注册到 /hetu 下的路由。（初版写的是"aiohttp 按注册顺序匹配"，不准确，审查时纠正。）
 - 用户占了 "/" 就不挂默认欢迎页，判断看 resource 的 `canonical` 是不是 "/" 或空串（挂在 "/" 上的静态目录是
   空串）。这个判断不能省：
   - 照挂的话，GET 虽然轮不到默认欢迎页（用户的先注册），HEAD 还会落到它上面；
   - 用户在 `on_server_setup` 里**最后**注册 "/" 时，aiohttp 的 `add_resource` 会复用最后那个 resource，
     默认欢迎页的 GET 跟用户的重复，开服时抛 RuntimeError（变异检查时发现的）。
-- `on_server_setup` 的回调在 `AiohttpServer.start()` 里执行：`runtime.start()`（连后端、跑启动 System）之后、
-  开始监听之前。文档只写"开始监听之前"，往 `app.on_startup` / `app.on_cleanup` 挂每 worker 的初始化和清理；
-  回调里出错就是开服失败（多进程时整体中止）。`on_cleanup` 在 `runner.cleanup()` 里跑，那时后端已经关了，
-  webext 本来就不碰数据库，没有影响。
+- `on_server_setup` 的回调在 `AiohttpServer.start()` 一开头执行，在 `runtime.start()`（连后端、跑启动 System）
+  之前，同原来 Sanic 的时机（建 app 时后端还没连）。回调出错马上中止开服（多进程时整体中止），不用等开完服，
+  启动 System 也不会已经写过数据（初版放在 `runtime.start()` 之后，审查后挪的）。每 worker 的初始化和清理往
+  `app.on_startup` / `app.on_cleanup` 挂：`on_startup` 在 `runner.setup()` 里跑，那时后端已经连上；`on_cleanup` 在
+  `runner.cleanup()` 里跑，那时后端已经关了，webext 本来就不碰数据库，没有影响。
 - `webext` 不在顶层 import aiohttp（类型标注放在 TYPE_CHECKING 里，3.14 的注解是惰性求值的），`import hetu`
   照旧不加载 Web 框架；`tests/app.py` 的路由也在处理函数里才 import。
 
@@ -1461,8 +1464,9 @@ abort。所以：
 - `test_webext.py` 改成行为测试，真起服务（SQLite，不要 Docker）发请求：路由可访问、ws 入口还是 HeTu 的；
   methods 限制（405）；`REQUEST_MAX_SIZE`（413）；"/" 顶掉默认欢迎页，HEAD 也不落到默认欢迎页；
   `on_server_setup` 拿到 app，挂的 `on_startup` 在开服时跑，它注册的 "/" 同样顶掉默认欢迎页；app 文件被 exec
-  两遍时，路由表里只有一条、回调只调一次（aiohttp 不拦重复注册，所以由回调数路由表）；`/hetu` 前缀被拒。
-  SQLite 起停很快，6 个用例共 0.13 秒（核实过确实每次都起了服务）。
+  两遍时，路由表里只有一条、回调只调一次（aiohttp 只拦挨着的重复注册：同一路径、同一方法连着加会报错，隔开的
+  照样登记、先注册的生效，所以由回调数路由表）；`/hetu` 前缀被拒。SQLite 起停很快，整个文件不到 1 秒（核实过确实
+  每次都起了服务）。
 - LOGGING：报错写明了哪几项、没去 dictConfig；文件名、logger 名不误报；配置模板、默认配置都能过；
   `hetu start` 以 2 退出、没开服。
 - 变异检查 10 个都被抓到：不挂 webext；methods 不生效；总是挂默认欢迎页；路由、回调的注册表改成追加（各一个）；
@@ -1493,6 +1497,38 @@ abort。所以：
 - dev 组的 `trustme` 从第 2 步删掉 TLS 之后就没人用了，不属于这一步，没删。
 - `getting-started.md` 里客户端示例连的是 `ws://127.0.0.1:2466/hetu/Hello`，而开服命令是 `--instance=dev`：
   路径最后一段是实例名，这样连会被拒。现存问题，不在这一步的范围里，没改。
+- 审查顺带发现的现存问题，也没改：`docker-compose.yaml` 里 `depends_on: - redis` 和服务名 `database` 对不上；
+  `hetu/__init__.py` 按包名 `hetu` 取版本，发行包名是 `hetudb`，默认欢迎页显示
+  `Powered by HeTu(vhetu is not installed in a proper way)`。
+- LOGGING 的检查不看用户自己装没装 sanic：装了的话，一份本来能用的老配置也会被拒（以 2 退出）。符合"不做兼容"的
+  原则（§13 第 9 条），有意如此。
+
+**PR #234 审查后的修改**：
+
+- 高：`define_route` 的示例（docstring 和 `advanced.md`）是 `web.FileResponse(f"/data/{request.match_info['name']}")`，
+  照抄就能被路径穿越：aiohttp 匹配路由时 `%2F` 不算分隔符，交给 `match_info` 时却解码成 "/"，
+  `/download/..%2Fsecret.txt` 拿到的是 `../secret.txt`（审查实测返回了目录外的文件；原来 Sanic 给的是没解码的值，
+  同样的写法回 500）。示例改成普通的文本响应，写明路径参数已经解码过、下载文件用 `add_static`。
+- 低：
+  - `on_server_setup` 的回调挪到 `runtime.start()` 之前（见上）；
+  - methods 为空时报错，原来静默地一条路由也不注册（"/" 上还会照挂默认欢迎页）；
+  - 排空超时的文档说法改准确：取消正好落在提交途中的可能已经提交、回复丢了（§5.5 本来就是这么写的），不能
+    重复执行的调用用 `call_lock` 按单号去重；
+  - 文档补上从 Sanic 迁移时 `define_route` 的两处行为差别：尾斜杠严格匹配（§3.2 第 12 条点过名，第 4a 步只给
+    ws 入口补了带尾斜杠的路由），处理函数没有总时长上限（Sanic 的 `RESPONSE_TIMEOUT` 60 秒，超时回 503，§3.2
+    没列）；
+  - Caddy 前面还有 CDN、负载均衡时要配 `trusted_proxies`：Caddy 2.5 起默认丢掉不可信来源带来的
+    `X-Forwarded-For`、只写直连的对端，`PROXIES_COUNT` 设大了条目不够，会退回 Caddy 的地址；
+  - 仓库的 `docker-compose.yaml` 加上 `stop_grace_period: 70s`；
+  - 注释改正：同一 uri 登记两条时挂到 aiohttp 上是挨着加的，会撞 "method GET is already registered" 开服失败，
+    不是静默；aiohttp 的匹配顺序（见上）。
+- 测试：formatter 的固定值原来用被测类自己的 `DATE_FORMAT` 算时间，改格式抓不到，现在格式写死在测试里。审查时
+  存活的变异都补了测试，加上"回调挪回 `runtime.start()` 之后"，共 8 个，都被抓到：回调在路由之前执行；methods
+  只给一个字符串时不包成元组（aiohttp 会静默注册成 P、O、S、T 四个方法）；methods 不去重；methods 为空不报错；
+  LOGGING 不查 queue / listener；前缀判断去掉点号（会把 `sanic_tools` 之类的别的包也报出来）；改日期格式。
+- 审查核过没问题的：§5.8 和各节"留到第 6 步"的事项（除了上面的尾斜杠）；四条启动路径都会查 LOGGING；非 editable
+  安装、不装 sanic 和 websockets 时单进程、2 个 worker 都能开服；`import hetu`、`hetu range` 不加载 aiohttp；两处
+  固定值和 Sanic 25.12.1 的输出逐条一致；文档里关服的顺序和预算、`stream_close_delay` 的语义和代码一致。
 
 ## 6. 对外变更汇总（写进发版说明）
 
@@ -1521,6 +1557,7 @@ abort。所以：
 | Windows 开发环境关服时，客户端收到的 close 码从 1000（清理完才发）变成 1001。C# SDK 对 1000 会把 reason 置为 null（`WebSocketTransport.cs:62-65`），按 reason 判断"正常关闭"的代码会受影响 | 4a（aiohttp 栈）、6 | 无 |
 | 崩溃的 worker 会被自动重启（Sanic 不会） | 5（aiohttp 栈）、6 | 无 |
 | 不再依赖 `sanic`；`websockets` 不再是运行时依赖（HeTu 自己不用它），自己的代码用到它的要自己装 | 6 | 无 |
+| `define_route` 的路由严格区分尾斜杠（Sanic 默认 `/ping/` 也能命中 `/ping`）；处理函数没有总时长上限（Sanic 的 `RESPONSE_TIMEOUT` 是 60 秒，超时回 503） | 6 | 无，文档写明 |
 | 多进程时管理进程只认第一个关服信号：关服途中再按 Ctrl+C 不再强杀所有进程（Sanic 第二次就强杀）；关服时每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒）才强制结束 | 5（aiohttp 栈）、6 | 无 |
 
 ## 7. 测试计划汇总
