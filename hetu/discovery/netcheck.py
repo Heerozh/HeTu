@@ -54,6 +54,8 @@ class NetworkProblem:
     """
     地址所在的网卡不在 host 网络里：kind 是 "veth"（容器网络的虚拟网卡，iflink ≠ ifindex）或 "bridge"
     （本机的容器网桥）
+
+    Why the NIC holding an address is not on the host network.
     """
 
     kind: str
@@ -63,7 +65,11 @@ class NetworkProblem:
 
 
 def host_network_hint() -> str:
-    """怎么改成 host 网络"""
+    """
+    怎么改成 host 网络
+
+    How to switch to the host network.
+    """
     return _(
         "请用 host 网络运行：docker run --network host ...（compose：network_mode: host；"
         "k8s：hostNetwork: true）。host 网络还省掉了端口映射，性能最好。"
@@ -88,7 +94,11 @@ def discovery_enabled(config: Mapping[str, Any]) -> bool:
 
 
 def string_value_hint(value: Any) -> str:
-    """配置值是字符串时的说明：多半是加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）"""
+    """
+    配置值是字符串时的说明：多半是加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）
+
+    Explain that a config value is a string (quoted, or produced by ${VAR}).
+    """
     if not isinstance(value, str):
         return ""
     return _(
@@ -101,7 +111,11 @@ def string_value_hint(value: Any) -> str:
 
 
 def parse_listen(listen: Any) -> tuple[str, int]:
-    """LISTEN（主机:端口）拆成主机和端口，拆法同 bind_socket。端口不是 1~65535 时抛 DiscoveryCheckFailed"""
+    """
+    LISTEN（主机:端口）拆成主机和端口，拆法同 bind_socket。端口不是 1~65535 时抛 DiscoveryCheckFailed
+
+    Split LISTEN into host and port.
+    """
     host, sep, port = str(listen).rpartition(":")
     try:
         number = int(port) if sep else 0
@@ -118,7 +132,11 @@ def parse_listen(listen: Any) -> tuple[str, int]:
 
 
 def ip_is_local(ip: str) -> bool:
-    """本机（这个网络命名空间里）有这个 IPv4 地址：bind 得上就有"""
+    """
+    本机（这个网络命名空间里）有这个 IPv4 地址：bind 得上就有
+
+    Whether this network namespace has the IPv4 address.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind((ip, 0))
@@ -131,6 +149,8 @@ def listen_ip(host: str) -> str | None:
     """
     LISTEN 的主机：0.0.0.0（或空）返回 None，要推出广播地址；本机的 IPv4 地址原样返回，就是广播地址；
     主机名、IPv6、回环地址、本机没有的地址抛 DiscoveryCheckFailed
+
+    The advertised IP given in LISTEN, or None for 0.0.0.0.
     """
     if host in ("", "0.0.0.0"):
         return None
@@ -168,7 +188,11 @@ def listen_ip(host: str) -> str | None:
 
 
 def master_endpoint(config: Mapping[str, Any]) -> tuple[str, int]:
-    """默认后端（配置里的第一个）master 的主机和端口。unix socket、没有主机名的抛 DiscoveryCheckFailed"""
+    """
+    默认后端（配置里的第一个）master 的主机和端口。unix socket、没有主机名的抛 DiscoveryCheckFailed
+
+    Host and port of the default backend's master.
+    """
     backends = config.get("BACKENDS") or {}
     if not backends:
         raise DiscoveryCheckFailed(_("❌ 节点发现：配置里没有 BACKENDS"))
@@ -202,6 +226,8 @@ def source_address(host: str, port: int) -> str:
     """
     连 host:port 时本机用的源地址：对它 connect 一个 UDP socket（不发包）再 getsockname。网关和 Redis
     一般在同一个内网，这个地址基本一定是网关连得到的。回环、链路本地地址抛 DiscoveryCheckFailed
+
+    The local address used to reach host:port.
     """
     hint = _("请在 LISTEN 里写明本机的对外 IP，比如 10.0.3.17:2466")
     try:
@@ -247,6 +273,8 @@ def local_ipv4_interfaces() -> dict[str, str]:
     """
     本机（这个网络命名空间里）的 IPv4 地址 → 网卡名（带别名标签的是 "eth0:1" 这样）。用 Linux 的
     SIOCGIFCONF 列，别的系统、出错时返回空
+
+    Map local IPv4 addresses to interface names (Linux only).
     """
     if not sys.platform.startswith("linux"):
         return {}
@@ -330,7 +358,11 @@ def host_network_problem(
 
 
 def check_backend(config: Mapping[str, Any]) -> None:
-    """默认后端（配置里的第一个）是 Redis"""
+    """
+    默认后端（配置里的第一个）是 Redis
+
+    The default backend must be Redis.
+    """
     backends = config.get("BACKENDS") or {}
     if not backends:
         raise DiscoveryCheckFailed(_("❌ 节点发现：配置里没有 BACKENDS"))
@@ -346,7 +378,11 @@ def check_backend(config: Mapping[str, Any]) -> None:
 
 
 def check_proxies(config: Mapping[str, Any]) -> None:
-    """节点在网关后面：要从代理头取玩家的地址（PROXIES_COUNT ≥ 1，或者配了 REAL_IP_HEADER）"""
+    """
+    节点在网关后面：要从代理头取玩家的地址（PROXIES_COUNT ≥ 1，或者配了 REAL_IP_HEADER）
+
+    Client addresses must come from the proxy headers.
+    """
     if config.get("REAL_IP_HEADER"):
         return
     value = config.get("PROXIES_COUNT")
@@ -362,7 +398,11 @@ def check_proxies(config: Mapping[str, Any]) -> None:
 
 
 def network_problem_message(ip: str, problem: NetworkProblem, derived: bool) -> str:
-    """节点的广播地址不在 host 网络里时的说明。derived：地址是从 LISTEN 的 0.0.0.0 推出来的"""
+    """
+    节点的广播地址不在 host 网络里时的说明。derived：地址是从 LISTEN 的 0.0.0.0 推出来的
+
+    The error message for an advertised address off the host network.
+    """
     if problem.kind == "bridge":
         cause = (
             _(

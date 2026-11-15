@@ -119,7 +119,11 @@ def _opt_record(rcode: int) -> bytes:
 
 @dataclass
 class Query:
-    """解析出来的一个查询"""
+    """
+    解析出来的一个查询
+
+    A parsed DNS query.
+    """
 
     id: int
     rd: bool
@@ -204,14 +208,23 @@ def parse_query(data: bytes) -> Query | None:
 
 
 def payload_limit(query: Query) -> int:
-    """这个查询的回答最多多大：没带 EDNS 是 512 字节，带了按它声明的大小，最多 1232"""
+    """
+    这个查询的回答最多多大：没带 EDNS 是 512 字节，带了按它声明的大小，最多 1232
+
+    The largest response this query accepts: 512 bytes without EDNS, else its advertised
+    size capped at 1232.
+    """
     if query.edns is None:
         return CLASSIC_UDP_PAYLOAD
     return max(CLASSIC_UDP_PAYLOAD, min(query.edns, MAX_UDP_PAYLOAD))
 
 
 def max_answers(query: Query) -> int:
-    """一个包最多装几条 A 记录"""
+    """
+    一个包最多装几条 A 记录
+
+    How many A records fit in one response packet.
+    """
     room = payload_limit(query) - _HEADER.size - len(query.question)
     if query.edns is not None:
         room -= len(_OPT_RECORD)
@@ -255,7 +268,11 @@ def build_response(
 
 @dataclass
 class NodeAddress:
-    """一个要答的地址：同一台机器上的几个 worker 合成一个"""
+    """
+    一个要答的地址：同一台机器上的几个 worker 合成一个
+
+    One address to answer; workers on one machine are merged.
+    """
 
     addr: str
     workers: int = 0
@@ -263,13 +280,21 @@ class NodeAddress:
 
     @property
     def load(self) -> float:
-        """每个 worker 的平均连接数（伸缩组里可能混着不同规格的机器）"""
+        """
+        每个 worker 的平均连接数（伸缩组里可能混着不同规格的机器）
+
+        Average connections per worker.
+        """
         return self.conns / max(1, self.workers)
 
 
 @dataclass
 class Selection:
-    """一次重算的结果"""
+    """
+    一次重算的结果
+
+    The result of one recomputation.
+    """
 
     # 要答的地址，按每个 worker 的平均连接数从少到多，平均数相同的随机
     addresses: list[NodeAddress]
@@ -297,7 +322,8 @@ class Selector:
     标识或就绪时刻变了：重启、worker id 被接手）算一次新的写入，ts 不用比原来的大。第一次见到的 field 没有
     历史，按本机时钟和 ts 的差判断：在 STALE_SEC 以内的算活着，更早的按 ts 算出它多久没写了。
 
-    Turns registry snapshots into the addresses to answer, judging staleness by progress.
+    Turns registry snapshots into the addresses to answer, judging staleness by
+    progress.
     """
 
     def __init__(
@@ -380,6 +406,9 @@ class Selector:
 
         本 namespace 有登记、但全都过期了：多半是副本落后或者和 master 断开了，而不是节点同时死了，沿用上一次的
         答案。
+
+        Recompute from one HGETALL snapshot; only addresses for which probed() is true
+        are answered.
         """
         now = self._clock()
         # 本 namespace 的、解析得了的 field：只记它们的历史
@@ -469,7 +498,11 @@ class Selector:
 
 
 async def tcp_probe(addr: str, port: int, timeout: float) -> str | None:
-    """从本机 TCP 连一次 addr:port，连得上返回 None，连不上返回原因"""
+    """
+    从本机 TCP 连一次 addr:port，连得上返回 None，连不上返回原因
+
+    Connect to addr:port once over TCP; returns None on success, else the reason.
+    """
     try:
         async with asyncio.timeout(timeout):
             _reader, writer = await asyncio.open_connection(addr, port)
@@ -508,10 +541,19 @@ class Prober:
         self._tasks: dict[str, asyncio.Task] = {}
 
     def is_ok(self, addr: str) -> bool:
+        """
+        探测通了
+
+        Whether addr has been probed successfully.
+        """
         return addr in self.ok
 
     def reason(self, addr: str) -> str:
-        """没探测通的原因"""
+        """
+        没探测通的原因
+
+        Why addr is not answered yet.
+        """
         if addr in self.errors:
             return _("从网关连不上 {addr}:{port}（{err}）").format(
                 addr=addr, port=self.port, err=self.errors[addr]
@@ -521,6 +563,8 @@ class Prober:
     def track(self, addrs: Iterable[str]) -> None:
         """
         只记着这些地址（要答的和等探测的）：别的忘掉，回来时重新探测；没探测过、到了重试时间的开始探测
+
+        Track only these addresses; probe new or due ones.
         """
         wanted = set(addrs)
         self.ok &= wanted
@@ -566,11 +610,20 @@ class Prober:
         self._retry_at[addr] = self._clock() + PROBE_RETRY
 
     async def wait(self) -> None:
-        """等正在进行的探测都结束（第一次重算、--once 用）"""
+        """
+        等正在进行的探测都结束（第一次重算、--once 用）
+
+        Wait for the probes in flight.
+        """
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
     def cancel(self) -> None:
+        """
+        取消正在进行的探测
+
+        Cancel the probes in flight.
+        """
         for task in self._tasks.values():
             task.cancel()
         self._tasks.clear()
@@ -580,7 +633,11 @@ class Prober:
 
 
 def normalize_name(name: str) -> bytes:
-    """--name → 查询里比较用的形式：ASCII 小写、不带末尾的点"""
+    """
+    --name → 查询里比较用的形式：ASCII 小写、不带末尾的点
+
+    Normalize --name for comparison: lower-case ASCII without the trailing dot.
+    """
     return name.strip().rstrip(".").encode("ascii").lower()
 
 
@@ -714,6 +771,8 @@ class DnsService:
         """
         每 REFRESH_INTERVAL 秒重算一次，直到被取消。出了意料之外的错也接着转：循环要是停了，进程照样活着、
         一直答最后一次的答案，`restart: always` 也救不回来
+
+        Recompute every REFRESH_INTERVAL seconds until cancelled, surviving errors.
         """
         while True:
             await asyncio.sleep(REFRESH_INTERVAL)
@@ -729,7 +788,11 @@ class DnsService:
     # ------------------------------------------------------------ 回答
 
     def respond(self, data: bytes, peer: Any = None) -> bytes | None:
-        """回答一个 UDP 查询，要丢掉的返回 None"""
+        """
+        回答一个 UDP 查询，要丢掉的返回 None
+
+        Answer one UDP query; None means drop it.
+        """
         query = parse_query(data)
         if query is None:
             return None
@@ -794,7 +857,11 @@ class _DnsProtocol(asyncio.DatagramProtocol):
 
 
 async def serve_udp(service: DnsService, host: str, port: int) -> Any:
-    """在 host:port 上开始应答，返回 transport（关掉它就停止应答）"""
+    """
+    在 host:port 上开始应答，返回 transport（关掉它就停止应答）
+
+    Start answering on host:port; close the transport to stop.
+    """
     loop = asyncio.get_running_loop()
     # 写的是主机名（localhost）时只按 IPv4 解析：有的系统先解析出 ::1，Caddy 的 resolvers 写的是 127.0.0.1
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
@@ -808,7 +875,11 @@ async def serve_udp(service: DnsService, host: str, port: int) -> Any:
 
 
 class DnsCheckFailed(Exception):
-    """`hetu dns` 的启动检查没过：code 是退出码（2 用法或部署错误，3 环境未就绪），消息带改法"""
+    """
+    `hetu dns` 的启动检查没过：code 是退出码（2 用法或部署错误，3 环境未就绪），消息带改法
+
+    A hetu dns startup check failed; code is the exit code.
+    """
 
     def __init__(self, code: int, message: str) -> None:
         super().__init__(message)
@@ -816,12 +887,22 @@ class DnsCheckFailed(Exception):
 
 
 def mask_url(url: str) -> str:
+    """
+    地址里的口令打码
+
+    Mask the password in a Redis URL.
+    """
     from ..cli.console import mask_url as _mask
 
     return _mask(url)
 
 
 def parse_listen_arg(listen: str) -> tuple[str, int]:
+    """
+    解析 --listen（IP:端口）
+
+    Parse --listen (ip:port).
+    """
     host, sep, port = listen.rpartition(":")
     try:
         number = int(port) if sep else 0
@@ -857,6 +938,9 @@ def check_network(
     """
     只支持 host 网络（同节点，§5.4）：看连 Redis 用的网卡。Caddy 用 host 网络时查的 127.0.0.1 是宿主机的
     回环，bridge 网络里的 hetu dns 收不到
+
+    Exit with code 2 unless hetu dns runs on the host network, judged by the NIC used to
+    reach Redis.
     """
     url = urlparse(redis_url)
     if url.scheme == "unix" or not url.hostname:
@@ -936,6 +1020,9 @@ async def check_redis(client: Any, redis_url: str) -> list[str]:
     """
     连得上 Redis、HGETALL hetu:nodes 没被拒绝（§6.5），不过抛 DnsCheckFailed；返回要告警的问题：权限过大、
     连的是 master
+
+    Check that Redis is reachable and HGETALL hetu:nodes is allowed; returns the
+    warnings.
     """
     import redis.exceptions as errors
 
@@ -1024,7 +1111,8 @@ async def check_anonymous_access(
     副本读到的数据。hetu dns 自己用的用户权限再小也挡不住这个，只能去掉口令另连一次试试：PING 得通就告警，
     要口令、被拒、连不上都不告警。地址里本来就没有口令时，hetu dns 自己就是这么连上的，直接告警。
 
-    Warn when Redis accepts a connection without a password (an unprotected default user).
+    Warn when Redis accepts a connection without a password (an unprotected default
+    user).
     """
     url = urlparse(redis_url)
     if url.scheme == "unix":
@@ -1112,7 +1200,11 @@ def _connect_redis(url: str) -> Any:
 
 
 def format_report(service: DnsService, selection: Selection, url: str) -> str:
-    """--once 打印的报告"""
+    """
+    --once 打印的报告
+
+    The human-readable report printed by --once.
+    """
     lines = [
         _(
             "hetu dns --once：namespace {ns}，名字 {name}，端口 {port}，Redis {url}"

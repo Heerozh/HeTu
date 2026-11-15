@@ -84,7 +84,11 @@ class _Version(msgspec.Struct):
 
 
 class EntryError(ValueError):
-    """一条登记解析不了（内容坏了），或者是不认识的格式版本"""
+    """
+    一条登记解析不了（内容坏了），或者是不认识的格式版本
+
+    An entry is malformed or has an unknown format version.
+    """
 
 
 _encoder = msgspec.json.Encoder()
@@ -93,6 +97,11 @@ _entry_decoder = msgspec.json.Decoder(NodeEntry)
 
 
 def encode_entry(entry: NodeEntry) -> bytes:
+    """
+    登记编码成 JSON
+
+    Encode an entry as JSON.
+    """
     return _encoder.encode(entry)
 
 
@@ -146,7 +155,11 @@ def decode_registry(
 
 
 def is_fresh(entry: NodeEntry, now: float) -> bool:
-    """只按本机时钟判断（hetu nodes 用；hetu dns 按登记有没有在变判断）：ts 离现在不超过 STALE_SEC"""
+    """
+    只按本机时钟判断（hetu nodes 用；hetu dns 按登记有没有在变判断）：ts 离现在不超过 STALE_SEC
+
+    Whether ts is within STALE_SEC of the local clock.
+    """
     return abs(now - entry.ts) <= STALE_SEC
 
 
@@ -214,7 +227,11 @@ def summarize(
 
 
 def fence_open(keeper: WorkerKeeper) -> bool:
-    """发号围栏开着：租约还是本进程的（确认过之后还在安全期内，也没有被关掉）"""
+    """
+    发号围栏开着：租约还是本进程的（确认过之后还在安全期内，也没有被关掉）
+
+    Whether the lease fence is open (the lease is still ours).
+    """
     deadline = keeper.lease_deadline
     return deadline is not None and time.monotonic() <= deadline
 
@@ -268,6 +285,11 @@ class NodeRegistrar:
         self._failing = False
 
     def entry(self) -> NodeEntry:
+        """
+        当前状态下的登记
+
+        The entry for the current state.
+        """
         return NodeEntry(
             node=self.node,
             ns=self.namespace,
@@ -288,7 +310,8 @@ class NodeRegistrar:
         限时是因为看过围栏之后要尽快落地：围栏的安全期离别的进程能接手这个 worker id 只差 5 秒
         （LEASE_SAFE_SEC 和 REUSE_STALE_SEC），等连接池、重试拖得太久，HSET 可能落在接手之后，盖掉对方的登记。
 
-        Write this worker's entry once, within WRITE_TIMEOUT seconds; skipped if the fence is closed.
+        Write this worker's entry once, within WRITE_TIMEOUT seconds; skipped if the
+        fence is closed.
         """
         async with self._lock:
             if not fence_open(self.keeper):
@@ -319,7 +342,11 @@ class NodeRegistrar:
             await asyncio.sleep(WRITE_INTERVAL)
 
     def start(self) -> None:
-        """开好服之后调：立刻写一次 ready，之后每 WRITE_INTERVAL 秒写一次"""
+        """
+        开好服之后调：立刻写一次 ready，之后每 WRITE_INTERVAL 秒写一次
+
+        Start the registration loop once serving.
+        """
         assert self._task is None, "already started"
         self.up = time.time()
         self._task = asyncio.create_task(self._run(), name="hetu:discovery")
@@ -333,6 +360,8 @@ class NodeRegistrar:
         """
         关服第一步：把登记改成 draining，限时 WRITE_TIMEOUT 秒。写成功了返回 True（调用方照常服务
         DEREGISTER_WAIT 秒再停止监听）；没登记过、写不进去、围栏关着返回 False
+
+        Mark the entry draining; True means keep serving for DEREGISTER_WAIT seconds.
         """
         if self._task is None:
             return False
@@ -350,7 +379,11 @@ class NodeRegistrar:
             return False
 
     async def stop(self) -> None:
-        """停掉写登记的循环，可以重复调用"""
+        """
+        停掉写登记的循环，可以重复调用
+
+        Stop the registration loop.
+        """
         task, self._task = self._task, None
         if task is None:
             return
@@ -358,7 +391,11 @@ class NodeRegistrar:
         await asyncio.gather(task, return_exceptions=True)
 
     async def unregister(self) -> None:
-        """释放租约之前调：停掉循环，围栏开着时删掉登记（限时 WRITE_TIMEOUT 秒），可以重复调用"""
+        """
+        释放租约之前调：停掉循环，围栏开着时删掉登记（限时 WRITE_TIMEOUT 秒），可以重复调用
+
+        Stop the loop and delete the entry while the fence is open.
+        """
         started = self._task is not None
         try:
             async with asyncio.timeout(WRITE_TIMEOUT):
