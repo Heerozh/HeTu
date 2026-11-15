@@ -316,7 +316,9 @@ reach the replica's Redis port, and if the default user needs no password, an
 attacker who gets into the gateway simply uses it: they can read all the data and
 even change the replica's replication setup, and the read-only user protects
 nothing. With a password set, put it in the nodes' `BACKENDS` URLs; with the
-default user disabled, the nodes use another user.
+default user disabled, the nodes use another user. To protect the master as
+well, first set `masterauth` (and `masteruser` if you disable the default user)
+on every replica, or replication breaks.
 
 `hetu dns` checks its deployment at startup too. It exits with code 2 when it
 isn't on the host network (Caddy queries the host's 127.0.0.1, which a bridge

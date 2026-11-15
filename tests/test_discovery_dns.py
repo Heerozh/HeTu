@@ -578,6 +578,14 @@ async def test_anonymous_probe_drops_the_credentials():
     assert len(warnings) == 1
     assert "dns-secret" not in warnings[0]
     assert await check_anonymous_access("unix:///run/redis.sock") == []
+    # redis-py 也认查询串里的 username / password：同样算带了口令，另连时去掉
+    seen.clear()
+    query_url = (
+        "redis://10.0.1.20:6379/0?username=hetu-dns&password=dns-secret&protocol=2"
+    )
+    warnings = await check_anonymous_access(query_url, connect=connect_with(None))
+    assert seen == ["redis://10.0.1.20:6379/0?protocol=2"]
+    assert "dns-secret" not in warnings[0]
 
 
 class _ErrorClient:
@@ -994,6 +1002,16 @@ def test_once_reports_what_would_be_answered(replica):
     assert "127.0.0.3  关服中" in report, report
     assert f"127.0.0.4  端口 {node_port + 1}" in report, report
     assert "dns-secret" not in report  # 口令打码
+
+
+@pytest.mark.parametrize("url", ["http://10.0.1.20:6379/0", "localhost:6379"])
+def test_malformed_redis_url_is_a_usage_error(url):
+    """Redis 地址写错（scheme 不对、没写 scheme）：以 2 退出，说明怎么写，不打 traceback"""
+    proc = _run_dns("--namespace", "game", "--once", env={"HETU_DNS_REDIS": url})
+    stderr = proc.stderr.decode("utf-8", "replace")
+    assert proc.returncode == 2, stderr
+    assert "Traceback" not in stderr
+    assert "redis://" in stderr
 
 
 @pytest.mark.timeout(120)

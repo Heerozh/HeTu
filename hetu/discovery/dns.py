@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from ..i18n import _
 from .netcheck import host_network_hint, host_network_problem
@@ -982,13 +982,25 @@ async def check_anonymous_access(
     host = url.netloc.rsplit("@", 1)[-1]
     warning = _(
         "⚠️ Redis {host} 不带口令也能连上：default 用户没设口令。网关暴露在公网，它被攻破的话，攻击者不用 "
-        "hetu dns 的只读用户，直接用 default 用户就能读走全部数据，还能改副本的主从配置（REPLICAOF）、篡改 "
-        "HeTu 从副本读到的数据。请给 default 用户设口令（节点 BACKENDS 的地址里带上口令），或者禁用它（ACL "
-        "SETUSER default off，节点改用别的用户）；ACL 和 requirepass 都不随复制同步，master 和每台副本都要设"
+        "hetu dns 的只读用户，直接用 default 用户连；default 没收紧权限的话（默认什么都能做），能读走全部数据，"
+        "还能改副本的主从配置（REPLICAOF）、篡改 HeTu 从副本读到的数据。请给网关连得到的每台副本的 default "
+        "用户设口令（节点 BACKENDS 里 servants 的地址带上口令），或者禁用它（ACL SETUSER default off，节点改用"
+        "别的用户）；ACL、requirepass 都不随复制同步，每台都要设。要给 master 也设的话，先在各副本上配好 "
+        "masterauth（禁用了 default 的还要配 masteruser），不然主从复制会断"
     ).format(host=host)
-    if url.password is None and not url.username:
+    # redis-py 也认查询串里的 username / password
+    pairs = parse_qsl(url.query, keep_blank_values=True)
+    credential_keys = {"username", "password"}
+    has_credentials = (
+        url.password is not None
+        or bool(url.username)
+        or any(key.lower() in credential_keys for key, _value in pairs)
+    )
+    if not has_credentials:
         return [warning]
-    client = (connect or _connect_redis)(url._replace(netloc=host).geturl())
+    query = urlencode([(k, v) for k, v in pairs if k.lower() not in credential_keys])
+    probe_url = url._replace(netloc=host, query=query).geturl()
+    client = (connect or _connect_redis)(probe_url)
     try:
         await client.ping()
     except Exception:  # noqa: BLE001 要口令（NOAUTH）、被拒、连不上：都不算能匿名连上
@@ -1109,7 +1121,15 @@ async def _main(args: Any) -> int:
         )
     host, port = parse_listen_arg(args.listen)
     check_network(url)
-    client = _connect_redis(url)
+    try:
+        client = _connect_redis(url)
+    except ValueError as e:
+        raise DnsCheckFailed(
+            EXIT_USAGE,
+            _(
+                "❌ Redis 地址写得不对（{err}）：要写成 redis://用户:口令@主机:6379/0，指向副本"
+            ).format(err=e),
+        ) from e
     try:
         warnings = await check_redis(client, url)
         warnings += await check_anonymous_access(url)

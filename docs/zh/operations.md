@@ -232,7 +232,8 @@ ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgeta
 
 副本的 default 用户也要设口令，或者禁用它：网关要能连到副本的 Redis 端口，default 用户不用口令就能连的话，网关
 被攻破时攻击者直接用它，读得到全部数据、还能改副本的主从配置，这个只读用户就形同虚设。设了口令之后，节点
-`BACKENDS` 的地址里带上口令；禁用的话，节点改用别的用户。
+`BACKENDS` 的地址里带上口令；禁用的话，节点改用别的用户。要给 master 也设的话，先在各副本上配好 `masterauth`
+（禁用了 default 的还要配 `masteruser`），不然主从复制会断。
 
 `hetu dns` 启动时同样检查部署：不是 host 网络（Caddy 查的 127.0.0.1 是宿主机的回环，bridge 网络里收不到）、Redis
 是原生集群（第一版不支持，请经代理层连）以 2 退出；Redis 连不上、口令不对、被 ACL 拒绝（会打出要建的用户）以 3
