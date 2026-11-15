@@ -731,9 +731,11 @@ class _FakeServer:
         self.events = events
         self.runtime = SimpleNamespace(exit_code=0)
         self.request_stop: Callable[[], None] = lambda: None
+        self.restartable: bool | None = None
 
-    def __call__(self, config, *, on_stop_requested):
+    def __call__(self, config, *, on_stop_requested, restartable=False):
         self.request_stop = on_stop_requested
+        self.restartable = restartable
         return self
 
     async def start(self, sock):
@@ -781,6 +783,72 @@ async def test_serve_aborts_startup_when_stop_is_requested(monkeypatch):
         sock.close()
     assert events == ["start", "start cancelled", "stop"]
     assert code == 0
+
+
+class _FakeControl:
+    """_serve 的 worker 模式用的控制管道替身：记下发给管理进程的消息，留着停服回调"""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.on_stop: Callable[[], None] | None = None
+
+    def listen(self, on_stop: Callable[[], None]) -> None:
+        self.on_stop = on_stop
+
+    def send_ready(self) -> None:
+        self.sent.append("ready")
+
+    def send_lease_lost(self) -> None:
+        self.sent.append("lease_lost")
+
+
+async def test_serve_worker_reports_ready_and_stops_on_control(monkeypatch):
+    """
+    多进程的 worker：开好服后报 ready；管理进程的停服通知（控制管道的线程里调 on_stop）到了就关服，
+    以 0 退出。AiohttpServer 按可重启（worker）建
+    """
+    import threading
+
+    events: list[str] = []
+    fake = _FakeServer(lambda server: asyncio.sleep(0), events)
+    monkeypatch.setattr(aiohttp_app, "AiohttpServer", fake)
+    control = _FakeControl()
+    sock = aiohttp_app.bind_socket("127.0.0.1:0")
+    try:
+        serving = asyncio.ensure_future(aiohttp_app._serve(HeTuConfig(), sock, control))
+        assert await _wait_for(lambda: control.sent == ["ready"], 2)
+        assert fake.restartable is True
+        assert events == ["start"]
+        on_stop = control.on_stop
+        assert on_stop is not None
+        threading.Thread(target=on_stop).start()
+        code = await asyncio.wait_for(serving, 5)
+    finally:
+        sock.close()
+    assert events == ["start", "stop"]
+    assert code == 0
+
+
+async def test_serve_worker_reports_lease_lost(monkeypatch):
+    """多进程的 worker 丢了租约：告诉管理进程（由它重启），关服，以非 0 退出"""
+
+    async def lease_lost(server):
+        server.runtime.exit_code = 1
+        server.request_stop()
+
+    events: list[str] = []
+    monkeypatch.setattr(aiohttp_app, "AiohttpServer", _FakeServer(lease_lost, events))
+    control = _FakeControl()
+    sock = aiohttp_app.bind_socket("127.0.0.1:0")
+    try:
+        code = await asyncio.wait_for(
+            aiohttp_app._serve(HeTuConfig(), sock, control), 5
+        )
+    finally:
+        sock.close()
+    assert "lease_lost" in control.sent
+    assert events == ["start", "stop"]
+    assert code == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 信号")
