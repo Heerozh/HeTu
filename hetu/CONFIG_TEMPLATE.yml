@@ -44,6 +44,13 @@ LISTEN: 0.0.0.0:2466
 # kern.ipc.somaxconn
 # LISTEN_BACKLOG: 2048
 
+# 节点发现（云上多机、弹性伸缩时打开）：开好服后把本节点的地址登记进默认后端 Redis 的 hetu:nodes，关服时先
+# 注销、照常服务 4 秒等网关刷新，再停止监听；网关上的 `hetu dns` 把注册表答成 Caddy dynamic a 用的 A 记录，
+# 扩缩容不用改配置、不用脚本。只支持 host 网络（docker run --network host），开服前检查部署（bridge 网络、
+# LISTEN 绑在回环上、PROXIES_COUNT 为 0……），不过就说明怎么改、以 2 退出。广播地址：LISTEN 写了具体 IP
+# 就用它，0.0.0.0 时取连 Redis master 用的本机地址；端口取 LISTEN 的。见运维文档的"负载均衡"
+# DISCOVERY: false
+
 # 工作进程数，-1 为自动按cpu核心数
 WORKER_NUM: 4
 

@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..common.helper import WORKER_INDEX_ENV
+from ..discovery.registry import DEREGISTER_WAIT, WRITE_TIMEOUT
 from ..i18n import _
 from .runtime import resolve_ack_timeout
 
@@ -95,13 +96,18 @@ def worker_stop_timeout(config: Mapping[str, Any]) -> float:
     """
     管理进程等一个 worker 关完服的上限（秒）。worker 关服时排空最多 SHUTDOWN_DRAIN_TIMEOUT；取消收发
     任务、等连接拆完、停 FutureCalls 各有一份 GRACEFUL_SHUTDOWN_TIMEOUT（见 AiohttpServer.stop），再加
-    余量。超时还没退出的强制结束，所以编排器的宽限期（compose 的 stop_grace_period）要比它长。
+    余量。打开了节点发现（DISCOVERY）时，关服第一步还要注销：写 draining 最多 WRITE_TIMEOUT 秒，写成功了
+    再照常服务 DEREGISTER_WAIT 秒。超时还没退出的强制结束，所以编排器的宽限期（compose 的
+    stop_grace_period）要比它长。
 
     The supervisor's limit (seconds) for a worker to finish shutting down.
     """
     drain = float(config.get("SHUTDOWN_DRAIN_TIMEOUT", 5.0))
     graceful = float(config.get("GRACEFUL_SHUTDOWN_TIMEOUT", 15.0))
-    return drain + 3 * graceful + STOP_TIMEOUT_MARGIN
+    timeout = drain + 3 * graceful + STOP_TIMEOUT_MARGIN
+    if config.get("DISCOVERY") is True:
+        timeout += WRITE_TIMEOUT + DEREGISTER_WAIT
+    return timeout
 
 
 def loaded_module_files() -> list[str]:

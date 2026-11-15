@@ -25,6 +25,12 @@ from typing import Any
 from ..data.backend import Backend
 from ..data.backend.snowflake_lease import SnowflakeLease
 from ..data.backend.worker_keeper import WorkerLease, create_worker_keeper
+from ..discovery.netcheck import (
+    DiscoveryCheckFailed,
+    advertised_address,
+    discovery_enabled,
+)
+from ..discovery.registry import DEREGISTER_WAIT, NodeRegistrar
 from ..endpoint import connection
 from ..i18n import _
 from ..local import load_app_module
@@ -288,8 +294,9 @@ class WorkerRuntime:
     开服、关服的先后顺序。适配层在框架的生命周期钩子里调用：
 
     - 开服：`start()`（连后端、建表、拿租约并马上开始续约、跑启动 System）→ 框架开始监听 →
-      `start_background()`（FutureCalls）；
-    - 关服：框架停止监听、开始拆连接 → `stop()`（等连接拆完 → 停后台任务 → 释放租约 → 关后端）。
+      `start_background()`（FutureCalls）→ `start_registration()`（节点发现的登记）；
+    - 关服：`withdraw()`（节点发现：注销，等网关刷新）→ 框架停止监听、开始拆连接 → `stop()`（等连接
+      拆完 → 停后台任务 → 删登记、释放租约 → 关后端）。
 
     `on_lease_lost` 由适配层提供：续约发现 Worker ID 已经不属于本进程时调用，要换一个新进程
     重新租（多进程时只重启本 worker，单进程时停服并把 `exit_code` 置为非 0）。
@@ -319,6 +326,10 @@ class WorkerRuntime:
         self.cleanup_tasks: set[asyncio.Task] = set()
         # 进程该以什么码退出：单进程模式丢租约时由适配层置为 LEASE_LOST_EXIT_CODE
         self.exit_code = 0
+        # 节点发现（DISCOVERY 打开时）：广播地址 (ip, 端口)、本 worker 在注册表里的登记、已经注销过了
+        self.advertised: tuple[str, int] | None = None
+        self.registrar: NodeRegistrar | None = None
+        self._withdrawn = False
         # stop() 只真正关一次（见 stop）；上一次关到一半被打断时，已经释放的租约、已经关掉的后端
         # 不再来第二次
         self._stop_lock = asyncio.Lock()
@@ -381,6 +392,15 @@ class WorkerRuntime:
                     timeout=startup_timeout, err=err
                 )
             )
+
+        # 节点发现的广播地址：hetu start 的主进程检查过、经配置传进来；没有（不是经 hetu start 开的服）
+        # 就在这里检查、推算。不过就不连后端，直接中止
+        try:
+            if discovery_enabled(self.config):
+                self.advertised = advertised_address(self.config)
+        except (DiscoveryCheckFailed, ValueError) as e:
+            logger.error(str(e))
+            raise StartupAborted(str(e)) from e
 
         try:
             async with asyncio.timeout_at(deadline):
@@ -516,6 +536,58 @@ class WorkerRuntime:
         """开始监听之后调用：开始执行到期的未来调用（FutureCalls），由 stop() 在释放租约之前停掉"""
         self.background.spawn(future_call_task(self), name="hetu:future_calls")
 
+    def start_registration(self) -> None:
+        """
+        开始监听、`start_background()` 之后调用：节点发现打开时，把本 worker 登记进默认后端的注册表，之后每
+        5 秒写一次（设计稿 docs/superpowers/specs/2026-11-15-node-discovery-design.md §4.3）。开好服才登记：
+        网关在这之前连过来会被拒，Caddy 被拒一次就把这台摘掉 30 秒。
+
+        Register this worker in the node registry once it is serving (node discovery).
+        """
+        lease = self.snowflake_lease
+        if self.advertised is None or lease is None or self.registrar is not None:
+            return
+        from .. import __version__
+
+        master = self.default_backend.master
+        keeper = lease.keeper
+        addr, port = self.advertised
+        self.registrar = NodeRegistrar(
+            lambda: master.aio,  # pyright: ignore[reportAttributeAccessIssue]
+            keeper,
+            lease.worker_id,
+            node=getattr(keeper, "identity", ""),
+            namespace=self.config["NAMESPACE"],
+            instances=list(self.config["INSTANCES"]),
+            addr=addr,
+            port=port,
+            version=__version__,
+            conns=lambda: len(self.live_connections),
+        )
+        self.registrar.start()
+
+    async def withdraw(self) -> None:
+        """
+        关服第一步、停止监听之前调用：节点发现打开时把登记改成 draining，写成功了就照常服务
+        DEREGISTER_WAIT 秒，等网关上的 Caddy 刷新过、不再把新连接发过来，再往下关。不等的话 Caddy 刷新之前
+        连过来会被拒、把这台摘掉 30 秒，原地重启的节点开好服之后也要再等这么久（设计稿 §4.3）。没登记过、
+        写不进去、租约已经丢了都不等；关服被打断后再调不重复等。
+
+        First step of shutdown: mark this worker draining in the registry and keep serving
+        until the gateway has re-resolved.
+        """
+        registrar = self.registrar
+        if registrar is None or self._withdrawn:
+            return
+        self._withdrawn = True
+        if await registrar.mark_draining():
+            logger.info(
+                _(
+                    "⌚ [📣Discovery] 已在注册表里注销，照常服务 {wait:g} 秒、等网关刷新之后再停止监听"
+                ).format(wait=DEREGISTER_WAIT)
+            )
+            await asyncio.sleep(DEREGISTER_WAIT)
+
     async def abandon_lease(self) -> None:
         """开服失败时停掉续约、水位预留循环并释放租约（拿到租约之后才失败的情况），限时"""
         lease = self.snowflake_lease
@@ -573,7 +645,7 @@ class WorkerRuntime:
         2. 取消还没结束的连接相关任务（顶号核查等），和第 1 步共用一个预算；
         3. 停 FutureCalls：它执行的 System 会发号，释放租约之后再发，就可能和接手这个
            Worker ID 的进程撞号，所以单独给一个预算；
-        4. 停续约、水位预留循环，写精确水位并释放 Worker ID；
+        4. 删掉节点发现的登记，停续约、水位预留循环，写精确水位并释放 Worker ID；
         5. 关后端。
 
         可以重复调用、并发调用，只真正关一次；关到一半被打断后再调，已经做完的步骤不再做（原来 Sanic
@@ -607,7 +679,11 @@ class WorkerRuntime:
         await self.close_backends()
 
     async def close_backends(self) -> None:
-        """释放租约（写精确水位）后关闭所有后端连接池"""
+        """删掉节点发现的登记、释放租约（写精确水位）后关闭所有后端连接池"""
+        # 节点发现的登记要在释放租约之前删：释放的第一步就关掉发号围栏，之后就不让删了（这个 id
+        # 马上可能被别的进程拿走，field 成了对方的）
+        if self.registrar is not None:
+            await self.registrar.unregister()
         # 先停续约、水位预留两个循环：不然续约会对刚释放的 id 报租约丢失，水位预留会在精确
         # 水位之后再写一次。调用方保证连接已拆完、FutureCalls 已停（见 stop），不会再发号，
         # 最后用到的时间戳就是真实上界（见 SnowflakeLease.release）
