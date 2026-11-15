@@ -11,12 +11,11 @@ from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
-from ...common.helper import get_machine_id, lease_owner_exited, worker_index
+from ...common.helper import lease_owner_exited, lease_owner_id, worker_index
 from ...common.permission import Permission
 from ...common.snowflake_id import (
     FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
-    TOOL_NODE_PREFIX,
     TOOL_WORKER_ID_FLOOR,
     WORKER_ID_EXPIRE_SEC,
     WORKER_ID_KEY,
@@ -135,7 +134,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
         super().__init__()
         self.client = client
         self.worker_id = -1
-        self.node_id = f"{TOOL_NODE_PREFIX}{get_machine_id()}:{pid}"
+        self.node_id = lease_owner_id(pid, tool=True)
         self._token = self.node_id.encode()
 
     @staticmethod

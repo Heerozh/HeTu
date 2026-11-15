@@ -4,12 +4,11 @@ from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
-from ....common.helper import get_machine_id
 from ....common.helper import lease_owner_exited as _owner_exited
+from ....common.helper import lease_owner_id
 from ....common.snowflake_id import (
     FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
-    TOOL_NODE_PREFIX,
     WORKER_ID_EXPIRE_SEC,
     WORKER_ID_KEY,
     WorkerKeeper,
@@ -127,12 +126,9 @@ class RedisWorkerKeeper(WorkerKeeper):
         self.worker_id_key = WORKER_ID_KEY
         self.worker_id = -1
         self.tool = tool
-        # 机器码+pid组成的node_id。
-        # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
-        # 比如固定每个容器只启动一个worker，则pid是固定的1
-        self.node_id = f"{get_machine_id()}:{pid}"
-        if tool:
-            self.node_id = TOOL_NODE_PREFIX + self.node_id
+        # 持有者标识：同时活着的进程之间互不相同，同一个位置重启前后不变（才能复用自己原来的 id），
+        # 格式见 lease_owner_id。tool 模式带 cli: 前缀
+        self.node_id = lease_owner_id(pid, tool=tool)
 
     def _key(self, worker_id: int) -> str:
         return f"{self.worker_id_key}:{worker_id}"
@@ -196,8 +192,9 @@ class RedisWorkerKeeper(WorkerKeeper):
             return await self._get_tool_worker_id()
         # 查找之前是否已经分配过自己的worker id
         for worker_id in range(MAX_WORKER_ID + 1):
-            # node_id相同说明是容器重启，直接复用。GETEX一条命令原子完成"读值+续期"，
-            # 拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
+            # node_id 相同说明是自己重启前的那个（同一个容器重启，或者管理进程以同一序号重启了
+            # worker），直接复用；它在同时活着的进程之间不会相同，见 lease_owner_id。GETEX 一条命令
+            # 原子完成"读值+续期"，拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
             if not await self._getex_if_mine(worker_id):
                 continue
             logger.info(
