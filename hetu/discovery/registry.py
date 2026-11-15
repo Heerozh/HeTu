@@ -183,8 +183,8 @@ def summarize(
                 "addr": entry.addr,
                 "port": entry.port,
                 "workers": 0,
-                STATE_READY: 0,
-                STATE_DRAINING: 0,
+                # 各状态的 worker 数。单独一层：状态名是登记里写的，不能撞上别的键
+                "states": {},
                 "conns": 0,
                 "max_age": age,
                 "versions": set(),
@@ -192,7 +192,8 @@ def summarize(
             },
         )
         group["workers"] += 1
-        group[entry.state] = group.get(entry.state, 0) + 1
+        states = group["states"]
+        states[entry.state] = states.get(entry.state, 0) + 1
         group["conns"] += entry.conns
         group["max_age"] = max(group["max_age"], age)
         group["versions"].add(entry.ver)

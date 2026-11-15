@@ -110,8 +110,7 @@ def test_summarize_groups_live_entries_by_address():
     }
     first = nodes["game", "10.0.3.17"]
     assert first["workers"] == 2
-    assert first[STATE_READY] == 1
-    assert first[STATE_DRAINING] == 1
+    assert first["states"] == {STATE_READY: 1, STATE_DRAINING: 1}
     assert first["conns"] == 30
     assert first["max_age"] == 4
     assert first["versions"] == ["1.4.0", "1.5.0"]
@@ -120,6 +119,16 @@ def test_summarize_groups_live_entries_by_address():
     assert out["stale"][0]["age"] == 60
     assert out["invalid"] == [{"field": "x", "error": "坏了"}]
     assert out["namespaces"] == ["game", "other"]
+
+
+def test_summarize_counts_any_state_without_clobbering_other_fields():
+    """状态名是登记里写的：叫 versions、conns 之类的也只算进 states，不会把汇总弄崩、算错"""
+    now = 1000.0
+    entries = {0: make_entry(state="versions"), 1: make_entry(state="conns", conns=3)}
+    (node,) = summarize(entries, {}, now)["nodes"]
+    assert node["states"] == {"versions": 1, "conns": 1}
+    assert node["conns"] == 8
+    assert node["versions"] == ["1.4.0"]
 
 
 def test_worker_stop_timeout_covers_the_deregister_wait():
@@ -542,7 +551,8 @@ def test_nodes_command_summarizes_the_registry(tmp_path, redis_urls):
     assert out["read_from"] == "master"
     (node,) = out["nodes"]
     assert (node["addr"], node["port"], node["workers"]) == ("10.0.3.17", 2466, 2)
-    assert (node[STATE_READY], node[STATE_DRAINING], node["conns"]) == (1, 1, 7)
+    assert node["states"] == {STATE_READY: 1, STATE_DRAINING: 1}
+    assert node["conns"] == 7
     assert [s["worker_id"] for s in out["stale"]] == [2]
     assert [i["field"] for i in out["invalid"]] == ["x"]
     assert out["namespaces"] == ["game"]
