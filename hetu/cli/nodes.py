@@ -18,7 +18,14 @@ import time
 from typing import Any, cast
 
 from ..i18n import _
-from .base import CommandInterface, ConfigError, UsageError, load_command_config
+from .base import (
+    CommandInterface,
+    ConfigError,
+    UsageError,
+    flag_mode_requested,
+    load_command_config,
+    locate_config_file,
+)
 from .console import describe_target, run_json_command
 
 
@@ -28,6 +35,13 @@ async def _nodes_main(args: argparse.Namespace, report: dict) -> dict[str, Any]:
     from ..discovery.registry import REGISTRY_KEY, decode_registry, summarize
     from ..local import BackendNotReady
 
+    if locate_config_file(args) is None and not flag_mode_requested(args):
+        raise ConfigError(
+            _(
+                "找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；"
+                "也可以用 --db 直接给出地址"
+            )
+        )
     config, config_file = load_command_config(args, need_app=False, need_db=False)
     report["target"] = describe_target(config, config_file, None)
     backends = config.get("BACKENDS") or {}

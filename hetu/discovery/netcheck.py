@@ -80,9 +80,21 @@ def discovery_enabled(config: Mapping[str, Any]) -> bool:
     if not isinstance(value, bool):
         # 配置错误统一抛 ValueError（同 listen_backlog），hetu start 接住以 2 退出
         raise ValueError(  # noqa: TRY004
-            _("DISCOVERY 必须是 true 或 false，现在是 {value!r}").format(value=value)
+            _("DISCOVERY 必须是 true 或 false，现在是 {value!r}。{hint}").format(
+                value=value, hint=string_value_hint(value)
+            )
         )
     return value
+
+
+def string_value_hint(value: Any) -> str:
+    """配置值是字符串时的说明：多半是加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）"""
+    if not isinstance(value, str):
+        return ""
+    return _(
+        "它是字符串：加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）。请直接写 YAML 的"
+        "布尔值、整数，或者用 !eval"
+    )
 
 
 # ---------------------------------------------------------------- 广播地址
@@ -344,8 +356,8 @@ def check_proxies(config: Mapping[str, Any]) -> None:
         _(
             "❌ 节点发现要求 PROXIES_COUNT ≥ 1（现在是 {value!r}）：节点在网关后面，不从 "
             "X-Forwarded-For 取地址的话，所有玩家的地址都是网关的，同 IP 的匿名连接上限"
-            "（MAX_ANONYMOUS_CONNECTION_BY_IP）会把玩家挡在外面。前面只有 Caddy 一层时设成 1"
-        ).format(value=value)
+            "（MAX_ANONYMOUS_CONNECTION_BY_IP）会把玩家挡在外面。前面只有 Caddy 一层时设成 1。{hint}"
+        ).format(value=value, hint=string_value_hint(value))
     )
 
 

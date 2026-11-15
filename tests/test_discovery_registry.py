@@ -586,6 +586,14 @@ def test_nodes_command_does_not_leak_the_password(tmp_path):
     assert "hetu:***@127.0.0.1:1" in out["error"]
 
 
+def test_nodes_command_without_config_only_suggests_its_own_flags(tmp_path):
+    """找不到配置：提示 --config / HETU_CONFIG / --db，不提它不接受的 --instance 这些"""
+    code, out = run_nodes(cwd=tmp_path)
+    assert code == 3
+    assert "--db" in out["error"]
+    assert "--instance" not in out["error"]
+
+
 def test_nodes_command_needs_redis(tmp_path):
     code, out = run_nodes("--db", f"sqlite:///{tmp_path / 'x.db'}", cwd=tmp_path)
     assert code == 2

@@ -88,8 +88,10 @@ def test_discovery_is_off_by_default():
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_discovery_must_be_a_bool(value):
     """YAML 里的 "true"（加了引号、或者是 ${VAR} 插值出来的）不能当成打开"""
-    with pytest.raises(ValueError, match="DISCOVERY"):
+    with pytest.raises(ValueError, match="DISCOVERY") as e:
         discovery_enabled({"DISCOVERY": value})
+    # 是字符串时说清楚为什么
+    assert ("${VAR}" in str(e.value)) == isinstance(value, str)
 
 
 # ---------------------------------------------------------------- LISTEN
@@ -297,6 +299,7 @@ def test_preflight_needs_proxies_count(count):
     with pytest.raises(DiscoveryCheckFailed, match="PROXIES_COUNT") as e:
         preflight(node_config(PROXIES_COUNT=count), interfaces={})
     assert "MAX_ANONYMOUS_CONNECTION_BY_IP" in str(e.value)
+    assert ("${VAR}" in str(e.value)) == isinstance(count, str)
 
 
 def test_preflight_accepts_real_ip_header_instead_of_proxies_count():
