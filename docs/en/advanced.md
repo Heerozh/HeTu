@@ -1271,8 +1271,13 @@ The numbers you actually care about:
 Worker IDs are leased automatically by `WorkerKeeper`: on the Redis
 backend each lease is a Redis key renewed every 5 seconds, and if a
 process dies without releasing its lease, the slot is reclaimed after the
-lease expires; the SQLite backend (development only) simply uses the
-process's index on the host. On startup, the engine restores the *last
+lease expires. A container that restarts, or a worker restarted by the
+manager process under the same index, reuses its previous id. To tell apart
+containers that share a hostname on one host (host networking, for example),
+each container stores a random token in `/var/tmp/hetu-node-token` on first
+start; delete it before committing an image from a container that has run
+HeTu. The SQLite backend (development only) simply uses the process's index
+on the host. On startup, the engine restores the *last
 persisted timestamp* from the `WorkerLease` `Component` (a `core`/volatile
 table) and waits a short grace period if the system clock has gone
 backwards — that's HeTu's defense against duplicate ids when a host's NTP
