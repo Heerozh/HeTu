@@ -94,12 +94,13 @@ REDIS_CMDS = ("zrange", "hgetall", "subscribe", "unsubscribe", "evalsha", "publi
 # --show 默认打印的列
 SHOW_KEYS = {
     "item": (
-        "tag,item_op,target_rate,write_rate,worker_cores,worker_kcycles_u_per_op,"
+        "tag,http_server,item_op,target_rate,write_rate,worker_cores,"
+        "worker_kcycles_u_per_op,"
         "ticks_ps,items_per_tick,ins_lat_p50_ms,ins_lat_p99_ms,del_lat_p99_ms,"
         "rpc_rtt_p99_ms,rpc_rtt_max_ms,replica_cmds_ps,cons_bad_conns"
     ),
     "chat": (
-        "tag,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
+        "tag,http_server,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
         "worker_us_per_msg_conn,lat_p50_ms,lat_p99_ms,fanout_done_p50_ms,"
         "fanout_done_p99_ms,rpc_rtt_p99_ms,rpc_rtt_max_ms,worker_rss_mb,cons_bad_conns"
     ),
@@ -674,9 +675,13 @@ def probe_proc(args, url: str, ctrl):
 
 async def _probe_main(args, url, ctrl):
     """
-    RPC 往返探针：一个不订阅的连接，每 PROBE_MS 发一次 ping 测往返。主进程也经它调诊断 endpoint
-    （("rpc", [endpoint, *args])，结果原样回传），和 ping 串行，不打乱往返计时
+    RPC 往返探针：一个不订阅的连接，收到回复后隔 PROBE_MS 再发下一个 ping 测往返。主进程也经它调诊断
+    endpoint（("rpc", [endpoint, *args])，结果原样回传），和 ping 串行，不打乱往返计时。
+
+    固定间隔时，探针的节拍会和推送的 100ms 节拍锁相，p99 主要由两者的相位决定；--probe-random 把间隔
+    改成均值 PROBE_MS 的指数分布，采样时刻在推送周期里均匀分布
     """
+    rng = random.Random(20261115)
     setup_registry()
     ws, pipe, ctx = await ws_connect(url)
     rtts: list[tuple[float, float]] = []
@@ -703,7 +708,10 @@ async def _probe_main(args, url, ctrl):
             ts = time.time()
             await rpc(["ping"])
             rtts.append((ts, time.perf_counter() - t0))
-            await asyncio.sleep(args.probe_ms / 1000)
+            if args.probe_random:
+                await asyncio.sleep(rng.expovariate(1000 / args.probe_ms))
+            else:
+                await asyncio.sleep(args.probe_ms / 1000)
 
     task = asyncio.create_task(loop_ping())
     loop = asyncio.get_running_loop()
@@ -978,7 +986,7 @@ class Harness:
     def start_server(self) -> None:
         args = self.args
         cfg = write_config(args, self.workdir)
-        env = dict(os.environ, PYTHONUTF8="1")
+        env = dict(os.environ, PYTHONUTF8="1", HETU_HTTP_SERVER=args.http_server)
         if args.server_pythonpath:
             env["PYTHONPATH"] = args.server_pythonpath
         log = open(os.path.join(self.workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115
@@ -995,7 +1003,8 @@ class Harness:
         self.sproc = psutil.Process(self.server.pid)
         wait_port(args.port)
         time.sleep(2)
-        # WORKER_NUM=1 时 Sanic 单进程运行，主进程就是 worker；多 worker 时是子进程
+        # WORKER_NUM=1 时单进程运行（Sanic、aiohttp 都是），主进程就是 worker；多 worker 时
+        # 是子进程
         self.workers = (
             [self.sproc] if args.workers == 1 else self.sproc.children(recursive=True)
         )
@@ -1106,7 +1115,8 @@ class Harness:
             if prof_until is not None and time.time() >= prof_until:
                 prof_until = None
                 call(self.probe_conn, "rpc", ["prof", "stop", prof_out])
-            if time.time() >= next_sample:  # 笔记本 P 核频率：看有没有降频
+            # 笔记本 P 核频率：看有没有降频。核空闲时读到的是低频，平均值不是运行频率
+            if time.time() >= next_sample:
                 next_sample = time.time() + 0.5
                 for c in args.server_cpus:
                     path = f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq"
@@ -1149,6 +1159,7 @@ class Harness:
         res: dict[str, Any] = {
             "scenario": args.scenario,
             "tag": args.tag,
+            "http_server": args.http_server,
             "conns": args.conns,
             "limit": args.limit,
             "workers": args.workers,
@@ -1187,7 +1198,10 @@ class Harness:
             **{f"cons_{k}": v for k, v in cons.items()},
             "rpc_rtt_p50_ms": round(pct(rtts, 0.5) * 1000, 2),
             "rpc_rtt_p99_ms": round(pct(rtts, 0.99) * 1000, 2),
+            "rpc_rtt_p999_ms": round(pct(rtts, 0.999) * 1000, 2),
             "rpc_rtt_max_ms": round(max(rtts, default=float("nan")) * 1000, 2),
+            "rpc_probes": len(rtts),
+            "probe_random": args.probe_random,
         }
         for name in REDIS_CMDS:
             for label, a, b in (("rep", rep_a, rep_b), ("mas", mas_a, mas_b)):
@@ -1406,6 +1420,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--show", default="", help="只打印这个结果文件（JSONL）的主要列")
     ap.add_argument("--show-keys", default="", help="--show 打印哪些列（逗号分隔）")
     ap.add_argument("--tag", default="", help="写进结果的标签（区分代码版本等）")
+    ap.add_argument(
+        "--http-server",
+        choices=("sanic", "aiohttp"),
+        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
+        help="服务器用哪个 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）",
+    )
     ap.add_argument("--master", default="redis://127.0.0.1:23400/0")
     ap.add_argument(
         "--replica",
@@ -1438,6 +1458,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--client-procs", type=int, default=8)
     ap.add_argument("--connect-concurrency", type=int, default=8, help="每个客户端进程")
     ap.add_argument("--probe-ms", type=float, default=20)
+    ap.add_argument(
+        "--probe-random",
+        action="store_true",
+        help="探针的间隔改成均值 --probe-ms 的指数分布，避免和推送节拍锁相",
+    )
     ap.add_argument(
         "--rpcs-rate",
         type=float,
