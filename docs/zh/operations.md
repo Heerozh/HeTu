@@ -146,10 +146,10 @@ PROXIES_COUNT: 1        # 节点在网关后面，从 X-Forwarded-For 取玩家�
 LISTEN: 0.0.0.0:2466    # 所有节点用同一个端口
 ```
 
-用 host 网络运行（不用 `-p`）：
+用 host 网络运行（不用 `-p`）。打开节点发现后关服多 4 秒的注销等待，停机宽限期按下面"停服"一节设：
 
 ```bash
-docker run -d --restart always --network host --name game-srv my-game
+docker run -d --restart always --network host --stop-timeout 70 --name game-srv my-game
 ```
 
 **只支持 host 网络**：bridge 网络里节点看到的是 docker 网桥分的地址，别的机器上的网关连不上；host 网络还省掉了
@@ -230,6 +230,10 @@ game.example.com {
 ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgetall +ping
 ```
 
+`ACL SETUSER` 只改内存，建完要持久化：配了 `aclfile` 的执行 `ACL SAVE`，用户写在 redis.conf 里的执行
+`CONFIG REWRITE`。不然副本一重启这个用户就没了：正在跑的 `hetu dns` 读不了注册表，一直答上一次的结果，新节点
+进不来、死节点也摘不掉；它一重启就以 3 退出。托管 Redis 在控制台建的账号不用管。
+
 副本的 default 用户也要设口令，或者禁用它：网关要能连到副本的 Redis 端口，default 用户不用口令就能连的话，网关
 被攻破时攻击者直接用它，读得到全部数据、还能改副本的主从配置，这个只读用户就形同虚设。设了口令之后，节点
 `BACKENDS` 的地址里带上口令；禁用的话，节点改用别的用户。要给 master 也设的话，先在各副本上配好 `masterauth`
@@ -258,8 +262,9 @@ ACL SETUSER hetu-dns on >口令 resetkeys ~hetu:nodes resetchannels -@all +hgeta
   Caddy 连不上会换别的，玩家只是多等一下。
 - **大批玩家同时重连**（网关重启、所有节点一起重启）：HeTu 的监听队列排不下的连接会被内核丢掉，Caddy 2 秒连不上
   也会把这台摘掉 30 秒。监听队列默认 2048（`LISTEN_BACKLOG`），Linux 上还受 `net.core.somaxconn` 限制（5.4 起的
-  内核默认 4096），单台同时连得更多时两个一起调大。SDK 重连时带随机抖动，会把同时掉线的玩家打散。计划内的停服、
-  重启不会被摘掉（开好服才登记，注销后等 Caddy 刷新过才停止监听），会被摘掉的只剩崩溃、被强杀的节点。
+  内核默认 4096），单台同时连得更多时两个一起调大。SDK 重连时带随机抖动，会把同时掉线的玩家打散。另外，节点开好服
+  才登记、注销后等 Caddy 刷新过才停止监听，计划内的停服、重启不会因为连过去被拒而被摘掉；监听队列排不下导致的
+  连接超时照样会。
 - **网关是单点**：用稳定的机器，挂了玩家会自动重连；规模大了再加网关、在前面放云厂商的负载均衡。`hetu dns` 挂了
   的话新连接进不来（已有的不受影响），compose 里配 `restart: always`。
 - **只在一家云上跑**：也可以让伸缩组直接关联云负载均衡，同样不用写脚本；代价是负载均衡的月费，也绑死了一家云。

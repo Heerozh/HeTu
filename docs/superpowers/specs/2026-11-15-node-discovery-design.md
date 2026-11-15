@@ -1,7 +1,7 @@
 # 节点发现：Redis 注册表 + 网关上的 DNS — 设计稿
 
 - 日期：2026-11-15；2026-11-16 按之后合并进 dev 的 PR #235、#236 修订（§15）
-- 状态：已实现（分支 `feat/node-discovery`），实现记录和手工测试见 §16。已定事项见 §13，没有待定问题。
+- 状态：已实现（PR #237），实现记录和手工测试见 §16，实现审查见 §17。已定事项见 §13，没有待定问题。
 - 基线：dev `2a144728`（初稿是 `8caa6a48`；`7a6a353a` 之后的几个提交只改了文档和翻译脚本）
 - 影响范围：`hetu/server/runtime.py`、`hetu/server/adapters/aiohttp_app.py`、`hetu/server/supervisor.py`
   （§9 第 0 步；关服上限加上注销等待，§4.3）、`hetu/cli/start.py`；新增 `hetu/discovery/`、`hetu/cli/dns.py`、
@@ -330,9 +330,10 @@ dynamic a {
 |---|---|
 | 网络模式（同 §5.4，看连 Redis 时用的网卡） | 退出（2）。Caddy 用 host 网络时查的 127.0.0.1 是宿主机的回环，bridge 网络里的进程收不到 |
 | 连得上 Redis，HGETALL `hetu:nodes` 没被拒绝 | 退出（3）；被 ACL 拒绝时，把要授权的命令打出来 |
-| HGETALL 没有收到 MOVED / ASK（连的不是原生集群） | 退出（2）：第一版不支持原生集群，请经代理层连（§13）。恰好连到持有这个 key 的分片主节点时查不出来；之后槽位迁走了，运行时读失败的错误日志里同样这么说 |
-| 权限是不是太大：HGETALL 一个注册表以外的 key | 没被拒绝就告警：网关暴露在公网，请用只读、只能读 `hetu:nodes` 的用户，并打出建用户的命令 |
-| 不带口令也能连上：去掉地址里的用户名、口令另连一次，PING 得通（地址里本来就没口令时直接算） | 告警：default 用户没设口令时，网关被攻破的话攻击者直接用它，只读用户形同虚设。请给 default 设口令或禁用它（master 和每台副本都要设） |
+| HGETALL 没有收到 MOVED / ASK / CLUSTERDOWN（连的不是原生集群） | 退出（2）：第一版不支持原生集群，请经代理层连（§13）。恰好连到持有这个 key 的分片主节点时查不出来；之后槽位迁走了，运行时读失败的错误日志里同样这么说 |
+| HGETALL 没有收到 MASTERDOWN（副本和 master 断开、配了 `replica-serve-stale-data no`） | 退出（3）：等它重新连上 master，或者指向别的副本。redis-py 把 MASTERDOWN 归成集群错误的子类，要单独认 |
+| 权限是不是太大：HGETALL 一个注册表以外的 key、执行一条无害的管理命令（`CONFIG GET maxmemory`） | 没被拒绝就告警：网关暴露在公网，请用只读、只能读 `hetu:nodes` 的用户，并打出建用户的命令 |
+| 不带口令也能连上：去掉地址里（含查询串里）的用户名、口令另连一次，PING 得通（地址里本来就没口令时直接算） | 告警：default 用户没设口令时，网关被攻破的话攻击者直接用它，只读用户形同虚设。请给副本的 default 设口令或禁用它；要给 master 也设，先在各副本上配好 `masterauth`（禁用 default 时还有 `masteruser`） |
 | 连的是不是 master（`ROLE`，被 ACL 拒绝就跳过这条） | 是 master 就告警，请指向副本 |
 | `--listen` 是回环地址 | 不是就告警：别人也能查到节点地址 |
 | bind 成功 | 失败（比如端口被占）就退出（3） |
@@ -561,3 +562,34 @@ Docker Desktop（WSL2）的虚拟机里全用 host 网络：dummy 网卡上的 1
 | `hetu dns --once`、`hetu nodes` | 报告和汇总都对；全程 `hetu dns` 和节点的日志里没有告警、错误 |
 
 没测的：k8s 的 hostNetwork、AWS / 阿里云上真实的伸缩组和安全组、多个网关。
+
+## 17. 实现审查（2026-11-16，PR #237）
+
+两路独立审查，只给代码、设计稿和项目约定：正确性一路（没有高级问题，9 条），接口、文档、测试一路（23 条，高 2，
+做了 16 处变异检查，9 处原来的测试抓不到）。逐条核实后都成立，按问题分步修：
+
+| 提交 | 改了什么 | 来源 |
+|---|---|---|
+| `fix(discovery)` MASTERDOWN | redis-py 的 MasterDownError 是 ClusterDownError 的子类，原来被当成原生集群（以 2 退出）。单独认，以 3 退出 | 正确性 |
+| `fix(discovery)` 重算循环 | 循环只靠 refresh 接住读 Redis 的错，别的异常会让它静默停掉、一直答旧的答案；嵌套很深的登记让 msgspec 抛 RecursionError。循环接住任何异常，RecursionError 当成解析不了 | 正确性 |
+| `fix(discovery)` 过期判断 | 改成按 ts 有没有往前走（§4.5）：经代理轮询的副本里有一台断开了、还在给旧数据时，死节点的值来回变，按值变化判断会永远算活着。时钟差只在看到新写入时判断，原来死节点的旧登记、别的 namespace 的登记每次启动都误报 | 两路都提了时钟差；轮询副本是正确性的推断 |
+| `fix(discovery)` 状态计数 | hetu nodes 的各状态计数放进 `states` 子字典，状态名撞上 versions 等键时原来会崩 | 正确性 |
+| `fix` 地址打码 | Redis 客户端连不上时的报错、keyspace 通知没权限的告警带着明文口令（hetu nodes 的 JSON、hetu get、hetu start 的日志）。新增 `mask_url_password`，查询串里的 password 也打码 | 接口（口令泄漏）、正确性（查询串） |
+| `fix(discovery)` Redis 地址 | 地址写错时 from_url 抛 ValueError，原来以 1 退出、打 traceback，改成 2；匿名访问的检查认查询串里的口令；告警文案收紧（default 收紧了权限时不说"什么都能做"，给 master 设口令要先配 masterauth） | 两路 |
+| `fix(discovery)` 写入限时 | 登记循环的 HSET 原来不限时，看过围栏之后可能拖过 5 秒余量才落地 | 正确性（推断） |
+| `fix(discovery)` 开服检查 | iflink 为 0 的隧道不算 veth；认得 lxdbr、incusbr；从 0.0.0.0 推出来、落在虚拟网卡上时，说明里加上"已经是 host 网络就在 LISTEN 里写明 IP"（k8s hostNetwork 加 CNI 的虚拟网卡） | 正确性（WSL 里 unshare 实测） |
+| `fix(discovery)` RFC 细节 | 两条 OPT 回 FORMERR、EDNS 版本不是 0 回 BADVERS、名字最长 255 字节 | 正确性 |
+| `fix(discovery)` 启动和退出 | 常驻时一开始就装信号处理（PID 1）；--once 被 Ctrl+C 打断以 130 退出；--once 的告警只打在报告里、读失败如实报；--listen localhost 算回环、绑定时按 IPv4；权限过大的检查加上管理命令 | 两路 |
+| `fix(discovery)` 报错说明 | hetu nodes 找不到配置时只提它接受的参数；DISCOVERY、PROXIES_COUNT 是字符串时说清楚 | 接口 |
+| `test(discovery)` 覆盖 | 探测不通的地址不答（原来那条登记在别的 namespace，探测整段没测到）、关服被打断不重复等、绑定失败以 3 退出、hetu nodes 默认读 servant、检查没过不开服、按 HETU_TEST_BACKENDS 跳过；别名标签、没有路由时跳过 | 接口（变异检查） |
+| `test(packaging)` | 打包测试改用 `PurePosixPath.full_match`，同 setuptools 的 glob（fnmatch 的 * 会跨目录） | 接口 |
+| `fix(discovery)` i18n | ACL 命令的口令占位跟着语言走；报告里的标点可翻译；文档里的 ACL 命令有测试对照 | 接口 |
+| `docs` | ACL 用户要持久化（ACL SAVE / CONFIG REWRITE）；节点的 docker run 示例带上 `--stop-timeout 70`；"大批玩家同时重连"一条里前后矛盾的说法 | 接口 |
+| `docs(discovery)` | 公开的类和函数补上英文 docstring | 接口 |
+
+没改的：
+
+- rootless Docker / Podman（slirp4netns 的 tap0，iflink 等于 ifindex）的"host 网络"其实连不到，认不出来，靠
+  hetu dns 的探测兜底（正确性）。
+- `hetu get` 等命令连不上 Redis 时以 1 退出、带 traceback（原来就有的问题，内置的 ConnectionError 没映射到
+  环境未就绪）。口令已经在源头打码，退出码没改（接口）。

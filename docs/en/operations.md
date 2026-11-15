@@ -212,10 +212,12 @@ PROXIES_COUNT: 1        # nodes sit behind the gateway: take the player's addres
 LISTEN: 0.0.0.0:2466    # every node uses the same port
 ```
 
-Run on the host network (no `-p`):
+Run on the host network (no `-p`). With node discovery on, shutdown takes 4
+more seconds for the deregistration wait; set the stop grace period as described
+in "Shutting down" below:
 
 ```bash
-docker run -d --restart always --network host --name game-srv my-game
+docker run -d --restart always --network host --stop-timeout 70 --name game-srv my-game
 ```
 
 **Only the host network is supported.** On a bridge network a node only sees
@@ -311,6 +313,13 @@ replicated; on a managed Redis, create the account in the console), and add
 ACL SETUSER hetu-dns on >password resetkeys ~hetu:nodes resetchannels -@all +hgetall +ping
 ```
 
+`ACL SETUSER` only changes memory, so persist the user: run `ACL SAVE` if you use
+an `aclfile`, or `CONFIG REWRITE` if your users live in redis.conf. Otherwise the
+user is gone once the replica restarts: a running `hetu dns` can no longer read
+the registry and keeps answering its last result, so new nodes can't get in and
+dead ones aren't dropped, and a restarted `hetu dns` exits with code 3. Accounts
+created in a managed Redis's console need nothing.
+
 Give the replica's default user a password too, or disable it. The gateway has to
 reach the replica's Redis port, and if the default user needs no password, an
 attacker who gets into the gateway simply uses it: they can read all the data and
@@ -369,10 +378,11 @@ Troubleshooting:
   (`LISTEN_BACKLOG`); on Linux it is also capped by `net.core.somaxconn`
   (4096 by default since kernel 5.4). Raise both if one machine takes more
   connections at once. The SDK adds random jitter to its reconnect delay,
-  which spreads out players who dropped at the same moment. Planned shutdowns
-  and restarts never get a node skipped (a node registers only once it is
-  serving, and stops listening only after Caddy has dropped it); only crashed
-  or killed nodes do.
+  which spreads out players who dropped at the same moment. Also, since a node
+  registers only once it is serving and stops listening only after Caddy has
+  dropped it, planned shutdowns and restarts never get a node skipped for
+  refusing a connection; connection timeouts from an overflowing listen queue
+  still can.
 - **The gateway is a single point of failure.** Use a stable machine; if it
   goes down, players reconnect automatically. At larger scale, add gateways
   behind your cloud's load balancer. If `hetu dns` dies, new connections can't
