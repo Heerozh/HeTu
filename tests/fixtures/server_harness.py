@@ -22,6 +22,7 @@ it, so tests never touch the web framework directly.
 
 import asyncio
 import logging
+import socket
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -32,6 +33,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from hetu.server import pipeline
 from hetu.server.adapters import aiohttp_app
+from hetu.server.config import listen_backlog
 
 logger = logging.getLogger("HeTu.root")
 
@@ -167,8 +169,9 @@ class ServerHarness:
     一个 HeTu 服务的测试封装，语义见模块说明。
 
     `config` 是起服时用的配置，可以在调用 `websocket()` / `get()` 之前修改。`runtime` 是本次（或
-    上一次）起服的 `WorkerRuntime`。每次调用都新建事件循环（Linux / macOS 上是 uvloop）和
-    `AiohttpServer`，runtime 和 `web.Application` 跟着新建：一个 Application 只能绑定一个事件循环。
+    上一次）起服的 `WorkerRuntime`，`listen_socket` 是本次起服的监听 socket（没在跑时是 None）。
+    每次调用都新建事件循环（Linux / macOS 上是 uvloop）和 `AiohttpServer`，runtime 和
+    `web.Application` 跟着新建：一个 Application 只能绑定一个事件循环。
     """
 
     def __init__(
@@ -178,6 +181,7 @@ class ServerHarness:
     ):
         self._config = aiohttp_app.prepare(config)
         self._runtime: Any = None
+        self._listen_socket: socket.socket | None = None
         self.routine_timeout = routine_timeout
 
     @property
@@ -188,13 +192,19 @@ class ServerHarness:
     def runtime(self) -> Any:
         return self._runtime
 
+    @property
+    def listen_socket(self) -> socket.socket | None:
+        return self._listen_socket
+
     def _run(self, body: Callable[[str], Awaitable[Any]]) -> Any:
         """新建事件循环，开服，跑 body("127.0.0.1:端口")，再关服。返回 body 的返回值"""
 
         async def main() -> Any:
             server = aiohttp_app.AiohttpServer(self._config)
             self._runtime = server.runtime
-            sock = aiohttp_app.bind_socket("127.0.0.1:0")
+            # 同 hetu start：按配置的监听队列长度 bind
+            sock = aiohttp_app.bind_socket("127.0.0.1:0", listen_backlog(self._config))
+            self._listen_socket = sock
             try:
                 await server.start(sock)
                 try:
@@ -202,6 +212,7 @@ class ServerHarness:
                 finally:
                     await server.stop()
             finally:
+                self._listen_socket = None
                 sock.close()
 
         with asyncio.Runner(loop_factory=aiohttp_app.new_event_loop) as runner:

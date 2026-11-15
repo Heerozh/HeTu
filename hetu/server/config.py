@@ -14,9 +14,11 @@ HeTu server config: a dict with attribute access, independent of the web framewo
 from collections.abc import Mapping
 from typing import Any
 
+from ..i18n import _
+
 # 原来由 Sanic 读取、迁移后仍保留的键，HeTu 自己给默认值（和 Sanic 25.12 的默认值等价，只有
 # PROXIES_COUNT 用 0 代替 None，都表示不解析），免得换框架时默认值悄悄变掉。DEBUG 也给个默认值：
-# 配日志、建事件循环时要按它
+# 配日志、建事件循环时要按它。LISTEN_BACKLOG 是新加的，原来写死在代码里（Sanic 100，aiohttp 128）
 DEFAULTS: dict[str, Any] = {
     "DEBUG": False,
     # 关服时等连接拆完、等后台任务停下各自的上限（秒）
@@ -34,7 +36,27 @@ DEFAULTS: dict[str, Any] = {
     "FORWARDED_FOR_HEADER": "X-Forwarded-For",
     # HTTP 请求体的最大字节数，只影响 define_route
     "REQUEST_MAX_SIZE": 100_000_000,
+    # 监听队列长度（listen 的 backlog）：已经完成 TCP 握手、还没被 worker 接走的连接最多排多少个。
+    # 大批客户端同时重连时，排不下的握手被内核丢掉，客户端要退避重传。内核会截到
+    # net.core.somaxconn（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §12.4）
+    "LISTEN_BACKLOG": 2048,
 }
+
+
+def listen_backlog(config: Mapping[str, Any]) -> int:
+    """
+    配置里的监听队列长度 `LISTEN_BACKLOG`，不是正整数时抛 ValueError。
+
+    The listen backlog (`LISTEN_BACKLOG`) from the config; raises ValueError unless it
+    is a positive integer.
+    """
+    value = config.get("LISTEN_BACKLOG", DEFAULTS["LISTEN_BACKLOG"])
+    # bool 是 int 的子类，`LISTEN_BACKLOG: true` 不能当成 1
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            _("LISTEN_BACKLOG 必须是正整数，现在是 {value!r}").format(value=value)
+        )
+    return value
 
 
 class HeTuConfig(dict[str, Any]):

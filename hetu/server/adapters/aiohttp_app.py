@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import socket
+import sys
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
@@ -32,7 +33,7 @@ import hetu
 from ... import webext
 from ...endpoint import connection
 from ...i18n import _
-from ..config import HeTuConfig
+from ..config import DEFAULTS, HeTuConfig, listen_backlog
 from ..conn import ConnectionClosed, Draining, next_conn_id
 from ..forwarded import client_ip
 from ..receiver import close_connection
@@ -62,6 +63,8 @@ SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 # Windows 上每隔多久叫醒一次事件循环（秒）：selector 事件循环等 I/O 时 Python 收不到信号，Ctrl+C
 # 要等它醒来才生效
 WINDOWS_WAKEUP_INTERVAL = 0.1
+# Linux 内核的监听队列上限，listen 的 backlog 超过它会被截短
+SOMAXCONN_PATH = "/proc/sys/net/core/somaxconn"
 
 
 class WorkerControl(Protocol):
@@ -382,8 +385,10 @@ class AiohttpServer:
         `StartupAborted` 原样抛出；开始监听这一步失败时先关服（释放租约、关后端）再抛出。
         """
         # 先建 app：用户的回调（webext）出错时还没连后端、没跑启动 System，马上就能报出来，不用等开完服，
-        # 启动 System 也不会已经写过数据。同原来 Sanic 的时机（建 app 时，后端还没连）
+        # 启动 System 也不会已经写过数据。同原来 Sanic 的时机（建 app 时，后端还没连）。监听队列长度
+        # 也在连后端之前读，配错了马上报
         app = build_app(self)
+        backlog = listen_backlog(self.config)
         await self.runtime.start()
         try:
             self._runner = web.AppRunner(
@@ -395,7 +400,9 @@ class AiohttpServer:
                 shutdown_timeout=SHUTDOWN_TIMEOUT,
             )
             await self._runner.setup()
-            self._site = web.SockSite(self._runner, sock)
+            # aiohttp 开始监听时会按这里的 backlog 再 listen 一次，不传就用它的默认值 128，把
+            # bind_socket 设的覆盖掉（设计稿 §12.4）
+            self._site = web.SockSite(self._runner, sock, backlog=backlog)
             await self._site.start()
         except BaseException:
             await self.stop()
@@ -554,12 +561,15 @@ def finish_prepare(config: HeTuConfig) -> None:
     setup_message_pipeline(config)
 
 
-def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
+def bind_socket(
+    listen: str, backlog: int = DEFAULTS["LISTEN_BACKLOG"]
+) -> socket.socket:
     """
     按 LISTEN（host:port）建好监听 socket，端口冲突等错误在这里就抛出，不会先跑一遍开服。和原来 Sanic
     的 bind_socket 一样：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上
     不设 SO_REUSEADDR：那里设了它，端口冲突报的是 10013（WSAEACCES）而不是 10048，会被当成端口落在
-    excludedportrange 里、打出误导的提示（Win11 实测，设了也抢不到别的进程正在监听的同一个地址）
+    excludedportrange 里、打出误导的提示（Win11 实测，设了也抢不到别的进程正在监听的同一个地址）。
+    backlog 是监听队列长度（LISTEN_BACKLOG），开服时 aiohttp 还会按同一个值再 listen 一次
     """
     host, port = listen.rsplit(":", 1)
     host = host.strip("[]")
@@ -576,7 +586,27 @@ def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
     except BaseException:
         sock.close()
         raise
+    _warn_if_backlog_capped(backlog)
     return sock
+
+
+def _warn_if_backlog_capped(backlog: int) -> None:
+    """Linux 内核把监听队列截到 net.core.somaxconn，截短了就提示一句（5.4 之前的内核默认只有 128）"""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        with open(SOMAXCONN_PATH, encoding="ascii") as f:
+            somaxconn = int(f.read())
+    except OSError, ValueError:
+        return
+    if somaxconn < backlog:
+        logger.warning(
+            _(
+                "⚠️ [📡Server] 监听队列 LISTEN_BACKLOG={backlog} 被内核截到了 "
+                "net.core.somaxconn={somaxconn}，大批客户端同时重连时排不下的握手会被丢掉，"
+                "建议调大 net.core.somaxconn"
+            ).format(backlog=backlog, somaxconn=somaxconn)
+        )
 
 
 def new_event_loop() -> asyncio.AbstractEventLoop:
