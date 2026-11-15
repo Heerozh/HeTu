@@ -3,8 +3,7 @@
 真实 WebSocket RPC 基准；固定客户端源码，避免把客户端优化算作服务端收益。
 Run with --help. Requires an isolated Redis database. Logs/results go to --output.
 
---http-server 选服务器的 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）。--perf 让每个窗口
-另用 perf stat 数服务器的 user 态周期和指令，并给出运行频率相对 TSC 的倍数（cycles / ref-cycles，
+--perf 让每个窗口另用 perf stat 数服务器的 user 态周期和指令，并给出运行频率相对 TSC 的倍数（cycles / ref-cycles，
 用来确认两次运行的频率一样；scaling_cur_freq 掺了空闲时的读数，不是运行频率）。
 每个窗口还记下服务器那个核在 /proc/stat 里的空闲、软中断占比（loopback 收包的软中断不算进进程的
 CPU 时间），以及每次 RPC 的读写类系统调用数。
@@ -51,11 +50,6 @@ def parse_args():
     parser.add_argument("--warmup", type=float, default=3)
     parser.add_argument("--server-cpu", type=int, default=3)
     parser.add_argument("--client-cpus", default="4,6,8,10")
-    parser.add_argument(
-        "--http-server",
-        choices=("sanic", "aiohttp"),
-        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
-    )
     parser.add_argument("--perf", action="store_true")
     parser.add_argument(
         "--rate",
@@ -282,7 +276,7 @@ BACKENDS:
     type: Redis
     master: {args.redis}
 """)
-    env = dict(os.environ, PYTHONPATH=str(root), HETU_HTTP_SERVER=args.http_server)
+    env = dict(os.environ, PYTHONPATH=str(root))
     cmd = [sys.executable, "-m", "hetu", "start", "--config", str(config)]
     if args.profile:
         cmd = [

@@ -1,7 +1,7 @@
 """
 sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 worker），用真实 WebSocket
 客户端（jsonb + zlib + crypto 全套 pipeline）订阅，测量**含 WebSocket 推送在内**的每次
-交付成本，与 sub_budget.py 的进程内数字对照，差值就是 Sanic/ws/pipeline 那一段。
+交付成本，与 sub_budget.py 的进程内数字对照，差值就是 Web 服务器/ws/pipeline 那一段。
 
 模型与 sub_budget.py 相同（Z 个 zone × S 行，C 个连接均摊，扇出 K=C/Z，写进程直写）。
 服务器 worker 的 CPU 用 psutil 读子进程树；交付数和延迟由客户端进程统计。
@@ -251,12 +251,6 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=15)
     ap.add_argument("--tag", default="")
     ap.add_argument(
-        "--http-server",
-        choices=("sanic", "aiohttp"),
-        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
-        help="服务器用哪个 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）",
-    )
-    ap.add_argument(
         "--server-cpus", default="", help="服务器绑这些核（taskset -c 的写法）"
     )
     ap.add_argument("--client-cpus", default="", help="客户端进程绑这些核（逗号分隔）")
@@ -271,7 +265,7 @@ def main() -> None:
 
     # 起服务器
     cfg = write_config(args, workdir)
-    env = dict(os.environ, PYTHONUTF8="1", HETU_HTTP_SERVER=args.http_server)
+    env = dict(os.environ, PYTHONUTF8="1")
     server_log = open(os.path.join(workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115 进程结束后再关
     taskset = ["taskset", "-c", args.server_cpus] if args.server_cpus else []
     server = subprocess.Popen(
@@ -443,7 +437,6 @@ def main() -> None:
         "lat_p99_ms": round(base.pct(lat, 0.99) * 1000, 1),
         "lat_max_ms": round(max(lat, default=float("nan")) * 1000, 1),
         "tag": args.tag,
-        "http_server": args.http_server,
         "server_log": os.path.join(workdir, "server.log"),
     }
     width = max(len(k) for k in res)
