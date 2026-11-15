@@ -16,6 +16,7 @@ from .call import CallCommand
 from .data import GetCommand, RangeCommand
 from .init import InitCommand
 from .migrate import MigrateCommand
+from .nodes import NodesCommand
 from .shell import ShellCommand
 from .start import StartCommand
 
@@ -29,6 +30,7 @@ COMMANDS = [
     GetCommand,
     RangeCommand,
     ShellCommand,
+    NodesCommand,
 ]
 
 

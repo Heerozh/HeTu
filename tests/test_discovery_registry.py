@@ -7,6 +7,9 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -494,3 +497,56 @@ def test_embedded_start_runs_the_checks_itself(tmp_path, redis_urls, clean_regis
         assert await io.hlen(REGISTRY_KEY) == 0
 
     run_server(config, scenario)
+
+
+# ---------------------------------------------------------------- hetu nodes
+
+
+def run_nodes(*args: str, cwd) -> tuple[int, dict]:
+    env = {k: v for k, v in os.environ.items() if k != "HETU_CONFIG"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "hetu", "nodes", *args],
+        cwd=cwd,
+        capture_output=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    lines = proc.stdout.decode("utf-8").splitlines()
+    assert len(lines) == 1, (proc.stdout, proc.stderr.decode("utf-8", "replace"))
+    return proc.returncode, json.loads(lines[0])
+
+
+@pytest.mark.timeout(60)
+def test_nodes_command_summarizes_the_registry(tmp_path, redis_urls):
+    import redis as sync_redis
+
+    master, _replica = redis_urls
+    now = time.time()
+    io = sync_redis.Redis.from_url(master)
+    io.hset(
+        REGISTRY_KEY,
+        mapping={
+            "0": encode_entry(make_entry(ts=now, conns=3)),
+            "1": encode_entry(make_entry(ts=now, conns=4, state=STATE_DRAINING)),
+            "2": encode_entry(make_entry(addr="10.0.3.18", ts=now - 100)),
+            "x": b"garbage",
+        },
+    )
+    io.close()
+    code, out = run_nodes("--db", master, "--master", cwd=tmp_path)
+    assert code == 0, out
+    assert out["ok"] is True
+    assert out["read_from"] == "master"
+    (node,) = out["nodes"]
+    assert (node["addr"], node["port"], node["workers"]) == ("10.0.3.17", 2466, 2)
+    assert (node[STATE_READY], node[STATE_DRAINING], node["conns"]) == (1, 1, 7)
+    assert [s["worker_id"] for s in out["stale"]] == [2]
+    assert [i["field"] for i in out["invalid"]] == ["x"]
+    assert out["namespaces"] == ["game"]
+
+
+def test_nodes_command_needs_redis(tmp_path):
+    code, out = run_nodes("--db", f"sqlite:///{tmp_path / 'x.db'}", cwd=tmp_path)
+    assert code == 2
+    assert "Redis" in out["error"]
