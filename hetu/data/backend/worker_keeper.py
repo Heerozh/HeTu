@@ -19,7 +19,6 @@ from ...common.helper import (
 )
 from ...common.permission import Permission
 from ...common.snowflake_id import (
-    FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
     TOOL_WORKER_ID_FLOOR,
     WORKER_ID_EXPIRE_SEC,
@@ -159,7 +158,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
             WORKER_ID_EXPIRE_SEC,
         )
         if mine:
-            self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+            self.arm_fence(started_at)
         return bool(mine)
 
     @override
@@ -176,9 +175,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
                 self._token,
                 WORKER_ID_EXPIRE_SEC,
             ):
-                self.lease_deadline = (
-                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
-                )
+                self.arm_fence(started_at)
                 self.worker_id = worker_id
                 logger.info(
                     _(

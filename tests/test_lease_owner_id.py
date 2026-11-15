@@ -49,7 +49,7 @@ def new_node(monkeypatch, tmp_path):
 
 @pytest.fixture
 def fast_reuse(monkeypatch):
-    """确认旧租约没人续约的等待从 7 秒缩到 1 秒，测试不用等那么久"""
+    """确认旧租约没人续约的等待从 20 秒缩到 1 秒，测试不用等那么久"""
     from hetu.data.backend.redis import worker_keeper
 
     monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
@@ -235,13 +235,16 @@ async def test_containers_sharing_hostname_get_their_own_worker_ids(
 @use_redis_family_backend_only
 async def test_stale_lease_is_taken_over_without_waiting(mod_auto_backend, new_node):
     """重启前的进程早就没在续约了（比如 10 秒前就死了）：不用等，马上接回原来的 id"""
+    from hetu.common.snowflake_id import REUSE_STALE_SEC, WORKER_ID_EXPIRE_SEC
     from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
     aio = mod_auto_backend().master.aio
     new_node("container-a")
     dead = RedisWorkerKeeper(1, aio)
     worker_id = await dead.get_worker_id()
-    await aio.pexpire(dead._key(worker_id), 50_000)  # 最后一次续约在 10 秒前
+    # 最后一次续约在 REUSE_STALE_SEC + 5 秒前
+    remaining = WORKER_ID_EXPIRE_SEC - REUSE_STALE_SEC - 5
+    await aio.pexpire(dead._key(worker_id), remaining * 1000)
 
     new_node("container-a")
     restarted = RedisWorkerKeeper(1, aio)
@@ -256,7 +259,7 @@ async def test_stale_lease_is_taken_over_without_waiting(mod_auto_backend, new_n
 @posix_only
 @use_redis_family_backend_only
 async def test_live_twin_lease_is_not_taken_over(
-    mod_auto_backend, new_node, fast_reuse
+    mod_auto_backend, new_node, fast_reuse, caplog
 ):
     """
     标识撞了的两个进程（比如 token 文件被打进了镜像），先起的那个还活着、照常续约：后起的不能把它的 id 当成
@@ -276,6 +279,11 @@ async def test_live_twin_lease_is_not_taken_over(
             assert await twin.get_worker_id() != id_alive
         assert not lost
         await alive.keep_alive()
+        # 标识撞了是部署的问题，打 ERROR
+        assert any(
+            record.levelno == logging.ERROR and "还有进程在续约" in record.getMessage()
+            for record in caplog.records
+        )
     finally:
         await alive.release_worker_id()
         await twin.release_worker_id()
@@ -310,6 +318,81 @@ async def test_restart_waits_once_for_all_same_identity_leases(
     finally:
         for keeper in keepers:
             await keeper.release_worker_id()
+
+
+def test_lease_timing_invariants():
+    """
+    同标识的进程最早在"距上次续约 REUSE_STALE_SEC 秒"时接手，那时原来的持有者不管是死是活都必须已经
+    停止发号：发号围栏的安全期要比它短，并留出两边时钟的偏差；不同标识的要等 key 过期，更晚。安全期至少
+    要挺得过一次续约失败
+    """
+    from hetu.common.snowflake_id import (
+        LEASE_SAFE_SEC,
+        RENEW_INTERVAL,
+        REUSE_STALE_SEC,
+        WORKER_ID_EXPIRE_SEC,
+    )
+
+    assert LEASE_SAFE_SEC + 5 <= REUSE_STALE_SEC < WORKER_ID_EXPIRE_SEC
+    assert LEASE_SAFE_SEC >= 2 * RENEW_INTERVAL
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_takeover_only_after_old_holder_stopped_minting(
+    mod_auto_backend, new_node, monkeypatch
+):
+    """
+    标识撞了的两个进程，先起的那个还活着、只是停了续约（卡住了）：后起的接手同一个 id 的时候，先起的那个
+    的发号围栏一定已经关了，两边不会一起发号；它醒来续约发现租约丢了。两个时长按比例缩小（安全期 1.5 秒、
+    接手门槛 2 秒），真实取值的关系见 test_lease_timing_invariants
+    """
+    from hetu.common import snowflake_id
+    from hetu.data.backend.redis import worker_keeper
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    monkeypatch.setattr(snowflake_id, "LEASE_SAFE_SEC", 1.5)
+    monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 2)
+    aio = mod_auto_backend().master.aio
+    new_node("baked")
+    stalled = RedisWorkerKeeper(1, aio)
+    new_node("baked")
+    twin = RedisWorkerKeeper(1, aio)
+    assert twin.identity == stalled.identity
+    try:
+        worker_id = await stalled.get_worker_id()
+        assert stalled.lease_deadline is not None
+        assert time.monotonic() <= stalled.lease_deadline  # 刚拿到，能发号
+        assert await twin.get_worker_id() == worker_id  # 它不续约，被当成死的接手
+        assert time.monotonic() > stalled.lease_deadline  # 但这时它早就不发号了
+        with pytest.raises(SystemExit):
+            await stalled.keep_alive()
+    finally:
+        await twin.release_worker_id()
+
+
+@posix_only
+@use_redis_family_backend_only
+async def test_takeover_wait_is_capped(mod_auto_backend, new_node, fast_reuse):
+    """
+    标识相同的租约剩余 TTL 比满值还长（手动设过更长的过期、主从切换后两边时钟差）：最多等
+    REUSE_STALE_SEC，到时候还没"过期"就当它还有人在续，另拿一个
+    """
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+
+    aio = mod_auto_backend().master.aio
+    new_node("baked")
+    odd = RedisWorkerKeeper(1, aio)
+    restarted = RedisWorkerKeeper(1, aio)
+    key = odd._key(950)
+    await aio.set(key, odd.node_id, ex=300)
+    started = time.monotonic()
+    try:
+        assert await restarted.get_worker_id() != 950
+        assert time.monotonic() - started < 2
+    finally:
+        await restarted.release_worker_id()
+        await aio.delete(key)
 
 
 @posix_only

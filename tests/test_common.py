@@ -470,8 +470,8 @@ async def test_restart_resumes_from_snowflake_watermark(
     await runtime.snowflake_lease.stop_loops()
     await runtime.default_backend.close()
 
-    # 崩溃后马上重启，要确认旧租约没人续约了才接回同一个 worker id（水位是按 id 存的），默认等 7 秒，
-    # 这里缩到 1 秒
+    # 崩溃后马上重启，要确认旧租约没人续约了才接回同一个 worker id（水位是按 id 存的），默认最多等
+    # REUSE_STALE_SEC（20）秒，这里缩到 1 秒
     from hetu.data.backend.redis import worker_keeper
 
     monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
@@ -483,7 +483,7 @@ async def test_restart_resumes_from_snowflake_watermark(
 
 async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
     """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
-    WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC（45）秒后跳闸，而之后的启动 System 最长能跑
+    LEASE_SAFE_SEC（15）秒后跳闸，而之后的启动 System 最长能跑
     STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
     runtime = _server_runtime(mod_backend_config)
     await runtime.start_backends()
@@ -724,11 +724,8 @@ async def test_snowflake_lease_fence():
 @use_redis_family_backend_only
 async def test_redis_keeper_arms_fence(mod_auto_backend):
     """Redis租约必须武装围栏，且安全期要留出余量、抢到的那一刻就生效"""
-    from hetu.data.backend.redis.worker_keeper import (
-        FENCE_MARGIN_SEC,
-        WORKER_ID_EXPIRE_SEC,
-        RedisWorkerKeeper,
-    )
+    from hetu.common.snowflake_id import LEASE_SAFE_SEC
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
     redis = mod_auto_backend()
     redis_client = redis.master.aio
@@ -742,10 +739,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     await keeper.get_worker_id()
     # 抢到就武装，不用等第一次续约（那要5秒后）
     assert keeper.lease_deadline is not None
-    # 安全期必须早于Redis侧的过期时刻，留出余量给时钟漂移。用发起请求前的时刻算，所以
-    # 它一定不晚于 "现在 + TTL - 余量"
+    # 安全期必须早于同标识的进程能接手的时刻（见 LEASE_SAFE_SEC）。用发起请求前的时刻算，所以
+    # 它一定不晚于 "现在 + LEASE_SAFE_SEC"
     now = time.monotonic()
-    assert keeper.lease_deadline <= now + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+    assert keeper.lease_deadline <= now + LEASE_SAFE_SEC
     assert keeper.lease_deadline > now
 
     # 续约成功要推进安全期

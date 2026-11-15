@@ -191,7 +191,7 @@ class SnowflakeLease:
         """
         `acquire` 之后立刻起续约和水位预留两个循环；续约发现租约丢失时调用 `on_lost`。
 
-        不能晚起：发号围栏在拿到租约 WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC 秒后跳闸，之后的
+        不能晚起：发号围栏在拿到租约 LEASE_SAFE_SEC 秒后跳闸，之后的
         初始化（服务器的启动 System 最长能跑 STARTUP_TIMEOUT 秒）跑久了就会发不出号。
         """
         assert self.ts_keeper is not None, "acquire() first"

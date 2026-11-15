@@ -41,11 +41,19 @@ TIME_ROLLBACK_TOLERANCE_MS = 10_000  # 允许的时间回拨容忍度，单位�
 WORKER_ID_EXPIRE_SEC = 60
 # 租约 key 的前缀，完整 key 是 f"{WORKER_ID_KEY}:{worker_id}"
 WORKER_ID_KEY = "snowflake:worker"
-# 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
-# 数据库时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
-FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
-# 续约间隔（秒）。租约 TTL 60 秒、围栏余量 15 秒，5 秒一次留足了重试的余地
+# 续约间隔（秒）
 RENEW_INTERVAL = 5
+# 接手持有者标识相同的租约（多半是自己重启前留下的）之前，要确认它这么多秒没被续约，见
+# RedisWorkerKeeper 的"复用"。非正常退出后马上重启的，开服最多因此多等这么久
+REUSE_STALE_SEC = 20
+# 发号围栏的安全期（秒）：每次确认"租约还是我的"（抢到、接手、续约成功）之后，只在这么久之内发号，
+# 见 SnowflakeID._check_lease_fence。它必须比 REUSE_STALE_SEC 短：同标识的进程最早在"距上次续约
+# REUSE_STALE_SEC 秒"时接手，那时原来的持有者不管是死是活都已经停止发号，标识撞了也不会撞号。短的这
+# 5 秒覆盖本机单调时钟和 Redis 时钟的偏差（Redis 的过期按它自己的墙上时钟走）。不同标识的进程要等 key
+# 过期（WORKER_ID_EXPIRE_SEC）才能拿走，余量更大。
+# 代价：续约失败、或者事件循环被同步代码堵住，超过 LEASE_SAFE_SEC - RENEW_INTERVAL（10）秒就会暂时
+# 发不出号（报 WorkerLeaseExpired），直到下一次续约成功
+LEASE_SAFE_SEC = REUSE_STALE_SEC - 5
 # hetu call / shell 这类工具进程持有的租约，node_id 带这个前缀，hetu upgrade 据此认出来
 TOOL_NODE_PREFIX = "cli:"
 # SQLite 后端给工具进程预留的 worker id 段 [TOOL_WORKER_ID_FLOOR, MAX_WORKER_ID]：SQLite 上的
@@ -264,14 +272,24 @@ class WorkerKeeper:
         # None 表示"本分配器不提供租约"，围栏随之停用——开发模式的 FixedWorkerKeeper 用
         # 本机进程序号，根本不存在被抢的概念，不需要也无法武装围栏。
         #
-        # 算法（由提供租约的子类维护）：
-        #     lease_deadline = 发起续约前的 monotonic 时刻 + TTL - 余量
+        # 算法（由提供租约的子类调 `arm_fence` 维护）：
+        #     lease_deadline = 发起这次确认前的 monotonic 时刻 + LEASE_SAFE_SEC
         # 必须用**发起前**而不是完成后的时刻：请求在网络上飞的这段时间，数据库那边的
-        # 过期时间已经开始走了，用完成时刻算会高估自己的安全期。余量再覆盖两边时钟漂移。
+        # 过期时间已经开始走了，用完成时刻算会高估自己的安全期。LEASE_SAFE_SEC 为什么取这个值
+        # 见它的注释。
         #
         # 确定租约已经不是自己的了（续约发现被接手、已经释放），子类调 `close_fence` 马上关掉，
         # 不等安全期过完。
         self.lease_deadline: float | None = None
+
+    def arm_fence(self, started_at: float) -> None:
+        """
+        刚确认过"租约还是我的"（抢到、接手、续约成功）：安全期从发起这次请求前的 monotonic 时刻
+        started_at 算起，持续 LEASE_SAFE_SEC 秒。
+
+        Re-arm the minting fence after confirming the lease.
+        """
+        self.lease_deadline = started_at + LEASE_SAFE_SEC
 
     def close_fence(self) -> None:
         """

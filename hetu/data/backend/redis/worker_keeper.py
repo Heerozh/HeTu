@@ -8,9 +8,8 @@ import redis.asyncio
 from ....common.helper import lease_identity, lease_owner_id, lease_value
 from ....common.helper import lease_owner_exited as _owner_exited
 from ....common.snowflake_id import (
-    FENCE_MARGIN_SEC,
     MAX_WORKER_ID,
-    RENEW_INTERVAL,
+    REUSE_STALE_SEC,
     WORKER_ID_EXPIRE_SEC,
     WORKER_ID_KEY,
     WorkerKeeper,
@@ -23,7 +22,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("HeTu.root")
 
 __all__ = [
-    "FENCE_MARGIN_SEC",
     "LUA_RELEASE_IF_MINE",
     "WORKER_ID_EXPIRE_SEC",
     "WORKER_ID_KEY",
@@ -56,10 +54,6 @@ end
 redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[4])
 return 1
 """
-
-# 接手标识相同的租约之前，要确认它至少这么多秒没被续约：活着的持有者每 RENEW_INTERVAL 秒续一次（TTL
-# 刷回满值），多留 2 秒给续约的抖动。非正常退出后马上重启的，开服最多因此多等这么久
-REUSE_STALE_SEC = RENEW_INTERVAL + 2
 
 
 def _decode(value: bytes | str | None) -> str | None:
@@ -127,15 +121,13 @@ class RedisWorkerKeeper(WorkerKeeper):
     worker id 一共 1024 个。非正常退出（kill -9、OOM、崩溃）留下的租约要等 60 秒才过期，几百个
     worker 一起非正常重启时，新旧两份加起来就可能把池子用光，所以重启后要尽量接回自己原来的 id。
     "自己原来的"按持有者标识认（`lease_owner_id`：同一个容器重启、管理进程以同一序号重启 worker 时
-    不变）。但标识相同、随机部分不同的租约，也可能属于一个标识撞了的、还活着的进程，所以接手之前
-    要确认它至少 REUSE_STALE_SEC 秒没被续约（活着的每 5 秒续一次）；还在续的不碰，另拿一个空的。
-    正常关服会释放租约，重启时没有这一步。
+    不变）。正常关服会释放租约，重启时没有这一步。
 
-    "没被续约"只能说明它停住了，不能证明它死了：一个标识撞了的进程如果整个卡住超过 REUSE_STALE_SEC
-    秒，正好赶上另一个同标识的进程开服，会被当成死的接手。它醒来后下一次续约就会发现、关围栏、退出，但在那之前
-    发出的号可能和接手的进程重复。要完全排除，得等到它的发号围栏过了（45 秒）才接手，复用就失去了意义。
-    正常情况下同一个标识的上一个进程一定已经退出了（容器重启、管理进程等旧 worker 退出才起新的），
-    只有标识撞了（token 文件被打进镜像、几个容器共用 /var/tmp）才会遇到。
+    标识相同、随机部分不同的租约，也可能属于一个标识撞了的、还活着的进程（token 文件被打进镜像、几个
+    容器共用 /var/tmp），所以要确认它至少 REUSE_STALE_SEC 秒没被续约才接手；还在续的不碰，另拿一个空的。
+    "没被续约"只能说明它停住了，不能证明它死了，不撞号靠的是发号围栏：安全期 LEASE_SAFE_SEC 比
+    REUSE_STALE_SEC 短，Redis 允许接手的时候，原来的持有者就算还活着、只是续约晚了，也已经停止发号；
+    它醒来后续约发现租约丢了，关掉围栏、退出。所以标识撞了也不会撞号，代价是接不回原来的 id、开服多等。
 
     开服时用一次 pipeline 读完所有 id 的租约，不续期。原来是逐个 `GETEX`，会把扫到的每个租约
     （包括已经死掉的）都刷回 60 秒：池子被死租约占满时，拿不到 id 的 worker 每秒重试、每次都把它们
@@ -145,14 +137,16 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 跑到之间还有最长一个
     续约周期，这期间它照样拿旧 worker_id 发号。所以每次确认"租约还是我的"时都会推进
-    `lease_deadline`（基类属性），`SnowflakeID` 在超过它之后直接拒绝发号，把这个窗口关掉。
-    见 `SnowflakeID._check_lease_fence`。标识相同时的接手不等租约过期，例外见上面"复用"。
+    `lease_deadline`（基类属性，`arm_fence`），`SnowflakeID` 在超过它之后直接拒绝发号，把这个窗口
+    关掉。见 `SnowflakeID._check_lease_fence`。安全期比同标识接手的门槛短，见上面"复用"。
 
     Redis-native worker id lease. Renew / take over / release are compare-and-swap against
     the full lease value (owner id plus a per-process random part), because lease takeover
     after expiry is a normal event and an unchecked operation silently yields duplicate
     snowflake ids. A lease left with the same owner id (a restart) is taken over only after
-    nobody has renewed it for REUSE_STALE_SEC.
+    nobody has renewed it for REUSE_STALE_SEC, which is longer than the minting fence
+    (LEASE_SAFE_SEC): by then even a live process with a colliding owner id has stopped
+    minting.
     """
 
     def __init__(
@@ -191,7 +185,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         value = await self.aio.getex(self._key(worker_id), ex=WORKER_ID_EXPIRE_SEC)
         if _decode(value) != self.node_id:
             return False
-        self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+        self.arm_fence(started_at)
         return True
 
     async def _get_tool_worker_id(self) -> int:
@@ -209,9 +203,7 @@ class RedisWorkerKeeper(WorkerKeeper):
                 self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
             )
             if result:
-                self.lease_deadline = (
-                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
-                )
+                self.arm_fence(started_at)
                 logger.info(
                     _(
                         "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
@@ -242,7 +234,12 @@ class RedisWorkerKeeper(WorkerKeeper):
         pipe = self.aio.pipeline(transaction=False)
         for worker_id in candidates:
             pipe.pttl(self._key(worker_id))
-        wait = max((pttl - stale_pttl for pttl in await pipe.execute()), default=0)
+        # 剩余 TTL 比满值还长的（手动设过更长的过期、主从切换后两边时钟差）也只等 REUSE_STALE_SEC，
+        # 到时候还没"过期"就当它还有人在续
+        wait = min(
+            max((pttl - stale_pttl for pttl in await pipe.execute()), default=0),
+            REUSE_STALE_SEC * 1000,
+        )
         if wait > 0:
             logger.info(
                 _(
@@ -263,9 +260,7 @@ class RedisWorkerKeeper(WorkerKeeper):
                 WORKER_ID_EXPIRE_SEC,
             )
             if result == 1:
-                self.lease_deadline = (
-                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
-                )
+                self.arm_fence(started_at)
                 logger.info(
                     _(
                         "[❄️ID] 接手持有者标识和本进程相同的 Worker ID: {worker_id}"
@@ -274,11 +269,12 @@ class RedisWorkerKeeper(WorkerKeeper):
                 )
                 return worker_id
             if result == -1:
-                logger.warning(
+                logger.error(
                     _(
                         "[❄️ID] Worker ID {worker_id} 的持有者标识和本进程相同，但还有进程在续约，"
-                        "不接手。可能有两个进程的持有者标识撞了（{owner}），比如节点 token 文件被"
-                        "打进了镜像，或者几个容器共用了 /var/tmp"
+                        "不接手。多半是两个进程的持有者标识撞了（{owner}）：节点 token 文件被打进了"
+                        "镜像，或者几个容器共用了 /var/tmp。不会撞号，但接不回原来的 Worker ID。"
+                        "滚动升级期间，旧版本开服时也会把它续期"
                     ).format(worker_id=worker_id, owner=old_value)
                 )
         return None
@@ -292,7 +288,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         if not result:
             return False
         # 抢到的这一刻就武装围栏，别等到第一次续约（那要5秒后）
-        self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+        self.arm_fence(started_at)
         logger.info(
             _("[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}").format(
                 worker_id=worker_id, node_id=self.node_id
