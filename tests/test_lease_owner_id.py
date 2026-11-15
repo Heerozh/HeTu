@@ -14,6 +14,7 @@ import contextlib
 import logging
 import multiprocessing
 import os
+import re
 import sys
 import time
 from types import SimpleNamespace
@@ -96,14 +97,21 @@ def test_owner_id_formats(new_node, monkeypatch):
 
 
 @posix_only
-def test_node_token_persists_per_container(new_node, monkeypatch):
-    """第一次用到时随机生成、写进文件；同一个容器重启后（新进程）读到同一个；别的容器各有各的"""
+def test_node_token_persists_per_container(new_node, monkeypatch, caplog):
+    """
+    第一次用到时随机生成、写进文件（打一条 INFO，/var/tmp 是 tmpfs 之类每次都新生成的，看日志能发现）；
+    同一个容器重启后（新进程）读到同一个；别的容器各有各的
+    """
+    caplog.set_level(logging.INFO, logger="HeTu.root")
     path_a = new_node("container-a")
     token_a = helper.node_token()
     assert path_a.read_text(encoding="ascii") == token_a
+    assert "生成了新的节点 token" in caplog.text
+    caplog.clear()
 
     monkeypatch.setattr(helper, "_node_token", None)  # 重启：新进程
     assert helper.node_token() == token_a
+    assert "生成了新的节点 token" not in caplog.text
 
     new_node("container-b")
     assert helper.node_token() not in (None, token_a)
@@ -146,9 +154,94 @@ def test_node_token_falls_back_when_not_writable(new_node, monkeypatch, caplog):
     monkeypatch.setattr(helper, "NODE_TOKEN_PATH", unwritable)
     caplog.set_level(logging.INFO, logger="HeTu.root")
 
-    assert helper.read_or_create_node_token(unwritable) is None
+    with pytest.raises(OSError):
+        helper.read_or_create_node_token(unwritable)
     assert helper.node_token()
     assert "只在本进程有效" in caplog.text
+
+
+def _plant_token_file(path, kind: str) -> bytes | None:
+    """在 token 文件的位置放一个坏的；返回放进去的内容（不是普通文件的返回 None）"""
+    contents = {
+        "empty": b"",
+        "garbage": b"hello",
+        "non_ascii": "é".encode(),
+        "separator": b"0123456789abcde#",
+    }
+    if kind in contents:
+        path.write_bytes(contents[kind])
+        return contents[kind]
+    if kind == "directory":
+        path.mkdir()
+    else:  # 指向一个内容合法的文件
+        target = path.parent / "elsewhere"
+        target.write_text(PLANTED_TOKEN, encoding="ascii")
+        path.symlink_to(target)
+    return None
+
+
+PLANTED_TOKEN = "0123456789abcdef"
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "kind", ["empty", "garbage", "non_ascii", "separator", "directory", "symlink"]
+)
+def test_bad_token_file_falls_back_with_warning(new_node, caplog, kind):
+    """
+    token 文件内容不对（空的、不是 16 位十六进制、带租约值的分隔符 "#"）、是目录、是符号链接：改用只在
+    本进程有效的 token 并告警，不动那个文件。符号链接不跟随：/var/tmp 谁都能写，别人放一个链接，就能让
+    我们把任意文件的内容当成 token 读出来，打进日志、存进 Redis
+    """
+    path = new_node("node")
+    planted = _plant_token_file(path, kind)
+    caplog.set_level(logging.WARNING, logger="HeTu.root")
+
+    token = helper.node_token()
+
+    assert token is not None and re.fullmatch(r"[0-9a-f]{16}", token)
+    assert token != PLANTED_TOKEN
+    assert "只在本进程有效" in caplog.text
+    if planted is not None:
+        assert path.read_bytes() == planted
+
+
+@posix_only
+def test_token_write_does_not_follow_planted_symlinks(new_node, monkeypatch, tmp_path):
+    """
+    写 token 的临时文件名字带随机数、用 O_EXCL 新建：别人在 /var/tmp 里事先放好同名的符号链接，也不会
+    跟着它去截断别的文件
+    """
+    victim = tmp_path / "victim"
+    victim.write_text("keep me", encoding="ascii")
+    path = new_node("node")
+    monkeypatch.setattr(helper.secrets, "token_hex", lambda n=16: "0" * (2 * n))
+    os.symlink(victim, f"{path}.{os.getpid()}.{'0' * 8}.tmp")
+
+    helper.node_token()
+
+    assert victim.read_text(encoding="ascii") == "keep me"
+
+
+@posix_only
+def test_token_is_flushed_to_disk_before_linking(new_node, monkeypatch):
+    """写完先 fsync 再硬链接到位：宿主机紧接着崩溃，也不会留下一个空的 token 文件"""
+    synced = []
+    real_fsync, real_link = os.fsync, os.link
+
+    def fsync(fd):
+        synced.append(fd)
+        real_fsync(fd)
+
+    def link(src, dst, *args, **kwargs):
+        assert synced, "硬链接之前要先 fsync"
+        real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "fsync", fsync)
+    monkeypatch.setattr(helper.os, "link", link)
+    new_node("node")
+    assert helper.node_token()
+    assert synced
 
 
 def test_lease_value_adds_per_process_part():

@@ -2,6 +2,7 @@ import contextlib
 import itertools
 import logging
 import os
+import re
 import secrets
 import sys
 import uuid
@@ -20,6 +21,8 @@ WORKER_INDEX_ENV = "HETU_WORKER_INDEX"
 NODE_TOKEN_PATH = "/var/tmp/hetu-node-token"
 # 本进程读到（或生成）的 token，第一次用到时才读
 _node_token: str | None = None
+# 节点 token 的格式：16 位小写十六进制（secrets.token_hex(8)）
+_TOKEN_RE = re.compile(r"[0-9a-f]{16}")
 # 租约值里持有者标识和本进程随机部分之间的分隔符（标识里只有冒号，见 lease_owner_id）
 LEASE_NONCE_SEP = "#"
 
@@ -136,38 +139,63 @@ def get_machine_id():
 
 
 def _read_token(path: str) -> str | None:
-    try:
-        with open(path, encoding="ascii") as f:
-            return f.read().strip() or None
-    except OSError, UnicodeDecodeError:
-        return None
-
-
-def read_or_create_node_token(path: str) -> str | None:
     """
-    读 path 里的 token；没有就随机生成一个写进去。读写都不行（只读文件系统等）返回 None。
+    读 path 里的 token。文件不存在返回 None；是符号链接、读不了、内容不是合法的 token，抛 OSError /
+    ValueError。
+
+    不跟随符号链接：/var/tmp 谁都能写，别人事先放一个指向任意文件的链接，就能让我们把那个文件的内容当成
+    token 读出来（会打进日志、存进 Redis）。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read(64)
+    token = raw.decode("ascii").strip()
+    if not _TOKEN_RE.fullmatch(token):
+        raise ValueError(
+            _("内容不是合法的节点 token: {raw}").format(raw=repr(raw[:32]))
+        )
+    return token
+
+
+def read_or_create_node_token(path: str) -> str:
+    """
+    读 path 里的 token；没有就随机生成一个写进去。读写不了、内容不对，抛 OSError / ValueError。
 
     同一个容器里的几个 worker 会同时第一次启动：各自先写自己的临时文件，再用硬链接放到 path 上。
     硬链接是原子的，path 已经存在就失败，于是只有一个写成，其余的读它的；path 一出现就是写完了的，
-    不会读到写了一半的内容。
+    不会读到写了一半的内容。写完先 fsync：宿主机紧接着崩溃，也不会留下一个空文件。
+
+    临时文件的名字带随机数、用 O_EXCL 新建：别人在 /var/tmp 里事先放好同名的符号链接，也不会跟着它去
+    截断别的文件。
     """
-    if (token := _read_token(path)) is not None:
+    token = _read_token(path)
+    if token is not None:
         return token
     token = secrets.token_hex(8)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    tmp = f"{path}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
     try:
-        with open(tmp, "w", encoding="ascii") as f:
+        with os.fdopen(fd, "w", encoding="ascii") as f:
             f.write(token)
+            f.flush()
+            os.fsync(f.fileno())
         try:
             os.link(tmp, path)
         except FileExistsError:
-            return _read_token(path)
-        return token
-    except OSError:
-        return None
+            # 同时启动的别的 worker 先写成了，用它的
+            existing = _read_token(path)
+            if existing is None:  # 刚刚还在，又被删了
+                raise
+            return existing
     finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
+    logger.info(_("[❄️ID] 生成了新的节点 token，存在 {path}").format(path=path))
+    return token
 
 
 def node_token() -> str | None:
@@ -180,8 +208,8 @@ def node_token() -> str | None:
     的容器（比如 k8s 的 containerd）认不出来，而 k8s 的 hostNetwork 正好会让多个 pod 共用主机名。
     不在容器里时，同一台机器上的进程读到的是同一个 token，靠 pid 区分，不受影响。
 
-    写不进去（只读文件系统等）时用一个只在本进程有效的随机 token：照样和别的容器区分得开，只是重启后
-    不能复用原来的 Worker ID。从跑过 HeTu 的容器 commit 镜像之前要删掉这个文件，不然从这个镜像起的
+    文件用不了（写不进去、内容不对、是符号链接）时用一个只在本进程有效的随机 token 并告警：照样和别的
+    容器区分得开，只是重启后接不回原来的 Worker ID。从跑过 HeTu 的容器 commit 镜像之前要删掉这个文件，不然从这个镜像起的
     容器都带着同一个 token。
 
     This node's token, persisted on first use (per container when containerised).
@@ -190,14 +218,16 @@ def node_token() -> str | None:
     if sys.platform == "win32":
         return None
     if _node_token is None:
-        token = read_or_create_node_token(NODE_TOKEN_PATH)
-        if token is None:
+        try:
+            token = read_or_create_node_token(NODE_TOKEN_PATH)
+        except (OSError, ValueError) as e:
             token = secrets.token_hex(8)
-            logger.info(
+            logger.warning(
                 _(
-                    "[❄️ID] 无法把节点 token 存进 {path}（只读文件系统？），改用只在本进程有效的，"
-                    "重启后不会复用原来的 Worker ID"
-                ).format(path=NODE_TOKEN_PATH)
+                    "[❄️ID] 节点 token 文件 {path} 用不了（{err}），改用只在本进程有效的 token，"
+                    "重启后接不回原来的 Worker ID。删掉这个文件、或者让它所在的目录可写，下次启动"
+                    "就会重新生成"
+                ).format(path=NODE_TOKEN_PATH, err=f"{type(e).__name__}: {e}")
             )
         _node_token = token
     return _node_token
