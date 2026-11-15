@@ -4,10 +4,9 @@
 跑 Redis 后端时开服就报 FileNotFoundError。
 """
 
-import fnmatch
 import subprocess
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -32,6 +31,12 @@ def tracked_package_files() -> list[str]:
     return [line.removeprefix("hetu/") for line in out.splitlines() if line]
 
 
+def test_patterns_match_like_setuptools_globs():
+    """* 不跨目录：skills/*/* 匹配不到 skills/x/references/y.md，镜像里就没有它"""
+    assert PurePosixPath("skills/x/SKILL.md").full_match("skills/*/*")
+    assert not PurePosixPath("skills/x/references/y.md").full_match("skills/*/*")
+
+
 def test_every_data_file_is_declared_as_package_data():
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     patterns = config["tool"]["setuptools"]["package-data"]["hetu"]
@@ -41,6 +46,7 @@ def test_every_data_file_is_declared_as_package_data():
         if Path(path).suffix not in CODE_SUFFIXES
         and path not in NOT_SHIPPED
         and path != "py.typed"  # setuptools 自己会带上
-        and not any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+        # 同 setuptools 的 glob：* 不跨目录，** 才跨（fnmatch 的 * 会跨，放过嵌套的文件）
+        and not any(PurePosixPath(path).full_match(pattern) for pattern in patterns)
     ]
     assert missing == [], f"这些文件要加进 pyproject.toml 的 package-data：{missing}"
