@@ -1086,8 +1086,10 @@ abort。所以：
 - 实际做法和上面的出入（详见 §12.2）：
   - perf 这次能读计数器，开销按 user 态周期比，没有用 py-spy（它在 Python 3.14 上会把 C 层时间算到协程帧上）。
     收益远高于 +20%，没有按调用栈细查，只按 DSO 看了周期花在哪。
-  - 端到端只测了 C# headless：测试工程的 NUnit 宿主要 ASP.NET Core 运行时，本机没装，就写了个只引用
-    `HeTu.Client` 的控制台程序跑，没有入库。Unity 客户端没测。
+  - C# headless 的端到端：测试工程的 NUnit 宿主要 ASP.NET Core 运行时，本机没装，就写了个只引用
+    `HeTu.Client` 的控制台程序跑，没有入库。
+  - Unity 的端到端另在 Windows 上测：现有 PlayMode 用例不含顶号和关服重连，这两项用一个临时用例配合外部操作
+    测完，没有入库。
 
 ### 5.7 第 5 步：自己的多进程 supervisor（到这一步时再细化）
 
@@ -1410,6 +1412,19 @@ C# headless 客户端（`HeadlessHeTuClient`）连 `tests/app.py`，两个栈各
 - 连接握手、登录、调用，`WatchRow` 订阅；等推送的调用返回时推送已到；
 - 被顶号的连接收到 close 码 4001（kicked），顶号的一方照常在线；
 - 关服时收到 1001，服务器重启后同一个客户端对象重连，照常调用。
+
+Unity 客户端（Windows，Unity 6000.7，`--workers=1`、SQLite）连 `tests/app.py`，两个栈各跑一遍：
+
+- PlayMode 用例（`河图ClientSDK单元测试`，30 条：连接、调用、订阅、主动断开后立刻重连）：两个栈都全过，服务器
+  日志 0 错误。
+- 顶号和关服重连现有用例不覆盖，用一个临时用例（`HeTuSessionClient`，没有入库）配合外部操作测：顶号方是
+  headless 客户端以同一 user_id 登录；关服是往服务器控制台发 Ctrl+C，不是强杀。
+  - 被顶号收到 4001，会话进 Faulted，之后不重连；顶号的一方照常调用。两个栈一样。
+  - 关服时 aiohttp 给 1001，Sanic 给 1000（§3.2 第 4 条：Windows 的 asyncio 上 Sanic 等连接全断开才关，客户端收到
+    1000）。之后会话进 Reconnecting，服务器停着时连接失败（1006）照常退避，重启后自动回到 Ready，`WatchRow`
+    订阅按行 id 恢复、触发 `OnResynced`。两个栈一样。
+  - aiohttp 上再用 `CallSystemAwaitPush` 调一次：返回时订阅已是新值。Sanic 那一遍停在"关服给 1001"的断言上，
+    这一步没跑。
 
 **结论**
 
