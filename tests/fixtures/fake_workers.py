@@ -1,6 +1,6 @@
 """
 supervisor 测试用的假 worker。管理进程用 spawn 起它们，所以放在能 import 的模块里。按 config["BEHAVIOR"]
-行事，在 config["DIR"]/events.log 里记下每一步（时刻、事件、序号、pid）。
+行事，在 config["DIR"]/events-<pid>.log 里记下每一步（时刻、事件、序号、pid），`events()` 合起来读。
 
 Fake worker processes for the supervisor tests.
 """
@@ -22,22 +22,22 @@ from hetu.server.supervisor import (
 
 
 def record(config: dict[str, Any], event: str) -> None:
+    # 每个进程写自己的文件：Windows 上几个进程往同一个文件追加不是原子的，会互相覆盖、丢行
     index = os.environ.get("HETU_WORKER_INDEX")
-    path = Path(config["DIR"]) / "events.log"
+    path = Path(config["DIR"]) / f"events-{os.getpid()}.log"
     with open(path, "a", encoding="utf-8") as f:
         f.write(f"{time.monotonic():.6f} {event} {index} {os.getpid()}\n")
 
 
 def events(directory: Path) -> list[tuple[float, str, int, int]]:
-    """读 events.log：[(时刻, 事件, 序号, pid)]"""
-    path = directory / "events.log"
-    if not path.exists():
-        return []
+    """读各进程的 events-<pid>.log，按时刻排好：[(时刻, 事件, 序号, pid)]"""
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        t, event, index, pid = line.split()
-        rows.append((float(t), event, int(index), int(pid)))
-    return rows
+    for path in directory.glob("events-*.log"):
+        # 最后一段没有换行的是正在写的半行，下次再读
+        for line in path.read_text(encoding="utf-8").split("\n")[:-1]:
+            t, event, index, pid = line.split()
+            rows.append((float(t), event, int(index), int(pid)))
+    return sorted(rows)
 
 
 def _wait_stop(inbox: Any, timeout: float = 60) -> str:
