@@ -418,8 +418,17 @@ class Supervisor:
             self._poll(timeout)
 
     def _shutdown(self, code: int) -> int:
-        """通知所有 worker 停服，等它们退出，超时还没退出的强制结束。返回 code"""
+        """
+        通知所有 worker 停服，等它们退出，超时还没退出的强制结束。返回 code。
+
+        先关掉管理进程手里的那份监听 socket：之后不会再起 worker，用不着它了。不关的话，worker 关服时各自
+        停止监听（关掉自己那份）之后 socket 还在监听：新连接在内核里握完手、进了监听队列却没人接，一直挂到
+        管理进程退出才被重置，网关没法马上换一台。worker 手里的照常开着，最后一个 worker 停止监听时 socket
+        才真正关掉
+        """
         self._restart_at.clear()
+        if self.sock is not None:
+            self.sock.close()
         workers = list(self.workers.values())
         if not workers:
             return code

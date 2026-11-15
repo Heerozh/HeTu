@@ -124,6 +124,11 @@ def worker(
         time.sleep(60)
         sys.exit(0)
     how = _wait_stop(inbox)
+    if behavior == "close_sock_on_stop":
+        # 同 AiohttpServer.stop()：先停止监听（关掉自己那份监听 socket），排空一会儿才退出
+        sock.close()
+        record(config, "sock-closed")
+        time.sleep(config["LINGER"])
     if behavior == "slow_stop":
         time.sleep(1)
     record(config, f"exit-{how}")
