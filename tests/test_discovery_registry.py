@@ -69,15 +69,23 @@ def test_entry_round_trip():
     assert json.loads(raw)["v"] == 1
 
 
+# 显式给 id：不然参数原样进测试 id，嵌套很深的那条有 20 万字符，pytest 把 id 写进环境变量
+# PYTEST_CURRENT_TEST，Windows 上超过 32767 个字符的环境变量设不进去，用例在 setup / teardown 时报错
 @pytest.mark.parametrize(
     "raw,words",
     [
-        (b'{"v": 2, "addr": "10.0.3.17"}', "格式版本 2"),
-        (b"not json", None),
-        (b'{"v": 1, "addr": "10.0.3.17"}', None),  # 少了字段
-        (b'{"node": "x"}', None),  # 没有版本
+        pytest.param(
+            b'{"v": 2, "addr": "10.0.3.17"}', "格式版本 2", id="unknown-version"
+        ),
+        pytest.param(b"not json", None, id="not-json"),
+        pytest.param(b'{"v": 1, "addr": "10.0.3.17"}', None, id="missing-fields"),
+        pytest.param(b'{"node": "x"}', None, id="no-version"),
         # 嵌套很深（哪怕在不认识的字段里）：msgspec 抛的是 RecursionError
-        (b'{"v": 1, "x": ' + b"[" * 100_000 + b"]" * 100_000 + b"}", None),
+        pytest.param(
+            b'{"v": 1, "x": ' + b"[" * 100_000 + b"]" * 100_000 + b"}",
+            None,
+            id="deep-nesting",
+        ),
     ],
 )
 def test_bad_entries_are_rejected(raw, words):
