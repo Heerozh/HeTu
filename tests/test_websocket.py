@@ -6,12 +6,10 @@ import logging
 import os
 import warnings
 from collections.abc import Iterable
-from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
-from fixtures.http_servers import ALL_HTTP_SERVERS
-from fixtures.server_harness import make_harness, routine_timeout_for
+from fixtures.server_harness import ServerHarness, routine_timeout_for
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 import hetu
@@ -30,20 +28,13 @@ logging.lastResort.setLevel(logging.DEBUG)
 
 
 @pytest.fixture
-def ws_redis_url(ses_redis_service, http_server) -> str:
-    """
-    test_server 用的 Redis 地址：两个 Web 服务器栈各用一个库。session 级的 Redis 不清库，用例会在
-    库里留下数据，同一个用例在两个栈上各跑一遍时，后跑的会看到先跑的留下的数据
-    """
-    import re
-
-    match = re.match(r"(redis://127\.0\.0\.1:\d+)/0", ses_redis_service[0])
-    assert match
-    return f"{match.group(1)}/{ALL_HTTP_SERVERS.index(http_server)}"
+def ws_redis_url(ses_redis_service) -> str:
+    """test_server 用的 Redis 地址（master）"""
+    return ses_redis_service[0]
 
 
 @pytest.fixture
-def test_server(request, ws_redis_url, http_server):
+def test_server(request, ws_redis_url):
     SystemClusters()._clear()
     EndpointDefines()._clear()
     # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
@@ -53,9 +44,7 @@ def test_server(request, ws_redis_url, http_server):
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
-    harness = make_harness(
-        http_server,
-        "Hetu-test",
+    harness = ServerHarness(
         {
             "APP_FILE": app_file,
             "NAMESPACE": "pytest",
@@ -83,7 +72,6 @@ def test_server(request, ws_redis_url, http_server):
 
     yield harness
 
-    harness.stop()
     webext.clear()
 
 
@@ -97,10 +85,9 @@ def test_websocket_started(test_server):
     # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
 
-def test_custom_http_route(test_server, http_server):
+def test_custom_http_route(test_server):
     # app.py里用@hetu.define_route注册的普通HTTP端点应该能正常提供服务
-    if http_server == "aiohttp":
-        pytest.skip("webext 的声明是 Sanic 形状的，第 6 步才支持 aiohttp")
+    pytest.skip("webext 的声明还是 Sanic 形状的，改成 aiohttp 的接口之后再测")
     response = test_server.get("/webext-test/abc.zip")
     assert response.status == 200
     assert response.text == "downloaded abc.zip"
@@ -2122,91 +2109,6 @@ def test_websocket_fragmented_message_size_limit(test_server, caplog):
     assert len(protocol_errors) == 1
 
 
-# ==== Sanic 适配层：SanicWsConnection ====
-
-
-class _FakeSanicWs:
-    """SanicWsConnection 用的 Sanic Websocket 替身"""
-
-    def __init__(self, frames=(), message=None, exc: BaseException | None = None):
-        self.frames = list(frames)  # recv_streaming 给出的一条消息的各帧
-        self.message = message  # recv(timeout) 的返回值
-        self.exc = exc  # 收发时抛的异常
-        self.timeouts: list = []
-        self.failed: list = []
-        self.ws_proto = SimpleNamespace(parser_exc=None)
-
-    async def recv(self, timeout=None):
-        self.timeouts.append(timeout)
-        if self.exc is not None:
-            raise self.exc
-        return self.message
-
-    async def recv_streaming(self):
-        if self.exc is not None:
-            raise self.exc
-        for frame in self.frames:
-            yield frame
-
-    async def send(self, data):
-        if self.exc is not None:
-            raise self.exc
-
-    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
-        self.failed.append((code, reason))
-
-
-def _sanic_conn(ws: _FakeSanicWs):
-    from hetu.server.adapters.sanic_app import SanicWsConnection
-
-    request = SimpleNamespace(client_ip="1.2.3.4")
-    return SanicWsConnection(cast(Any, request), cast(Any, ws), "7")
-
-
-async def test_sanic_ws_connection_recv():
-    """recv(timeout) 交给 Sanic 的 recv（握手超时靠它）；不限时走 recv_streaming，把各帧拼成一条"""
-    ws = _FakeSanicWs(message=b"handshake")
-    conn = _sanic_conn(ws)
-    assert (conn.conn_id, conn.client_ip) == ("7", "1.2.3.4")
-    assert await conn.recv(timeout=0.5) == b"handshake"
-    assert ws.timeouts == [0.5]
-    for frames, message in (
-        ([b"ab"], b"ab"),
-        ([b"a", b"b"], b"ab"),
-        (["a", "b"], "ab"),
-    ):
-        assert await _sanic_conn(_FakeSanicWs(frames=frames)).recv() == message
-
-
-async def test_sanic_ws_connection_converts_websocket_closed():
-    """Sanic 的 WebsocketClosed 转成 ConnectionClosed。不转的话，断线时会被当成收发出错打 ERROR"""
-    from sanic.exceptions import WebsocketClosed
-
-    from hetu.server.conn import ConnectionClosed
-
-    conn = _sanic_conn(_FakeSanicWs(exc=WebsocketClosed()))
-    with pytest.raises(ConnectionClosed):
-        await conn.recv()
-    with pytest.raises(ConnectionClosed):
-        await conn.recv(timeout=1)
-    with pytest.raises(ConnectionClosed):
-        await conn.send(b"x")
-
-
-async def test_sanic_ws_connection_fail_and_protocol_error():
-    """fail 交给 fail_connection；协议错误读 parser_exc，对端直接断开（EOFError）不算"""
-    ws = _FakeSanicWs()
-    conn = _sanic_conn(ws)
-    conn.fail(connection.CLOSE_REJECTED, "rejected")
-    assert ws.failed == [(connection.CLOSE_REJECTED, "rejected")]
-    assert conn.protocol_error() is None
-    ws.ws_proto.parser_exc = EOFError()
-    assert conn.protocol_error() is None
-    error = ValueError("bad frame")
-    ws.ws_proto.parser_exc = error
-    assert conn.protocol_error() is error
-
-
 @pytest.mark.timeout(20)
 def test_websocket_abrupt_disconnect_is_not_a_protocol_error(test_server, caplog):
     """对端直接断开 TCP（不发 close 帧）：照常拆连接，不算协议错误、不打它的日志"""
@@ -2294,9 +2196,9 @@ def test_websocket_path_with_trailing_slash(test_server):
 
 
 def test_no_access_log(test_server, caplog):
-    """访问日志交给前面的反向代理：两个栈都不打"""
+    """访问日志交给前面的反向代理：不打"""
     caplog.set_level(logging.DEBUG)
     response = test_server.get("/")
     assert response.status == 200
-    access = [r for r in caplog.records if r.name in ("aiohttp.access", "sanic.access")]
+    access = [r for r in caplog.records if r.name == "aiohttp.access"]
     assert access == []

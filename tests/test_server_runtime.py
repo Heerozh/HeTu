@@ -177,10 +177,10 @@ def test_hetu_config_defaults_and_attribute_access():
     assert restored == config
 
 
-def test_connection_handling_does_not_load_sanic():
+def test_connection_handling_does_not_load_web_server():
     """
     处理连接的代码（serve_connection、client_handler、WsConnection）与 Web 框架无关：在干净的子进程
-    里 import 它们不加载 sanic。pytest 主进程早被别的测试 import 过 sanic，只能在子进程里看
+    里 import 它们不加载 aiohttp。pytest 主进程早被别的测试 import 过 aiohttp，只能在子进程里看
     """
     import os
     import subprocess
@@ -190,7 +190,7 @@ def test_connection_handling_does_not_load_sanic():
         "import sys\n"
         "import hetu.endpoint.context, hetu.server.conn, hetu.server.receiver, "
         "hetu.server.websocket\n"
-        "print('sanic' in sys.modules)\n"
+        "print('aiohttp' in sys.modules)\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],

@@ -384,26 +384,6 @@ def test_resolve_ack_timeout_follows_startup_timeout():
     assert resolve_ack_timeout({"STARTUP_TIMEOUT": 0}) is None
 
 
-def test_resolve_ack_threshold_follows_startup_timeout():
-    """Sanic 的 ack 阈值由同一个超时换算（第 6 步删掉 Sanic 时一起删）"""
-    from hetu.server.adapters.sanic_app import (
-        UNLIMITED_ACK_THRESHOLD,
-        resolve_ack_threshold,
-    )
-    from hetu.server.runtime import ACK_TIMEOUT_MARGIN, DEFAULT_STARTUP_TIMEOUT
-
-    # sanic的THRESHOLD单位是0.1秒
-    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 30}) == int(
-        (30 + ACK_TIMEOUT_MARGIN) * 10
-    )
-    # 没配则用默认值推算
-    assert resolve_ack_threshold({}) == int(
-        (DEFAULT_STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN) * 10
-    )
-    # 0 是不限制，不能原样传给sanic（sanic的0是"立刻判定启动失败"）
-    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 0}) == UNLIMITED_ACK_THRESHOLD
-
-
 def test_on_start_rejects_client_permission(new_component_env, new_clusters_env):
     """on_start System 不能用客户端可调用权限（USER/EVERYBODY/GM），防止种子逻辑被外部触发。"""
     import pytest

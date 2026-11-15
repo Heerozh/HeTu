@@ -1,11 +1,10 @@
 """
-真起 `hetu start` 的测试，Sanic、aiohttp 两个栈各跑一遍：
+真起 `hetu start` 的测试：
 
 - 按终端 Ctrl+C 的方式停服：带着已登录的连接关服、关服途中再来的信号不打断关服（POSIX）/ 再按一次
   Ctrl+C 强退（Windows）；
-- 关服时在途的 RPC：Sanic 栈取消；aiohttp 栈排空（执行完、回复发出去再断开，没读的消息不执行，超出
-  排空预算的取消）；
-- aiohttp 栈：开服途中收到关服信号就不再开服；端口被占时在开服之前就失败；
+- 关服排空：在途的 RPC 执行完、回复发出去再断开，没读的消息不执行，超出排空预算的取消；
+- 开服途中收到关服信号就不再开服；端口被占时在开服之前就失败；
 - Windows：控制台的 ANSI 转义支持打开了。
 
 测试 harness 先关客户端再停服（harness 的语义 4），带着活连接关服的路径只有这里测得到。
@@ -29,7 +28,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fixtures.http_servers import HTTP_SERVERS
 from websockets.exceptions import ConnectionClosed
 from websockets.legacy.client import connect
 
@@ -131,13 +129,6 @@ def _kill(proc: subprocess.Popen) -> None:
         proc.wait()
 
 
-def _shutdown_close_code(http_server: str) -> int:
-    """
-    关服时客户端收到的 close 码。Windows 上的 Sanic 栈要等连接都拆完才发，是 1000（设计稿 §6）
-    """
-    return 1000 if IS_WINDOWS and http_server == "sanic" else 1001
-
-
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -154,14 +145,6 @@ def _wait_port(port: int, proc: subprocess.Popen, timeout: float = 40) -> None:
         except OSError:
             time.sleep(0.2)
     pytest.fail("服务器没在规定时间内开始监听")
-
-
-def _busy_http_client(port: int) -> socket.socket:
-    """请求头只发一半就停住：Sanic 认为这条连接还在收请求、不是空闲的，关服时不会关它，要一直等到
-    GRACEFUL_SHUTDOWN_TIMEOUT 才强关。用它把服务器稳定地拖在"等连接拆完"那段里"""
-    sock = socket.create_connection(("127.0.0.1", port))
-    sock.sendall(f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n".encode())
-    return sock
 
 
 def _write_config(tmp_path: Path, port: int) -> Path:
@@ -188,54 +171,10 @@ BACKENDS:
     return config
 
 
-@posix_only
-@pytest.mark.parametrize(
-    "http_server", [s for s in HTTP_SERVERS if s == "sanic"], indirect=True
-)
-@pytest.mark.timeout(90)
-def test_second_shutdown_signal_does_not_skip_cleanup(tmp_path, http_server):
-    """
-    Sanic 栈：关服途中再来一个 SIGINT（终端里 Ctrl+C 会把信号发给整个进程组，多 worker 时管理进程还会
-    再转发一次），不能打断关服。aiohttp 栈关服不等这种半截的 HTTP 请求、拖不住，见
-    test_signals_during_slow_disconnect_do_not_interrupt_shutdown：Linux 上的 uvloop 在 loop 停下后 remove_signal_handler 不起作用，Sanic 的
-    处理照样 loop.stop()。落在 _cleanup 等连接拆完的那段里时，after_server_stop 会被整个跳过：
-    断线 System 不跑、Connection 行不删、租约不释放、后端不关
-    """
-    port = _free_port()
-    config = _write_config(tmp_path, port)
-    env = dict(os.environ, PYTHONUNBUFFERED="1", HETU_HTTP_SERVER=http_server)
-    with open(tmp_path / "out.log", "wb") as out:
-        proc = subprocess.Popen(
-            [str(HETU), "start", "--config", str(config)],
-            cwd=tmp_path,
-            env=env,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        try:
-            _wait_port(port, proc)
-            client = _busy_http_client(port)
-            time.sleep(0.5)
-            os.killpg(proc.pid, signal.SIGINT)
-            # 第二个信号落在等连接拆完的那段里（被那条请求没发完的连接拖住）
-            time.sleep(0.5)
-            os.killpg(proc.pid, signal.SIGINT)
-            proc.wait(40)
-            client.close()
-        finally:
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-    output = (tmp_path / "out.log").read_text(encoding="utf-8", errors="replace")
-    assert "Event loop stopped before Future completed" not in output, output
-    assert "Closing backend main" in output, output
-
-
 @pytest.mark.timeout(60)
-def test_aiohttp_port_in_use_fails_before_startup(tmp_path):
+def test_port_in_use_fails_before_startup(tmp_path):
     """
-    aiohttp 栈先 bind 监听端口再开服：端口被占时直接以 1 退出，不会先连后端、跑一遍开服。
+    先 bind 监听端口再开服：端口被占时直接以 1 退出，不会先连后端、跑一遍开服。
     Windows 上 bind 不设 SO_REUSEADDR：设了的话端口冲突报的是 10013（WSAEACCES，Win11 实测），会被当成
     端口落在 excludedportrange 里，打出误导的提示
     """
@@ -243,7 +182,7 @@ def test_aiohttp_port_in_use_fails_before_startup(tmp_path):
         taken.bind(("127.0.0.1", 0))
         taken.listen()
         config = _write_config(tmp_path, taken.getsockname()[1])
-        env = dict(os.environ, PYTHONUNBUFFERED="1", HETU_HTTP_SERVER="aiohttp")
+        env = dict(os.environ, PYTHONUNBUFFERED="1")
         proc = subprocess.run(
             [str(HETU), "start", "--config", str(config)],
             check=False,
@@ -327,7 +266,6 @@ class _Server:
     def __init__(
         self,
         tmp_path: Path,
-        http_server: str,
         extra_config: str = "",
         *,
         console: bool = False,
@@ -365,9 +303,7 @@ BACKENDS:
         self.proc = _spawn(
             [str(HETU), "start", "--config", str(self.config)],
             cwd=tmp_path,
-            env=dict(
-                os.environ, PYTHONUNBUFFERED="1", HETU_HTTP_SERVER=http_server, **env
-            ),
+            env=dict(os.environ, PYTHONUNBUFFERED="1", **env),
             **output,
         )
 
@@ -437,12 +373,12 @@ async def _wait_output(server: _Server, marker: str, timeout: float = 10) -> Non
 
 
 @pytest.mark.timeout(90)
-def test_shutdown_with_live_connections(tmp_path, http_server):
+def test_shutdown_with_live_connections(tmp_path):
     """
-    带着已登录的连接关服：客户端都收到 1001（Windows 上的 Sanic 栈是 1000），连接都拆完（断线 System
-    以各自的用户身份跑了一次、Connection 行删掉），没有"没拆完"的警告，以 0 退出
+    带着已登录的连接关服：客户端都收到 1001，连接都拆完（断线 System 以各自的用户身份跑了一次、
+    Connection 行删掉），没有"没拆完"的警告，以 0 退出
     """
-    server = _Server(tmp_path, http_server)
+    server = _Server(tmp_path)
     try:
         _wait_port(server.port, server.proc)
 
@@ -456,7 +392,7 @@ def test_shutdown_with_live_connections(tmp_path, http_server):
     finally:
         server.close()
     output = server.output()
-    assert codes == [_shutdown_close_code(http_server)] * 3, output
+    assert codes == [1001] * 3, output
     assert server.proc.returncode == 0, output
     assert output.count("连接断开") == 3, output
     assert "没拆完" not in output, output
@@ -469,50 +405,15 @@ def test_shutdown_with_live_connections(tmp_path, http_server):
     ]
 
 
-@pytest.mark.parametrize(
-    "http_server", [s for s in HTTP_SERVERS if s == "sanic"], indirect=True
-)
-@pytest.mark.timeout(90)
-def test_shutdown_cancels_inflight_rpc(tmp_path, http_server):
-    """
-    Sanic 栈：关服时在途的 RPC 被取消，没有提交（不能提交了却发不出回复，客户端重连重试时就重复执行
-    了），关服也不等它跑完。aiohttp 栈排空，见 test_aiohttp_shutdown_drains_inflight_rpc
-    """
-    server = _Server(tmp_path, http_server)
-    try:
-        _wait_port(server.port, server.proc)
-
-        async def scenario() -> tuple[int | None, float]:
-            ws, pipe, pipe_ctx = await _login(server.port, 21)
-            await ws.send(pipe.encode(pipe_ctx, ["rpc", "slow_mark", 3]))
-            await _wait_output(server, SLOW_MARK_STARTED)  # RPC 已经在跑了
-            start = time.monotonic()
-            server.signal(signal.SIGINT)
-            code = await _close_code(ws)
-            await asyncio.to_thread(server.proc.wait, 30)
-            return code, time.monotonic() - start
-
-        code, took = asyncio.run(scenario())
-    finally:
-        server.close()
-    output = server.output()
-    assert code == _shutdown_close_code(http_server), output
-    assert server.proc.returncode == 0, output
-    assert took < 2.5, output  # RPC 要跑 3 秒
-    assert server.rows("Mark", "owner") == [], output
-
-
 @posix_only
 @pytest.mark.timeout(90)
-def test_signals_during_slow_disconnect_do_not_interrupt_shutdown(
-    tmp_path, http_server
-):
+def test_signals_during_slow_disconnect_do_not_interrupt_shutdown(tmp_path):
     """
     断线 System 要跑 2 秒，关服就被它拖住。这期间再来的 SIGINT（终端里再按一次 Ctrl+C）、SIGTERM
     （编排器）都不能打断关服：断线 System 跑完、后端照常关掉，以 0 退出。Windows 上第二次 Ctrl+C 是
     强退，见 test_windows_second_ctrl_c_forces_exit
     """
-    server = _Server(tmp_path, http_server, LIFECYCLE_DISCONNECT_DELAY="2")
+    server = _Server(tmp_path, LIFECYCLE_DISCONNECT_DELAY="2")
     try:
         _wait_port(server.port, server.proc)
 
@@ -539,13 +440,13 @@ def test_signals_during_slow_disconnect_do_not_interrupt_shutdown(
 
 @windows_only
 @pytest.mark.timeout(90)
-def test_windows_second_ctrl_c_forces_exit(tmp_path, http_server):
+def test_windows_second_ctrl_c_forces_exit(tmp_path):
     """
-    Windows：关服途中（断线 System 要跑 10 秒）再按一次 Ctrl+C 是强退，两个栈一样（Sanic 的
+    Windows：关服途中（断线 System 要跑 10 秒）再按一次 Ctrl+C 是强退（同原来 Sanic 的
     ctrlc_workaround_for_windows）：马上退出，退出码是 STATUS_CONTROL_C_EXIT，断线 System 没跑完。
     没释放的租约由 lease_owner_exited 认领
     """
-    server = _Server(tmp_path, http_server, LIFECYCLE_DISCONNECT_DELAY="10")
+    server = _Server(tmp_path, LIFECYCLE_DISCONNECT_DELAY="10")
     try:
         _wait_port(server.port, server.proc)
 
@@ -572,14 +473,14 @@ def test_windows_second_ctrl_c_forces_exit(tmp_path, http_server):
 
 @windows_only
 @pytest.mark.timeout(90)
-def test_windows_console_ansi_enabled(tmp_path, http_server):
+def test_windows_console_ansi_enabled(tmp_path):
     """
     Windows：`hetu start` 打开控制台的 ANSI 转义支持（ENABLE_VIRTUAL_TERMINAL_PROCESSING），彩色日志和
-    启动 LOGO 才不会显示成裸转义码。Sanic 栈靠 import sanic 顺带打开，aiohttp 栈不加载 sanic，要自己开
-    （设计稿 §3.2 第 14 条）。新控制台默认不开（conhost 的默认模式是 3）。输出不重定向、直接写进服务器
-    自己的控制台，再从另一个进程附到这个控制台上读模式
+    启动 LOGO 才不会显示成裸转义码。原来靠 import sanic 顺带打开，现在要自己开（设计稿 §3.2 第 14 条）。
+    新控制台默认不开（conhost 的默认模式是 3）。输出不重定向、直接写进服务器自己的控制台，再从另一个
+    进程附到这个控制台上读模式
     """
-    server = _Server(tmp_path, http_server, console=True)
+    server = _Server(tmp_path, console=True)
     try:
         _wait_port(server.port, server.proc)
         mode = subprocess.run(
@@ -597,17 +498,13 @@ def test_windows_console_ansi_enabled(tmp_path, http_server):
     assert server.proc.returncode == 0
 
 
-@pytest.mark.parametrize(
-    "http_server", [s for s in HTTP_SERVERS if s == "aiohttp"], indirect=True
-)
 @pytest.mark.timeout(90)
-def test_aiohttp_signal_during_startup_aborts_startup(tmp_path, http_server):
+def test_signal_during_startup_aborts_startup(tmp_path):
     """
-    aiohttp 栈开服途中（启动 System 要跑 15 秒）收到 SIGTERM（Windows 上是 Ctrl+C）：不等开服跑完，
-    马上关掉，以 0 退出，不会先开始接受连接。aiohttp 栈先 bind 端口再开服，所以端口能连上的时候开服
-    还在进行
+    开服途中（启动 System 要跑 15 秒）收到 SIGTERM（Windows 上是 Ctrl+C）：不等开服跑完，马上关掉，
+    以 0 退出，不会先开始接受连接。先 bind 端口再开服，所以端口能连上的时候开服还在进行
     """
-    server = _Server(tmp_path, http_server, LIFECYCLE_START_DELAY="15")
+    server = _Server(tmp_path, LIFECYCLE_START_DELAY="15")
     try:
         _wait_port(server.port, server.proc)
         time.sleep(1)  # 启动 System 已经在跑了
@@ -624,11 +521,7 @@ def test_aiohttp_signal_during_startup_aborts_startup(tmp_path, http_server):
     assert "服务器已就绪" not in output, output
 
 
-# ==== aiohttp 栈的关服排空（第 4b 步）====
-
-AIOHTTP_ONLY = pytest.mark.parametrize(
-    "http_server", [s for s in HTTP_SERVERS if s == "aiohttp"], indirect=True
-)
+# ==== 关服排空（设计稿 §5.5）====
 
 
 async def _messages_until_closed(
@@ -644,14 +537,13 @@ async def _messages_until_closed(
         return messages, None if e.rcvd is None else e.rcvd.code
 
 
-@AIOHTTP_ONLY
 @pytest.mark.timeout(90)
-def test_aiohttp_shutdown_drains_inflight_rpc(tmp_path, http_server):
+def test_shutdown_drains_inflight_rpc(tmp_path):
     """
-    aiohttp 栈关服排空：在途的 RPC 照常执行完、提交，回复发到客户端之后才以 1001 断开；排在后面、
-    还没读的消息不执行，客户端重连后重发也不会重复执行
+    关服排空：在途的 RPC 照常执行完、提交，回复发到客户端之后才以 1001 断开；排在后面、还没读的消息
+    不执行，客户端重连后重发也不会重复执行
     """
-    server = _Server(tmp_path, http_server)
+    server = _Server(tmp_path)
     try:
         _wait_port(server.port, server.proc)
 
@@ -675,14 +567,13 @@ def test_aiohttp_shutdown_drains_inflight_rpc(tmp_path, http_server):
     assert [(r["owner"], r["count"]) for r in marks] == [(41, 1)], output
 
 
-@AIOHTTP_ONLY
 @pytest.mark.timeout(90)
-def test_aiohttp_drain_budget_cancels_long_rpc(tmp_path, http_server):
+def test_drain_budget_cancels_long_rpc(tmp_path):
     """
     排空有预算（SHUTDOWN_DRAIN_TIMEOUT）：超出预算还没执行完的 RPC 被取消、没有提交，客户端收到 1001
     但没有回复（重连后重发），关服不等它跑完
     """
-    server = _Server(tmp_path, http_server, extra_config="SHUTDOWN_DRAIN_TIMEOUT: 1")
+    server = _Server(tmp_path, extra_config="SHUTDOWN_DRAIN_TIMEOUT: 1")
     try:
         _wait_port(server.port, server.proc)
 

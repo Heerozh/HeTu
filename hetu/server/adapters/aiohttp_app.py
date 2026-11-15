@@ -1,6 +1,6 @@
 """
 aiohttp 适配：跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md
-§5.4、§5.7）。和 Sanic 并存的过渡期里由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用（见 hetu/cli/start.py）。
+§5.4、§5.7），由 `hetu start`（hetu/cli/start.py）调用。
 
 - `AiohttpWsConnection`：把 aiohttp 的 WebSocketResponse 包成 `WsConnection`；
 - `AiohttpServer`：一次开服到关服，`hetu start` 和测试 harness 共用；
@@ -12,7 +12,8 @@ aiohttp 适配：跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-1
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 
-aiohttp adapter: serves HeTu from a single process on aiohttp.
+aiohttp adapter: serves HeTu on aiohttp, in a single process or in each worker of the
+supervisor.
 """
 
 import asyncio
@@ -514,10 +515,11 @@ def build_app(server: AiohttpServer) -> web.Application:
 
 def prepare(config: Mapping[str, Any]) -> HeTuConfig:
     """
-    进程级的准备，同 Sanic 适配层 `worker_main` 里与框架无关的那几步：加载玩家的 app 文件、建簇、配
-    日志、建消息流水线。aiohttp 的日志并到 HeTu.root 下面。返回 `HeTuConfig`
+    进程级的准备：加载玩家的 app 文件、建簇、配日志、建消息流水线。aiohttp 的日志并到 HeTu.root
+    下面。返回 `HeTuConfig`
 
-    Process-wide preparation shared with the Sanic adapter. Returns the HeTuConfig.
+    Process-wide preparation: load the app file, build the clusters, configure logging and
+    the message pipeline. Returns the HeTuConfig.
     """
     if not isinstance(config, HeTuConfig):
         config = HeTuConfig(config)

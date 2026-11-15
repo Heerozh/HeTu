@@ -571,9 +571,7 @@ BACKENDS:
         self.proc = subprocess.Popen(
             [str(HETU), "start", "--config", str(self.config)],
             cwd=tmp_path,
-            env=dict(
-                os.environ, PYTHONUNBUFFERED="1", HETU_HTTP_SERVER="aiohttp", **env
-            ),
+            env=dict(os.environ, PYTHONUNBUFFERED="1", **env),
             stdout=self._log,
             stderr=subprocess.STDOUT,
             start_new_session=True,

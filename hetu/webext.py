@@ -6,10 +6,8 @@ Registry for plain HTTP endpoints served by HeTu's built-in web server.
 这些端点就是普通的Sanic路由（文件下载、后台页面、健康检查等），和HeTu本身无关：
 不经过客户端Endpoint的权限体系，也不提供数据库访问。
 
-本模块刻意不在顶层import sanic，只保存"声明"；真正的注册由
-`hetu.server.adapters.sanic_app.worker_main` 在创建Sanic app之后重放（见 `apply_to`）。这样app文件
-在同一进程内被重复exec时（单元测试、嵌入场景）不会重复注册路由——Sanic的Blueprint
-一旦注册到某个app上，之后再往它加路由会立刻抛RouteExists。
+本模块只保存"声明"，不 import Web 框架。声明按函数的全限定名登记：app文件在同一进程内被重复
+exec时（单元测试、嵌入场景）是覆盖而不是追加。
 
 @author: Heerozh (Zhang Jianhao)
 @copyright: Copyright 2024-2025, Heerozh. All rights reserved.
@@ -18,12 +16,9 @@ Registry for plain HTTP endpoints served by HeTu's built-in web server.
 """
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .i18n import _
-
-if TYPE_CHECKING:
-    from sanic import Sanic
 
 # HeTu自己占用的路径前缀，`/hetu/<instance>`是客户端SDK的WebSocket入口，不可占用。
 # 根路径"/"不在此列：它只是个默认欢迎页，用户注册了同名路由就让给用户。
@@ -139,24 +134,6 @@ def on_server_setup(func: Callable) -> Callable:
     """
     _SETUPS[_registry_key(func)] = func
     return func
-
-
-def apply_to(app: Sanic) -> None:
-    """把注册表中的声明应用到Sanic app上，由worker_main在创建app后调用。
-
-    每次调用都新建Blueprint（而不是复用一个模块级单件），这样同一进程内多次
-    worker_main + 重复exec app文件也不会撞RouteExists。
-    """
-    from sanic import Blueprint
-
-    if _ROUTES:
-        user_bp = Blueprint(USER_BLUEPRINT_NAME)
-        for uri, sanic_kwargs, func in _ROUTES.values():
-            user_bp.route(uri, **sanic_kwargs)(func)
-        app.blueprint(user_bp)
-
-    for setup in list(_SETUPS.values()):
-        setup(app)
 
 
 def registered() -> list[str]:
