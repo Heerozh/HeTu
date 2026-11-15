@@ -124,9 +124,12 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `prepare_worker` 加载 app 文件、建 SystemClusters。
 - `adapters/sanic_app.py`：Sanic 适配（`worker_main`），只把 `WorkerRuntime` 接到 Sanic 的
   生命周期上，把 ws 连接包成 `SanicWsConnection` 交给 `serve_connection`。
-- `adapters/aiohttp_app.py`：aiohttp 适配，目前只支持单进程。`AiohttpServer` 管一次开服到关服，
-  `hetu start` 和测试 harness 共用；关服时先排空（在途的 RPC 处理完、回复发出去再断开）。过渡期由环境
-  变量 `HETU_HTTP_SERVER=aiohttp` 选用，默认仍是 Sanic。
+- `adapters/aiohttp_app.py`：aiohttp 适配。`AiohttpServer` 管一次开服到关服，`hetu start` 和测试
+  harness 共用；关服时先排空（在途的 RPC 处理完、回复发出去再断开）。单进程时 `run()`，多进程时每个
+  worker 里跑 `run_worker()`。过渡期由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用，默认仍是 Sanic。
+- `supervisor.py`：aiohttp 栈的多进程管理（`WORKER_NUM>1`）。管理进程不加载 app 文件，用 spawn 起
+  worker，经控制管道通知停服、收 ready；ready 之前的失败整体中止，之后崩溃的以同一序号退避重启；DEBUG 时
+  自动重载。测试用假 worker（`tests/fixtures/fake_workers.py`）。
 - `forwarded.py`：从反向代理头取客户端地址，规则同 Sanic。
 - `conn.py`：`WsConnection` 接口（recv / send / fail / protocol_error）和 `ConnectionClosed`，
   处理连接的代码只经它收发，不碰 Web 框架。

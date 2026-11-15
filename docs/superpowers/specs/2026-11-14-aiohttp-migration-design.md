@@ -1,8 +1,8 @@
 # 用 aiohttp 替换 Sanic — 设计稿
 
 - 日期：2026-11-14
-- 状态：实施中，设计做过一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0~4b 步已合并（PR #226~#231），
-  第 4c 步的实测见 §12.2。已定事项见 §13，待定问题见 §14。
+- 状态：实施中，设计做过一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0~4c 步已合并（PR #226~#232，
+  第 4c 步的实测见 §12.2），第 5 步在 `feat/supervisor` 分支上做。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -1098,83 +1098,143 @@ abort。所以：
 
     初版有两条结论因此作废："推送那几档频率 0.8~4.7GHz"，"聊天 10 条/秒探针 p99 aiohttp 高 0.15ms"。
 
-### 5.7 第 5 步：自己的多进程 supervisor（到这一步时再细化）
+### 5.7 第 5 步：自己的多进程 supervisor（已实施，分支 `feat/supervisor`）
 
-替代 Sanic 的 WorkerManager，只给 aiohttp 栈用（Sanic 栈继续用它自己的，直到第 6 步）。
+替代 Sanic 的 WorkerManager，只给 aiohttp 栈用（Sanic 栈继续用它自己的，直到第 6 步）。代码在
+`hetu/server/supervisor.py`（管理进程、worker 的入口）和 `aiohttp_app.run_worker`（worker 里跑的服）。
+`WORKER_NUM=1` 时不经过 supervisor，在主进程里跑（同 §5.4.3）。
 
 **进程模型**
 
-- master 不加载 app 文件，不再有 `AppLoader`（§14 第 3 条）。master 负责：
-  - 解析配置，执行 `dictConfig(LOGGING)`（会创建进程安全队列），启动 `AutoListener`；
-  - 生成 boot uuid；
-  - bind 监听 socket：端口冲突时尽早失败，Windows 上照旧给出 10013 的提示。
-- 用 `multiprocessing.get_context("spawn")` 启动 N 个 worker，传入配置、socket、序号和控制管道。
-- `HETU_WORKER_INDEX` 要在 `Process.start()` 之前设进 master 的 `os.environ`（spawn 启动时会复制环境变量），
-  启动完再从 master 的环境里删掉，Sanic 也是这么做的。因为 `ContextFilter.IDENT` 在 import 时就读取，worker
-  里再设就晚了。
+- 管理进程不加载 app 文件，没有 `AppLoader`（§14 第 3 条）。`hetu start` 在管理进程里：
+  - 配日志（`setup_logging`，会建好进程安全队列），用 `share_queues` 把队列放回配置传给 worker，启动
+    `AutoListener`；
+  - 生成 boot uuid（原来就有）；
+  - bind 监听 socket：端口冲突时尽早失败，Windows 上照旧给出 10013 的提示；
+  - 交给 `supervisor.run(config, sock, workers)`。
+- 用 `multiprocessing.get_context("spawn")` 起 N 个 worker，传入配置、socket 和两条单向的控制管道。
+- `HETU_WORKER_INDEX` 在 `Process.start()` 之前设进管理进程的环境（spawn 启动时会复制环境变量），启动完马上
+  删掉，同 Sanic。`ContextFilter.IDENT` 在 import 时就读取，worker 里再设就晚了。
+- 控制管道：
+  - worker → 管理进程：`ready`（带已加载的模块文件，自动重载用）、开服失败的说明、租约丢失；
+  - 管理进程 → worker：`stop`。所有平台都用它通知停服，不转发信号；
+  - worker 在一个线程里等管理进程的消息（Windows 的 selector 事件循环等不了管道），收到后用
+    `call_soon_threadsafe` 转回事件循环。管理进程没了（kill -9、OOM，daemon 标志不起作用）时 worker 读到
+    EOF，同样优雅退出；
+  - 用两条单向管道，而不是一条双向的：收、发在不同的线程里，不用操心 Connection 的线程安全。
 
-**启动**
+**开服**
 
-- worker 在 `runtime.start()` 完成、并且开始监听之后，通过控制管道发 ready。
-- **ready 之前的任何退出，都算整体启动失败**：app 导入出错、建簇出错、`PACKET_LAYERS` 配错、`StartupAborted`、
-  ack 超时。master 停掉所有 worker，首个 traceback 只打一次，然后以 1 退出。docker / k8s 能识别为失败，也不会
-  陷入重启死循环。
-- ack 超时为 `STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN` 秒。`resolve_ack_threshold` 改成返回秒，
-  `test_system_startup.py` 跟着改。超时时日志里写明是哪个 worker 卡住了。
+- worker 先配日志再加载 app：加载 app 时打的日志照常经队列输出。加载时 print 的东西（比如加载失败的提示）
+  先截下来，成功了照常输出，失败了随出错说明交给管理进程。
+- worker 开好服（`runtime.start()`、开始监听、起 FutureCalls）之后报 ready。
+- **ready 之前的任何退出，都算整体启动失败**：app 导入出错、建簇出错、`PACKET_LAYERS` 配错、
+  `StartupAborted`、ack 超时。管理进程停掉所有 worker，以 1 退出。几个 worker 一起出错时，只打第一个的说明，
+  其余的各打一行"也没能开服"；`StartupAborted` 用单进程的那句"服务器启动失败，已中止……"。
+- ack 超时为 `STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN`（10）秒：`runtime.resolve_ack_timeout` 返回秒（不限制时
+  返回 None），Sanic 的 `resolve_ack_threshold`（单位 0.1 秒）由它换算，`test_system_startup.py` 跟着改了。超时
+  时日志里写明是哪个 worker（序号、pid）卡住了，并直接强制结束它：异步的卡住早被它自己的 `STARTUP_TIMEOUT`
+  拦下了，到这时多半卡在阻塞调用里，收不到停服通知，等满关服的上限也是白等。
+- 开服途中收到关服信号：通知各 worker 停（它们放弃开服，已拿到的租约随之释放），以 0 退出。
 
 **运行中**
 
-- ready 之后 worker 崩溃：用同一个序号重启，带退避和次数上限，超过上限就整体退出。Sanic 不会自动重启崩溃的
-  worker（§3.2 第 11 条），这是新行为，要有测试覆盖。
-- 所有重启（崩溃、丢租约、重载）都**先停旧进程，再起新进程**。SQLite 的 `FixedWorkerKeeper` 直接拿序号当
-  worker id，同一个序号的两个进程并存，就会发出重复的 ID。
-- 丢租约：不能在续约任务里 `sys.exit`，SystemExit 会直接冒出 run，跳过关服流程。应该走正常的关服流程
-  （§5.4.4），再以约定的退出码退出，由 master 重启。
-- master 死掉（被 kill -9、OOM）时，daemon 标志不起作用，worker 会变成孤儿继续监听。所以 worker 读到控制管道
-  EOF 时，自己优雅退出。
+- ready 之后意外退出（崩溃、被杀、租约丢失）：以同一个序号重启。旧进程已经退出了才起新的，所以"先停旧进程，
+  再起新进程"天然成立。SQLite 的 `FixedWorkerKeeper` 直接拿序号当 worker id，同一个序号的两个进程并存就会发出
+  重复的 ID。
+- 退避和上限（`RestartPolicy`）：同一个序号第 n 次连续失败，等 min(0.5 × 2^(n−1), 10) 秒再重启；连续失败超过
+  5 次就整体退出（以 1）；就绪后稳定跑满 60 秒才退出的从头计数。重启出来的 worker 没开起服（就绪前退出、超过
+  ack 超时被强制结束）也算一次失败。Sanic 不会自动重启崩溃的 worker（§3.2 第 11 条），这是新行为。
+- 丢租约：worker 走正常的关服流程（§5.4.4），告诉管理进程，以 `LEASE_LOST_EXIT_CODE` 退出，由管理进程重启。
+  没有在续约任务里 `sys.exit`：SystemExit 会直接冒出 run，跳过关服流程。
 
 **停机与信号**
 
-- Unix：
-  - 在终端里按 Ctrl+C，SIGINT 会发给整个前台进程组，worker 会同时收到 SIGINT 和 master 转发的 SIGTERM。
-    worker 必须只认第一个关服信号，第 2 步已经在 Sanic 栈上这么做了（`_guard_shutdown_signals`，见 §5.2 末尾）；
-    也可以让 worker 不在终端的前台进程组里。master 自己也要幂等，不能像 Sanic 那样第二个信号就 SIGKILL 整个
-    进程组。
-    worker 对这两个信号都用 `add_signal_handler` 处理，而且要幂等。
-  - Docker 里 PID 1 是 `python -m hetu`，必须显式安装 SIGTERM 处理。
-  - master 等到超时后，杀掉还没退出的 worker。超时预算要放进编排器的宽限期（§5.5）。
-- Windows：
-  - Ctrl+C 会发给控制台里的所有进程，所以 worker 忽略 SIGINT，由 master 通过控制管道通知它们停机。这样
-    Windows 上也能优雅停机，不再硬杀。`lease_owner_exited` 保留作兜底。
-  - selector 事件循环的 `select()` 只能等 socket，所以等控制管道要用一个线程。
-  - master 也需要 Ctrl+C 的唤醒处理（§3.2 第 8 条）。
+- 管理进程：
+  - 关服信号（SIGINT、SIGTERM，Windows 上还有 Ctrl+Break）只认第一个，之后的都不理，不会像 Sanic 那样第二个
+    信号就强杀整个进程组。收到过关服信号之后，退出前一直忽略它们；
+  - Docker 里管理进程是 PID 1，显式装了 SIGTERM 的处理；
+  - 主循环每 0.25 秒醒一次，Windows 上的 Ctrl+C 也能及时生效（§3.2 第 8 条）。
+- 管理进程经控制管道通知所有 worker 停服，等它们退出。每个 worker 最多等
+  `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒，`worker_stop_timeout`，对应 worker
+  关服时各步的预算，见 §5.5），超时还没退出的强制结束。编排器的宽限期（compose 的 `stop_grace_period`）要比它
+  长，第 6 步写进文档。
+- Unix 上，终端里的 Ctrl+C 会把 SIGINT 发给整个前台进程组，worker 也会收到：worker 和单进程一样只认第一个关服
+  信号（`_install_stop_signals`），和管理进程的停服通知谁先到都一样。没有把 worker 移出前台进程组。
+- Windows 上，Ctrl+C 会发给控制台里的所有进程：worker 在入口处就忽略 SIGINT，只听管理进程的通知，这样 Windows
+  上也能优雅停机，不再硬杀。`lease_owner_exited` 保留作兜底（worker 被强制结束时）。
 
 **socket**
 
-- Linux / macOS：master bind 好之后传给 worker（multiprocessing 支持把 socket 传给子进程）。
-- Windows：同一机制走 `socket.share`，情况和 Sanic 相同，所以 `threaded_accept` 继续保留，worker 必须用
-  selector 事件循环。
-- 默认共享监听 socket；Linux 上的 SO_REUSEPORT 实测后作为可选项（§14 第 7 条）。
+- 管理进程 bind 好之后作为 `Process` 的参数传给 worker：Linux / macOS 上 multiprocessing 把描述符传给子进程；
+  Windows 上走 `socket.share`，情况和 Sanic 相同，所以 `threaded_accept` 继续保留（worker 在开始监听之前装
+  上），worker 用 selector 事件循环。
+- 共享一个监听 socket。SO_REUSEPORT 这一步没做，以后实测后再作为可选项（§14 第 7 条）。
 
 **DEBUG 自动重载**
 
-- 和 Sanic 一样，只在 DEBUG 开启且 workers>1 时启用。用轮询 mtime 实现，监视范围同 Sanic：所有已加载模块的
-  文件（§14 第 4 条）。有改动就逐个重启 worker，先停旧的再起新的。
+- 和 Sanic 一样，只在 DEBUG 开启且 workers>1 时启用；监视所有已加载模块的文件（§14 第 4 条）。管理进程不加载
+  app，文件列表由 worker 在 ready 时报上来。每秒查一次修改时间。
+- 有改动就逐个重启 worker：每个序号都先停旧的再起新的，新的就绪之后才动下一个。
+- 改坏了、新的没开起服来：停在这个序号，打出它的出错说明，其余 worker 照旧服务；下一次改动时从头再重启一遍。
+  这种失败不算进崩溃重启的次数，免得开发时改坏一次文件服务器就退出。
 
-**单进程**
+**测试**（`tests/test_supervisor.py`）
 
-- `WORKER_NUM=1` 时不经过 supervisor，在主进程里跑（同 §5.4.3）。
+- 管理进程的逻辑：用假 worker（`tests/fixtures/fake_workers.py`）真起进程，超时、退避都调小：
+  - 各 worker 的 `HETU_WORKER_INDEX` 互不相同，管理进程的环境里不留；关服时都经控制管道收到停服；
+  - 就绪前出错：整体失败、不重启，三个一起出错时说明只打一次；`StartupAborted` 用单进程的说法；没有说明时打
+    退出码；
+  - ack 超时：以 1 退出，写明哪个 worker 卡住了；开服途中关服：以 0 退出；
+  - 崩溃的 worker 退避后以同一序号重启；连续失败超过上限整体退出；丢租约的重启；
+  - 不理停服通知的，到时强制结束；
+  - 关服信号只认第一个：真往测试进程发两次 SIGTERM 和一次 SIGINT，worker 照常关完服，没有被强杀；
+  - worker 一侧：收到停服通知、或者读到 EOF，都会停；
+  - 自动重载：逐个重启，每个序号先停后起；改坏了停在那个序号，其余照旧，改好后的下一次改动恢复；
+  - 退避的数、关服上限的数。
+- 端到端，真起 `hetu start`（aiohttp 栈、多个 worker）：
+  - 两个 worker 都接连接；kill -9 其中一个，它以原序号回来、重新接连接；Ctrl+C（SIGINT 发给整个进程组）后以 0
+    退出；
+  - 只给管理进程发 SIGTERM（docker stop 就是这样）：两个 worker 上已登录的连接都收到 1001，断线 System 各跑
+    一次，Connection 行删光，以 0 退出；
+  - Redis 后端：开着服时两个 worker 各持有一个租约，关服之后都释放了；
+  - app 导入出错：很快以非 0 退出，不重启，三个 worker 一起出错时 traceback 只打一次；
+  - kill -9 管理进程：worker 自己关服退出。
+- `test_aiohttp_adapter.py`：`_serve` 的 worker 模式开好服报 ready，管理进程的通知（从别的线程）到了就关服；
+  丢租约时报告管理进程，以非 0 退出。
+- 变异检查共 15 个，都被抓到：
+  - 启动后不从管理进程的环境里删 `HETU_WORKER_INDEX`；
+  - 每个开服失败都打全说明；
+  - 没有 ack 超时；就绪超时的 worker 只发停服通知、不强制结束；
+  - 崩溃后不重启；连续失败不放弃；重启时换了序号；
+  - 不发停服通知；
+  - 第二个关服信号强杀 worker；收到过关服信号之后恢复原来的处理；
+  - worker 读到 EOF 不停服；
+  - 自动重载先起新的再停旧的；改坏了接着重启下一个；
+  - worker 不报 ready；丢租约不报告管理进程。
 
-**测试**（全部是新增的，现在一个都没有）
+  第一轮有两个漏网：
+  - "每个开服失败都打全说明"：别的 worker 一旦被通知停服，它们的失败就不再记，那条"也没能开服"几乎走不到。
+    改成开服阶段有说明的失败都记，测试要求恰好一条说明加两行"也没能开服"；
+  - "重载先起新的再停旧的"：假 worker 停得比新进程起来快，记下的先后看不出来。改成假 worker 收到停服后过 1 秒
+    才退出。
 
-- 在随机端口上起 2 个 worker，两个都能提供服务；
-- `kill -9` 其中一个，它会以原序号被重启；连续崩溃达到上限时整体退出；
-- SIGTERM 后 Connection 行被清掉、租约被释放；
-- 在 ready 之前出错（app 导入错误、`StartupAborted`）：master 很快以非 0 退出，不会重启；
-- 启动时卡住，ack 超时，以非 0 退出并给出提示；
-- kill master 后，worker 自己退出；
-- 各 worker 的 `HETU_WORKER_INDEX` 互不相同。
-- Windows 没有 CI，另列一份人工检查清单：多 worker 下的 accept、Ctrl+C、租约释放、重载。
+**Windows 人工检查清单**（没有 CI）：
+
+1. `HETU_HTTP_SERVER=aiohttp`、`WORKER_NUM: 2`（或 `--workers 2`）开服：两个 worker 都就绪；多开几个客户端，
+   日志里 `Srv 0`、`Srv 1` 都接到了连接（accept 走 `threaded_accept`）。
+2. 控制台里按 Ctrl+C：各 worker 走完关服（客户端收到 1001，断线 System 跑了，Connection 行删掉），管理进程
+   以 0 退出；关服途中再按一次 Ctrl+C 不会打断。
+3. Redis 后端：关服之后租约都释放了（`hetu upgrade` 不报有在线的 worker）。
+4. 在任务管理器里结束一个 worker 进程：它以同一个序号重启，留下的租约由 `lease_owner_exited` 认出来。
+5. DEBUG 模式下改 app 文件：worker 逐个重启；改坏了时其余 worker 照旧，改好后恢复。
+
+**和设计的出入**
+
+- 停服通知在所有平台上都走控制管道，Unix 上也不转发 SIGTERM。终端里的 Ctrl+C 照样会发给 worker，靠只认第一个
+  关服信号处理，没有把 worker 移出前台进程组。
+- DEBUG 自动重载时改坏了不退出、不算失败次数，等下一次改动（原设计没写）。
+- SO_REUSEPORT 没做。
 
 ### 5.8 第 6 步：切换默认、删除 Sanic
 
@@ -1245,6 +1305,7 @@ abort。所以：
 | 落库 Connection 行失败时（包括同 IP 匿名连接数超限）：close 码从 1000 变成 1011；匿名连接数超限时不再打堆栈 | 3 | 无 |
 | Windows 开发环境关服时，客户端收到的 close 码从 1000（清理完才发）变成 1001。C# SDK 对 1000 会把 reason 置为 null（`WebSocketTransport.cs:62-65`），按 reason 判断"正常关闭"的代码会受影响 | 4a（aiohttp 栈）、6 | 无 |
 | 崩溃的 worker 会被自动重启（Sanic 不会） | 5（aiohttp 栈）、6 | 无 |
+| 多进程时管理进程只认第一个关服信号：关服途中再按 Ctrl+C 不再强杀所有进程（Sanic 第二次就强杀）；关服时每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒）才强制结束 | 5（aiohttp 栈）、6 | 无 |
 
 ## 7. 测试计划汇总
 
