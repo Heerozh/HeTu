@@ -76,15 +76,35 @@ BACKENDS:
     return str(config)
 
 
-def test_aiohttp_rejects_multiple_workers(tmp_path, monkeypatch, capsys):
-    """aiohttp 栈第 5 步之前只支持单进程：WORKER_NUM > 1 时报错退出，不悄悄降成单进程"""
+def test_aiohttp_multiple_workers_go_through_the_supervisor(tmp_path, monkeypatch):
+    """
+    aiohttp 栈 WORKER_NUM > 1：本进程是管理进程，只配日志、不加载 app 文件（这里的 app.py 根本不存在），
+    bind 好监听 socket 交给 supervisor，用完关掉
+    """
+    from hetu.server import runtime, supervisor
+
+    calls = []
+    sockets = []
+
+    def fake_run(config, sock, workers):
+        sockets.append(sock)
+        calls.append((config["NAMESPACE"], sock.getsockname()[1] > 0, workers))
+        return 0
+
+    logged = []
+    monkeypatch.setattr(supervisor, "run", fake_run)
+    # 不真的 dictConfig：别改了测试进程的全局日志配置
+    monkeypatch.setattr(runtime, "setup_logging", lambda config: logged.append(1))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HETU_HTTP_SERVER", "aiohttp")
     sys.argv[1:] = ["start", "--config", _write_config(tmp_path, workers=2)]
-    with pytest.raises(SystemExit) as exc_info:
+    try:
         main()
-    assert exc_info.value.code == 2
-    assert "WORKER_NUM" in capsys.readouterr().out
+    except SystemExit as e:
+        assert e.code in (0, None)
+    assert calls == [("pytest", True, 2)]
+    assert logged == [1]
+    assert sockets[0].fileno() == -1  # 已经关了
 
 
 def test_http_server_env_must_be_known(tmp_path, monkeypatch, capsys):

@@ -370,14 +370,27 @@ async def test_runtime_start_aborts_on_backend_timeout(monkeypatch):
         await runtime.start()
 
 
-def test_resolve_ack_threshold_follows_startup_timeout():
-    """ack阈值只由 STARTUP_TIMEOUT 推算（+余量），保证永远比我们自己的超时晚触发。"""
-    from hetu.server.adapters.sanic_app import (
+def test_resolve_ack_timeout_follows_startup_timeout():
+    """管理进程等 worker 就绪的超时（秒）只由 STARTUP_TIMEOUT 推算（+余量），保证永远比我们自己的
+    超时晚触发；STARTUP_TIMEOUT 为 0 时不限制"""
+    from hetu.server.runtime import (
         ACK_TIMEOUT_MARGIN,
+        DEFAULT_STARTUP_TIMEOUT,
+        resolve_ack_timeout,
+    )
+
+    assert resolve_ack_timeout({"STARTUP_TIMEOUT": 30}) == 30 + ACK_TIMEOUT_MARGIN
+    assert resolve_ack_timeout({}) == DEFAULT_STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN
+    assert resolve_ack_timeout({"STARTUP_TIMEOUT": 0}) is None
+
+
+def test_resolve_ack_threshold_follows_startup_timeout():
+    """Sanic 的 ack 阈值由同一个超时换算（第 6 步删掉 Sanic 时一起删）"""
+    from hetu.server.adapters.sanic_app import (
         UNLIMITED_ACK_THRESHOLD,
         resolve_ack_threshold,
     )
-    from hetu.server.runtime import DEFAULT_STARTUP_TIMEOUT
+    from hetu.server.runtime import ACK_TIMEOUT_MARGIN, DEFAULT_STARTUP_TIMEOUT
 
     # sanic的THRESHOLD单位是0.1秒
     assert resolve_ack_threshold({"STARTUP_TIMEOUT": 30}) == int(

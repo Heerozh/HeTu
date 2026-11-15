@@ -731,9 +731,11 @@ class _FakeServer:
         self.events = events
         self.runtime = SimpleNamespace(exit_code=0)
         self.request_stop: Callable[[], None] = lambda: None
+        self.restartable: bool | None = None
 
-    def __call__(self, config, *, on_stop_requested):
+    def __call__(self, config, *, on_stop_requested, restartable=False):
         self.request_stop = on_stop_requested
+        self.restartable = restartable
         return self
 
     async def start(self, sock):
@@ -783,6 +785,72 @@ async def test_serve_aborts_startup_when_stop_is_requested(monkeypatch):
     assert code == 0
 
 
+class _FakeControl:
+    """_serve 的 worker 模式用的控制管道替身：记下发给管理进程的消息，留着停服回调"""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.on_stop: Callable[[], None] | None = None
+
+    def listen(self, on_stop: Callable[[], None]) -> None:
+        self.on_stop = on_stop
+
+    def send_ready(self) -> None:
+        self.sent.append("ready")
+
+    def send_lease_lost(self) -> None:
+        self.sent.append("lease_lost")
+
+
+async def test_serve_worker_reports_ready_and_stops_on_control(monkeypatch):
+    """
+    多进程的 worker：开好服后报 ready；管理进程的停服通知（控制管道的线程里调 on_stop）到了就关服，
+    以 0 退出。AiohttpServer 按可重启（worker）建
+    """
+    import threading
+
+    events: list[str] = []
+    fake = _FakeServer(lambda server: asyncio.sleep(0), events)
+    monkeypatch.setattr(aiohttp_app, "AiohttpServer", fake)
+    control = _FakeControl()
+    sock = aiohttp_app.bind_socket("127.0.0.1:0")
+    try:
+        serving = asyncio.ensure_future(aiohttp_app._serve(HeTuConfig(), sock, control))
+        assert await _wait_for(lambda: control.sent == ["ready"], 2)
+        assert fake.restartable is True
+        assert events == ["start"]
+        on_stop = control.on_stop
+        assert on_stop is not None
+        threading.Thread(target=on_stop).start()
+        code = await asyncio.wait_for(serving, 5)
+    finally:
+        sock.close()
+    assert events == ["start", "stop"]
+    assert code == 0
+
+
+async def test_serve_worker_reports_lease_lost(monkeypatch):
+    """多进程的 worker 丢了租约：告诉管理进程（由它重启），关服，以非 0 退出"""
+
+    async def lease_lost(server):
+        server.runtime.exit_code = 1
+        server.request_stop()
+
+    events: list[str] = []
+    monkeypatch.setattr(aiohttp_app, "AiohttpServer", _FakeServer(lease_lost, events))
+    control = _FakeControl()
+    sock = aiohttp_app.bind_socket("127.0.0.1:0")
+    try:
+        code = await asyncio.wait_for(
+            aiohttp_app._serve(HeTuConfig(), sock, control), 5
+        )
+    finally:
+        sock.close()
+    assert "lease_lost" in control.sent
+    assert events == ["start", "stop"]
+    assert code == 1
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 信号")
 async def test_shutdown_signals_stay_ignored_after_the_first():
     """
@@ -809,6 +877,36 @@ async def test_shutdown_signals_stay_ignored_after_the_first():
     finally:
         signal.signal(signal.SIGINT, previous[0])
         signal.signal(signal.SIGTERM, previous[1])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 的 Ctrl+C")
+def test_windows_ctrl_c_handled_while_loop_idle():
+    """
+    Windows：selector 事件循环卡在 select() 里的时候 Python 的信号处理跑不了，Ctrl+C 要等事件循环醒来才
+    生效。装上关服信号的处理之后，事件循环每 WINDOWS_WAKEUP_INTERVAL 秒醒一次，空闲时按 Ctrl+C 也马上
+    开始关服。事件循环是这里自己建的，上面除了等 5 秒的超时没有别的定时器；不叫醒的话要等到超时
+    """
+    import signal
+    import threading
+
+    async def main() -> float:
+        stopped = asyncio.Event()
+        restore = aiohttp_app._install_stop_signals(
+            asyncio.get_running_loop(), stopped.set
+        )
+        try:
+            start = time.monotonic()
+            # 别的线程里来一个 SIGINT：C 层只记下来，Python 的处理要等主线程从 select() 回来才跑
+            threading.Timer(0.3, signal.raise_signal, (signal.SIGINT,)).start()
+            async with asyncio.timeout(5):
+                await stopped.wait()
+            return time.monotonic() - start
+        finally:
+            restore()
+
+    with asyncio.Runner(loop_factory=aiohttp_app.new_event_loop) as runner:
+        took = runner.run(main())
+    assert took < 0.3 + 0.5
 
 
 def test_lease_lost_requests_stop_with_failure_code():

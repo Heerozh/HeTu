@@ -1,11 +1,11 @@
 """
-aiohttp 适配：单进程跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md
-§5.4）。和 Sanic 并存的过渡期里由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用（见 hetu/cli/start.py），
-多进程要等第 5 步的 supervisor。
+aiohttp 适配：跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md
+§5.4、§5.7）。和 Sanic 并存的过渡期里由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用（见 hetu/cli/start.py）。
 
 - `AiohttpWsConnection`：把 aiohttp 的 WebSocketResponse 包成 `WsConnection`；
 - `AiohttpServer`：一次开服到关服，`hetu start` 和测试 harness 共用；
-- `run()`：单进程运行，处理关服信号。
+- `run()`：单进程运行，处理关服信号；
+- `run_worker()`：多进程时每个 worker 里跑的，由管理进程（hetu/server/supervisor.py）经控制管道通知停服。
 
 @author: Heerozh (Zhang Jianhao)
 @copyright: Copyright 2024-2026, Heerozh. All rights reserved.
@@ -22,7 +22,7 @@ import os
 import signal
 import socket
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Protocol
 
 from aiohttp import WebSocketError, WSCloseCode, WSMsgType, web
 
@@ -61,6 +61,28 @@ SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 # Windows 上每隔多久叫醒一次事件循环（秒）：selector 事件循环等 I/O 时 Python 收不到信号，Ctrl+C
 # 要等它醒来才生效
 WINDOWS_WAKEUP_INTERVAL = 0.1
+
+
+class WorkerControl(Protocol):
+    """
+    worker 和管理进程之间的控制管道，`run_worker` 用（实现见 hetu/server/supervisor.py 的
+    `WorkerChannel`）。
+
+    The control channel between a worker and its manager process.
+    """
+
+    def listen(self, on_stop: Callable[[], None]) -> None:
+        """开始等管理进程的停服通知；收到、或者管理进程没了时，从别的线程调用 on_stop"""
+        ...
+
+    def send_ready(self) -> None:
+        """告诉管理进程：开好服了，开始接连接"""
+        ...
+
+    def send_lease_lost(self) -> None:
+        """告诉管理进程：Worker ID 租约丢了，本 worker 关服退出，要重启"""
+        ...
+
 
 # fail() 起的关闭任务：asyncio 只弱引用 task，连接对象没了之后由这里持有，直到关完
 _closing_tasks: set[asyncio.Task] = set()
@@ -301,7 +323,7 @@ class AiohttpServer:
     aiohttp `on_shutdown` 的顺序）。`hetu start`（单进程）和测试 harness 共用。
 
     on_stop_requested：服务要求停下时调用（目前只有雪花号租约丢失）。调用方负责随后调 `stop()`，
-    `runtime.exit_code` 会被置为非 0。
+    `runtime.exit_code` 会被置为非 0。restartable：多进程的 worker（由管理进程重启），只影响日志的说法。
 
     One server run on aiohttp, from startup to an orderly shutdown.
     """
@@ -311,8 +333,10 @@ class AiohttpServer:
         config: HeTuConfig,
         *,
         on_stop_requested: Callable[[], None] | None = None,
+        restartable: bool = False,
     ) -> None:
         self.config = config
+        self.restartable = restartable
         self.runtime = WorkerRuntime(config, on_lease_lost=self._on_lease_lost)
         # 还开着的 ws 连接：关服时先排空（_drain），没排空的再 fail(1001)
         self.connections: set[AiohttpWsConnection] = set()
@@ -331,13 +355,21 @@ class AiohttpServer:
     def _on_lease_lost(self) -> None:
         """
         续约发现 worker id 已经不属于本进程：再发号就可能和接手的进程撞号，必须换一个新进程重新租。
-        单进程没有管理进程，停服并把退出码置为非 0，交给 docker / systemd / k8s 重启
+        停服并把退出码置为非 0：多进程时由管理进程重启本 worker；单进程没有管理进程，交给 docker /
+        systemd / k8s 重启
         """
-        logger.error(
-            _(
-                "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
+        if self.restartable:
+            logger.error(
+                _(
+                    "❌ [📡WorkerKeeper] Worker ID 租约已丢失，停止本 worker，由管理进程重启"
+                )
             )
-        )
+        else:
+            logger.error(
+                _(
+                    "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
+                )
+            )
         self.runtime.exit_code = LEASE_LOST_EXIT_CODE
         if self._on_stop_requested is not None:
             self._on_stop_requested()
@@ -491,6 +523,17 @@ def prepare(config: Mapping[str, Any]) -> HeTuConfig:
         config = HeTuConfig(config)
     prepare_worker(config)
     setup_logging(config)
+    finish_prepare(config)
+    return config
+
+
+def finish_prepare(config: HeTuConfig) -> None:
+    """
+    `prepare` 的后半段（加载完 app、配好日志之后）：aiohttp 的日志并到 HeTu.root 下面，建消息流水线，
+    提示 aiohttp 栈还不支持的 webext 声明。多进程的 worker 先配日志再加载 app，分开调用
+
+    The second half of `prepare`, after the app is loaded and logging is configured.
+    """
     aiohttp_logger = logging.getLogger("aiohttp")
     aiohttp_logger.parent = logger
     if int(config["DEBUG"]) > 1:
@@ -503,14 +546,14 @@ def prepare(config: Mapping[str, Any]) -> HeTuConfig:
                 "已跳过：{items}"
             ).format(items=", ".join(skipped))
         )
-    return config
 
 
 def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
     """
     按 LISTEN（host:port）建好监听 socket，端口冲突等错误在这里就抛出，不会先跑一遍开服。和 Sanic 的
     bind_socket 一样：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上
-    不设 SO_REUSEADDR，那里设了它别的进程就能抢同一个端口
+    不设 SO_REUSEADDR：那里设了它，端口冲突报的是 10013（WSAEACCES）而不是 10048，会被当成端口落在
+    excludedportrange 里、打出误导的提示（Win11 实测，设了也抢不到别的进程正在监听的同一个地址）
     """
     host, port = listen.rsplit(":", 1)
     host = host.strip("[]")
@@ -602,7 +645,23 @@ def _install_stop_signals(
     return restore_windows
 
 
-async def _serve(config: HeTuConfig, sock: socket.socket) -> int:
+def _call_soon_threadsafe(
+    loop: asyncio.AbstractEventLoop, func: Callable[[], Any]
+) -> None:
+    """从别的线程把 func 交给事件循环；事件循环已经关了就算了（进程正在退出）"""
+    try:
+        loop.call_soon_threadsafe(func)
+    except RuntimeError:
+        pass
+
+
+async def _serve(
+    config: HeTuConfig, sock: socket.socket, control: WorkerControl | None = None
+) -> int:
+    """
+    开服，等关服信号（或租约丢失），关服，返回退出码。control 不为 None 时是多进程的 worker：管理进程
+    经控制管道通知停服（管理进程没了也停），开好服后告诉它 ready，丢租约时告诉它要重启
+    """
     loop = asyncio.get_running_loop()
     # Windows 上 accept 挪到专用线程（见 threaded_accept.py），要在开始监听之前装
     if IS_WINDOWS and install_threaded_accept(loop):
@@ -610,8 +669,26 @@ async def _serve(config: HeTuConfig, sock: socket.socket) -> int:
             _("🧵 进程[{pid}] 监听socket改由accept线程接连接").format(pid=os.getpid())
         )
     stop_requested = asyncio.Event()
-    server = AiohttpServer(config, on_stop_requested=stop_requested.set)
-    restore_signals = _install_stop_signals(loop, stop_requested.set)
+
+    def on_stop_requested() -> None:  # 租约丢失
+        if control is not None:
+            control.send_lease_lost()
+        stop_requested.set()
+
+    server = AiohttpServer(
+        config, on_stop_requested=on_stop_requested, restartable=control is not None
+    )
+    if control is not None and IS_WINDOWS:
+        # Windows 上 Ctrl+C 会发给控制台里的所有进程：worker 不理（入口处已经忽略了 SIGINT），由
+        # 管理进程经控制管道通知停服。控制管道的线程用 call_soon_threadsafe 叫醒事件循环，不用定时醒
+        def restore_signals() -> None:
+            pass
+
+    else:
+        # Unix 上终端里的 Ctrl+C 会发给整个前台进程组，worker 也会收到，同样只认第一个
+        restore_signals = _install_stop_signals(loop, stop_requested.set)
+    if control is not None:
+        control.listen(lambda: _call_soon_threadsafe(loop, stop_requested.set))
     try:
         # 开服（连后端、拿租约、跑启动 System）可能要很久，期间收到关服信号就不等了：取消开服，已经拿到
         # 的租约随之放弃（见 WorkerRuntime.start），再把开到一半的关掉
@@ -629,6 +706,8 @@ async def _serve(config: HeTuConfig, sock: socket.socket) -> int:
             return server.runtime.exit_code
         starting.result()  # 开服失败：StartupAborted 等照常抛出
         logger.info(_("✅ [📡Server] 服务器已就绪，开始接受连接"))
+        if control is not None:
+            control.send_ready()
         await stop_requested.wait()
         logger.info(_("⌚ [📡Server] 开始关服..."))
         await server.stop()
@@ -647,3 +726,15 @@ def run(config: HeTuConfig, sock: socket.socket) -> int:
     debug = int(config["DEBUG"]) > 1
     with asyncio.Runner(debug=debug, loop_factory=new_event_loop) as runner:
         return runner.run(_serve(config, sock))
+
+
+def run_worker(config: HeTuConfig, sock: socket.socket, control: WorkerControl) -> int:
+    """
+    多进程时在一个 worker 里跑 aiohttp 栈，同 `run()`，另外经 control 和管理进程打交道：管理进程通知
+    停服（或者它没了）就关服，开好服后报 ready，丢租约时报告并以非 0 退出，由管理进程重启。
+
+    Serve on aiohttp in a worker process managed by the supervisor; returns the exit code.
+    """
+    debug = int(config["DEBUG"]) > 1
+    with asyncio.Runner(debug=debug, loop_factory=new_event_loop) as runner:
+        return runner.run(_serve(config, sock, control))

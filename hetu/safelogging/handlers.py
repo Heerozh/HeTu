@@ -6,6 +6,7 @@
 """
 
 import logging
+import logging.handlers
 import multiprocessing
 from logging.handlers import QueueListener
 
@@ -48,6 +49,45 @@ def process_safe_queue(maxsize=-1):
     q = ctx.Queue(maxsize)
     CREATED_QUEUES.append(q)
     return q
+
+
+def share_queues(logging_config):
+    """
+    dictConfig 之后调用：把它建好的进程安全队列放回 LOGGING 配置（替换掉 `process_safe_queue`
+    这样的工厂），这份配置传给 spawn 出来的 worker 之后，worker 的 QueueHandler 写进同一个队列，
+    由本进程的 AutoListener 统一输出。
+
+    After dictConfig: put the created process-safe queues back into the LOGGING config, so
+    spawned workers log into the same queues, drained by this process's listeners.
+    """
+    for name, handler_dict in logging_config.get("handlers", {}).items():
+        if isinstance(handler_dict.get("queue"), (str, dict, list)):
+            handler = logging.getHandlerByName(name)
+            if isinstance(handler, logging.handlers.QueueHandler):
+                handler_dict["queue"] = handler.queue
+
+
+def abandon_queues():
+    """
+    读日志队列的进程（管理进程）没了时调用：退出时不再等队列的后台线程把积压写完。没人读的话管道
+    写满，那个线程就一直卡着（还可能拿着跨进程的写锁，卡住别的 worker），进程永远退不出去；积压的
+    日志本来也没人收了。
+
+    Call when the process draining the log queues is gone: don't wait at exit for the
+    queue feeder threads to flush, which would otherwise block forever.
+    """
+    loggers = [logging.getLogger()]
+    loggers += [
+        lg
+        for lg in logging.Logger.manager.loggerDict.values()
+        if isinstance(lg, logging.Logger)
+    ]
+    for lg in loggers:
+        for handler in lg.handlers:
+            if isinstance(handler, logging.handlers.QueueHandler):
+                cancel = getattr(handler.queue, "cancel_join_thread", None)
+                if cancel is not None:
+                    cancel()
 
 
 def stop_all_logging_handlers():
