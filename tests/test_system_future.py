@@ -882,7 +882,7 @@ async def test_future_call_task_backs_off_on_persistent_error(
 ):
     """后端已关闭（或任何持续报错）时，future_call_task 不能空转刷屏：
     出错后要退避再重试（否则同步抛出的异常让循环永不挂起，事件循环被饿死，
-    Sanic 关服时连 CancelledError 都送不进去）。"""
+    关服时连 CancelledError 都送不进去）。"""
     from hetu.data.backend import Backend
     from hetu.system import future
 

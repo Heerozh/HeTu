@@ -43,8 +43,8 @@ class AutoListener(QueueListener):
 
 
 def process_safe_queue(maxsize=-1):
-    # multiprocessing.Queue() == multiprocessing.get_context().Queue()，会初始化默认context
-    # sanic限制默认context不能被初始化，这里为了绕过所以get_context传入spawn，不会初始化默认context
+    # multiprocessing.Queue() == multiprocessing.get_context().Queue()，会初始化默认context。
+    # 用 spawn 的 context 建，不碰默认 context（原来 Sanic 不让初始化它），worker 也是 spawn 起的
     ctx = multiprocessing.get_context("spawn")
     q = ctx.Queue(maxsize)
     CREATED_QUEUES.append(q)

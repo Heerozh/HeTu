@@ -145,7 +145,7 @@ async def test_ws_response_options_follow_config():
         "autoping": True,
         "timeout": CLOSE_TIMEOUT,
     }
-    # None 不限；0 和 Sanic 一样只收空消息；心跳没配就不发
+    # None 不限；0 和原来 Sanic 一样只收空消息；心跳没配就不发
     unlimited = ws_response_options(
         HeTuConfig({"WEBSOCKET_MAX_SIZE": None, "WEBSOCKET_PING_INTERVAL": 0})
     )
@@ -170,7 +170,7 @@ async def test_deflate_is_not_negotiated(monkeypatch):
 
 async def test_message_size_limit_boundary(monkeypatch):
     """
-    刚好等于 WEBSOCKET_MAX_SIZE 的消息能收（同 Sanic，超限的判断是 >）；超过一个字节就以 1009 关闭，
+    刚好等于 WEBSOCKET_MAX_SIZE 的消息能收（同原来 Sanic，超限的判断是 >）；超过一个字节就以 1009 关闭，
     记成协议错误
     """
     seen: list[Any] = []

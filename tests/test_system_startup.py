@@ -261,8 +261,8 @@ async def test_runtime_start_aborts_on_on_start_failure(
 ):
     """on_start System 启动失败时，runtime.start() 抛 StartupAborted 中止整个服务器启动。
 
-    必须是抛异常而不是让框架停服：只有异常能让 Sanic 单/多进程都立刻中止且退出码非0，
-    app.stop() 两种模式下退出码都是0，会被docker/systemd当成正常退出。"""
+    必须是抛异常而不是让框架停服：只有异常能让单/多进程都立刻中止且退出码非0，
+    框架正常停服的退出码是0，会被docker/systemd当成正常退出。"""
     import pytest
 
     from hetu.manager import ComponentTableManager

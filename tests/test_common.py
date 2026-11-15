@@ -518,9 +518,8 @@ async def test_runtime_post_configures_and_closes_each_backend_once(
 async def test_runtime_stop_runs_once_when_called_twice(
     monkeypatch, mod_test_app, mod_backend_config
 ):
-    """Sanic 关服时 after_server_stop 可能跑两遍，而且两遍并发：第二个关服信号让 loop.stop()，
-    正在跑的那遍 run_until_complete 抛 RuntimeError，Sanic 的 _run_shutdown_coro 把它整个重跑一遍，
-    第一遍的 task 还挂着接着跑。stop() 要只真正关一次：租约只释放一次，后端只关一次"""
+    """stop() 可以重复调用、并发调用（原来 Sanic 关服时，第二个关服信号会让关服钩子被整个重跑一遍、
+    两遍并发），只真正关一次：租约只释放一次，后端只关一次"""
     from hetu.data.backend import Backend
     from hetu.data.backend.snowflake_lease import SnowflakeLease
 
@@ -961,7 +960,7 @@ async def test_fixed_worker_keeper_leaves_tool_range(monkeypatch):
 
 
 def test_worker_ident(monkeypatch):
-    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和 Sanic 的一样），其他进程是 "Main "。"""
+    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和原来 Sanic 的一样），其他进程是 "Main "。"""
     from hetu.common.helper import worker_ident, worker_index
 
     monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)

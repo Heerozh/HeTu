@@ -747,9 +747,8 @@ def test_call_flooding_lv1_normal(test_server):
 
 
 def test_call_flooding_lv1_flooding(test_server):
-    # 因为同时启动2个websocket会报
-    # sanic.exceptions.ServerError: Sanic server could not start: [Errno 98] Address already in use.
-    # 所以分2个测试，或者可以尝试启动时用随机的port
+    # 原来 Sanic 的测试客户端在同一个测试里起两次服会撞端口（Address already in use），所以分成了
+    # 2个测试
     close = None
 
     async def flooding_routine(connect):
@@ -1882,8 +1881,8 @@ def test_websocket_setup_failure_deletes_connection_row(
 
 @pytest.mark.timeout(30)
 def test_shutdown_waits_for_connection_cleanup(monkeypatch, test_server, ws_redis_url):
-    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
-    里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
+    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不登记进任务表（关服时
+    不能被取消），不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
     事务一直占着写锁，同进程之后的测试全部 database is locked"""
     import redis
 
@@ -2063,7 +2062,7 @@ def test_websocket_streaming_close_mid_fragment(test_server):
 
 @pytest.mark.timeout(20)
 def test_websocket_same_request_id_connections_independent(test_server):
-    """连接的任务名不能用 Sanic 的 request.id：它取自客户端给的 X-Request-ID 头。两个连接同名
+    """连接的任务名不能用客户端给的值（原来用过 Sanic 的 request.id，取自 X-Request-ID 头）。两个连接同名
     时任务表互相覆盖，一个连接拆掉时会把另一个连接的接收协程取消掉，后者之后发的请求再也没人收"""
 
     async def routine(connect):
@@ -2148,8 +2147,8 @@ def test_websocket_disconnect_during_initialize_deletes_connection_row(
     monkeypatch, test_server, ws_redis_url
 ):
     """
-    客户端握手完立刻断开，服务端还在 initialize 里（Connection 行已经提交、在等副本同步）：Sanic
-    取消连接协程，拆连接照样要删掉这一行。以前 initialize 在拆连接的 try 外面、行 id 也是返回之后
+    客户端握手完立刻断开，服务端还在 initialize 里（Connection 行已经提交、在等副本同步）：拆连接
+    照样要删掉这一行。以前 initialize 在拆连接的 try 外面、行 id 也是返回之后
     才记下，这一行就永远留在库里
     """
     import redis
@@ -2184,7 +2183,7 @@ def test_websocket_disconnect_during_initialize_deletes_connection_row(
 
 @pytest.mark.timeout(20)
 def test_websocket_path_with_trailing_slash(test_server):
-    """带尾斜杠的路径也能连上（Sanic 默认就匹配，aiohttp 栈另外注册了一条）"""
+    """带尾斜杠的路径也能连上（原来 Sanic 默认就匹配，aiohttp 上另外注册了一条）"""
 
     async def routine(connect):
         client = await connect()

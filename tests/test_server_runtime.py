@@ -223,7 +223,7 @@ def test_hetu_config_defaults_and_attribute_access():
     # 按属性写也写进 dict
     config.NEW_KEY = 1
     assert config["NEW_KEY"] == config.get("NEW_KEY") == 1
-    # Sanic 多进程时要把配置 pickle 给 spawn 出来的 worker
+    # 多进程时要把配置 pickle 给 spawn 出来的 worker
     restored = pickle.loads(pickle.dumps(config))
     assert type(restored) is HeTuConfig
     assert restored == config

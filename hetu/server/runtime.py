@@ -61,9 +61,9 @@ LEFTOVER_TASK_CANCEL_FLOOR = 1.0
 class StartupAborted(Exception):
     """worker启动流程失败，服务器必须中止，不能带病对外服务。
 
-    必须以异常向上抛出（而不是让框架停服）才能真正中止：Sanic在 ``worker/serve.py`` 里会捕获
-    启动异常并向管理进程发 ``__TERMINATE_EARLY__``，多进程模式立刻中止（不用等30秒ack超时）；
-    单进程模式则一路冒泡到CLI。两种模式的退出码都非0，docker/systemd/k8s的重启策略才能识别为失败。
+    必须以异常向上抛出（而不是让框架停服）才能真正中止：多进程时 worker 把它报给管理进程，整个
+    开服立刻中止（不用等 ack 超时）；单进程时一路冒泡到CLI。两种模式的退出码都非0，
+    docker/systemd/k8s的重启策略才能识别为失败。
 
     Raised when worker startup fails and the server must abort instead of serving in a
     broken state. It must propagate as an exception (not a framework stop) so that the
@@ -93,7 +93,7 @@ def resolve_ack_timeout(config: Mapping[str, Any]) -> float | None:
 def prepare_worker(config: Mapping[str, Any]) -> None:
     """
     worker 进程的一次性准备：加载玩家的 app 文件、建簇、把配置传给各模块。与 Web 框架无关；
-    Sanic 多进程时管理进程也会跑一遍。
+    多进程时管理进程不跑。
 
     One-time, framework-agnostic preparation of a worker process: load the app file, build
     the system clusters and pass config values to the modules that read them.
@@ -196,7 +196,7 @@ def setup_logging(config: Mapping[str, Any]) -> None:
 def setup_message_pipeline(config: Mapping[str, Any]) -> None:
     """按配置的 PACKET_LAYERS 初始化服务端消息处理流水线（进程内单件）"""
     msg_pipe = pipeline.ServerMessagePipeline()
-    msg_pipe.clean()  # msg_pipe是单件，防止test用例中多次调用worker_main导致重复添加layer
+    msg_pipe.clean()  # msg_pipe是单件，防止test用例中多次调用（每次建 harness）导致重复添加layer
     for layer_cfg in config.get("PACKET_LAYERS", []):
         layer = pipeline.MessageProcessLayerFactory.create(**layer_cfg)
         msg_pipe.add_layer(layer)
@@ -414,7 +414,7 @@ class WorkerRuntime:
 
         # 启动钩子：在开始收连接前，对每个instance执行所有 @define_system(on_start=True) 的System
         # 每次hetu start执行一次：boot uuid 由main进程经config传入，本次开服所有worker共享同一值以去重；
-        # 缺失时（直接调用worker_main的测试/嵌入场景，均为单进程）退化为本进程生成。
+        # 缺失时（直接建 runtime 的测试/嵌入场景，均为单进程）退化为本进程生成。
         # 执行失败或超时则中止整个服务器启动（抛StartupAborted），避免带病对外服务。
         from ..system.startup import (
             ON_START_UUID_CONFIG_KEY,
@@ -576,10 +576,9 @@ class WorkerRuntime:
         4. 停续约、水位预留循环，写精确水位并释放 Worker ID；
         5. 关后端。
 
-        可以重复调用、并发调用，只真正关一次；关到一半被打断后再调，已经做完的步骤不再做。Sanic 关服
-        时 after_server_stop 可能跑两遍，而且两遍并发：第二个关服信号让 loop.stop()，正在跑的那遍
-        run_until_complete 抛 RuntimeError，Sanic 的 `_run_shutdown_coro` 把它整个重跑一遍，第一遍的
-        task 还挂着接着跑（Sanic 适配层已经让 worker 只认第一个关服信号，这里是兜底）。
+        可以重复调用、并发调用，只真正关一次；关到一半被打断后再调，已经做完的步骤不再做（原来 Sanic
+        关服时，第二个关服信号会让关服钩子被整个重跑一遍、两遍并发；适配层只认第一个关服信号，这里是
+        兜底）。
 
         Shut down in a fixed order: wait for connections, cancel leftover connection
         tasks, stop FutureCalls, release the lease, close backends. Safe to call more

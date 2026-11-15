@@ -46,7 +46,7 @@ CLOSE_REJECTED = 4002
 # 服务端内部出错：后端连不上、Endpoint 执行抛异常等。客户端可以退避重连
 CLOSE_INTERNAL_ERROR = 1011
 # 服务器关服（WebSocket 标准的 going away）。客户端可以重连，连上别的 worker / 重启后的服务器。原因
-# 留空，同 Sanic 关服时发的
+# 留空，同原来 Sanic 关服时发的
 CLOSE_GOING_AWAY = 1001
 
 CLOSE_REASONS = {

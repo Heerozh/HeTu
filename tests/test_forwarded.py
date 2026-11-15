@@ -101,10 +101,10 @@ ADDRESS_CASES = [
 
 @pytest.mark.parametrize(("config", "headers", "expected", "label"), ADDRESS_CASES)
 def test_client_ip_matches_sanic(config, headers, expected, label):
-    """客户端地址的规则和 Sanic 逐条一致（设计稿 §3.2 第 7 条）"""
+    """客户端地址的规则和原来 Sanic 的逐条一致（设计稿 §3.2 第 7 条）"""
     assert client_ip(CIMultiDict(headers), PEER, HeTuConfig(config)) == expected, label
 
 
 def test_client_ip_peer_address_kept_as_is():
-    """对端地址原样返回：IPv6 不加方括号，同 Sanic 的 request.ip"""
+    """对端地址原样返回：IPv6 不加方括号，同原来 Sanic 的 request.ip"""
     assert client_ip(CIMultiDict(), "::1", HeTuConfig()) == "::1"

@@ -78,7 +78,7 @@ def isolate_snowflake_state():
     进程级单例 SnowflakeID 的状态不能漏给别的模块，每个模块结束时还原成开始时的样子。
     串行时漏出去的状态恰好没砸到谁；xdist 下 worker 跑测试文件的顺序不定，就随机挂：
 
-    * worker_main 起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
+    * 测试起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
       同一进程里别的测试一发号就 WorkerLeaseExpired。
     * last_timestamp 被留在未来（模拟崩溃重启、init 不传时间戳都会这样）：之后同一
       进程里每发一个号都多一条"时钟回拨"告警，数日志条数的用例

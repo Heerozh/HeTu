@@ -227,7 +227,7 @@ def test_worker_that_ignores_stop_is_killed_after_the_timeout(tmp_path, logs):
 
 def test_only_the_first_shutdown_signal_counts(tmp_path, logs):
     """
-    关服信号只认第一个：关服途中再来的不打断它（不会像 Sanic 那样第二个信号就强杀），worker 照常关完服
+    关服信号只认第一个：关服途中再来的不打断它（不会像原来 Sanic 那样第二个信号就强杀），worker 照常关完服
     自己退出。收到过信号之后，管理进程退出前一直忽略关服信号；测完把测试进程的信号处理恢复原样
     """
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
