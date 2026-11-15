@@ -1054,3 +1054,15 @@ def test_slow_log_table_shows_average_race_count():
         "0.50",
         "4.00",
     ]
+
+
+def test_version_comes_from_the_distribution():
+    """
+    __version__ 按发行包名 hetudb 取（import 名是 hetu）。原来按 hetu 取，取不到，默认欢迎页、握手后的
+    motd 里显示的都是 "hetu is not installed in a proper way"
+    """
+    from importlib.metadata import version
+
+    import hetu
+
+    assert hetu.__version__ == version("hetudb")
