@@ -191,10 +191,13 @@ cloud):
   check can probe HeTu's root path `/`.
 - **Backend discovery**: keep one name, say `hetu.internal`, in your cloud's
   private DNS (Alibaba Cloud PrivateZone, an AWS Route 53 private hosted zone,
-  and so on). Each HeTu machine adds its private IP on boot and removes it
-  before shutting down. Caddy's built-in dynamic upstreams (`dynamic a`) poll
-  that name, so scaling never touches Caddy's config: Caddy doesn't reload, and
-  connections on the other machines are left alone.
+  and so on). Each HeTu machine adds its private IP once the server is up (its
+  root path `/` answers) and removes it before shutting down. Don't add it on
+  boot: until the server is up Caddy's connections to it are refused, and one
+  refusal makes Caddy skip the node for 30 seconds (`fail_duration` below).
+  Caddy's built-in dynamic upstreams (`dynamic a`) poll that name, so scaling
+  never touches Caddy's config: Caddy doesn't reload, and connections on the
+  other machines are left alone.
 
 ```
 game.example.com {
@@ -230,12 +233,21 @@ Things to know:
   to Caddy's `trusted_proxies` and set `PROXIES_COUNT` to the total number of
   proxies.
 - **Stopping a HeTu machine** (scaling in, or a spot instance getting its
-  reclaim notice): remove it from DNS first, then stop the server (see
-  "Shutting down" below). Its players get a 1001 and reconnect to another
-  machine automatically.
+  reclaim notice): remove it from DNS first, wait until Caddy has picked that
+  up (the `refresh` interval plus the record's TTL, so keep the TTL short),
+  then stop the server (see "Shutting down" below). Its players get a 1001 and
+  reconnect to another machine automatically.
 - **A machine that vanished without removing its record**: Caddy fails to
   reach it and moves on, so players just wait a moment. Clean up stale records
   with a periodic reconcile or the autoscaling group's scale-in hook.
+- **Many players reconnecting at once** (the gateway restarts, or every node
+  restarts together): connections that don't fit in HeTu's listen queue are
+  dropped by the kernel, and a node Caddy can't reach within 2 seconds is
+  skipped for 30 seconds as well. The queue defaults to 2048
+  (`LISTEN_BACKLOG`); on Linux it is also capped by `net.core.somaxconn`
+  (4096 by default since kernel 5.4). Raise both if one machine takes more
+  connections at once. The SDK adds random jitter to its reconnect delay,
+  which spreads out players who dropped at the same moment.
 - **The gateway is a single point of failure.** Use a stable machine; if it
   goes down, players reconnect automatically. At larger scale, add gateways
   behind your cloud's load balancer.

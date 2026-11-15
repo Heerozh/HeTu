@@ -50,6 +50,8 @@ class FakeWsConnection:
         self.close_reason: str | None = None
         # 对端不读数据：send 一直卡在 drain 上，连接关了之后要到 abort 兜底才醒
         self.stuck = False
+        # stuck 时有 send 进来、卡住了。要等"已经卡住"的用例等它，不要 sleep 一个固定时长
+        self.send_stuck = asyncio.Event()
         # 每次 send 要花多久（秒），模拟慢链路：发送协程落在接收协程后面
         self.send_delay = 0.0
         # protocol_error() 的返回值
@@ -103,6 +105,7 @@ class FakeWsConnection:
         if self._closed:
             raise ConnectionClosed
         if self.stuck:
+            self.send_stuck.set()
             await self._aborted.wait()
             raise ConnectionClosed
         if self.send_delay:
@@ -722,7 +725,9 @@ async def test_drain_fallback_unblocks_stuck_sender(mod_runtime):
     client, task = await _connect(mod_runtime)
     client.conn.stuck = True
     client.send(["rpc", "report_ctx_timestamp"])  # 回复卡在发送上
-    await asyncio.sleep(0.1)
+    # 等回复真的卡在 send 上再排空。以前 sleep 0.1 秒，CI 上服务端握手之后落库 Connection 行慢，
+    # 还没读到这条 RPC 就排空了（排在 inbox 里没读的不执行），连接直接以 1001 拆掉
+    await asyncio.wait_for(client.conn.send_stuck.wait(), 10)
     client.conn.stop_receiving()
     await asyncio.sleep(0.3)
     assert not task.done()

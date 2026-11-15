@@ -190,7 +190,7 @@ class StartCommand(CommandInterface):
     @classmethod
     def execute(cls, args):
         from ..common.helper import WORKER_INDEX_ENV
-        from ..server.config import HeTuConfig
+        from ..server.config import HeTuConfig, listen_backlog
         from ..server.runtime import LoggingConfigError, check_logging_config
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 
@@ -215,6 +215,11 @@ class StartCommand(CommandInterface):
             try:
                 check_logging_config(config.get("LOGGING") or {})
             except LoggingConfigError as e:
+                print(e)
+                sys.exit(2)
+            try:
+                listen_backlog(config)
+            except ValueError as e:
                 print(e)
                 sys.exit(2)
         else:
@@ -276,6 +281,7 @@ class StartCommand(CommandInterface):
         from ..safelogging import handlers as log_handlers
         from ..server import StartupAborted
         from ..server.adapters import aiohttp_app
+        from ..server.config import listen_backlog
 
         # Windows 控制台打开 ANSI 转义支持，彩色日志和启动 LOGO 才不会显示成裸转义码
         enable_windows_console_ansi()
@@ -293,7 +299,7 @@ class StartCommand(CommandInterface):
         log_handlers.AutoListener.start_all()
         log_server_info(config, f"Hetu-{config.NAMESPACE}", workers)
         try:
-            sock = aiohttp_app.bind_socket(config.LISTEN)
+            sock = aiohttp_app.bind_socket(config.LISTEN, listen_backlog(config))
         except OSError as e:
             logger.error(
                 _("❌ 监听 {listen} 失败：{err}").format(listen=config.LISTEN, err=e)

@@ -38,6 +38,11 @@ PROXIES_COUNT: 1
 
 # 服务器Websocket监听地址
 LISTEN: 0.0.0.0:2466
+# 监听队列长度：已经完成 TCP 握手、还没被 worker 接走的连接最多排多少个。大批客户端同时重连（开服、
+# 网络闪断）时排不下的握手会被内核丢掉，客户端要等 1、3、7…秒重传。Linux 上会被截到
+# net.core.somaxconn（5.4 起的内核默认 4096，更老的只有 128，截短了开服时会提示），macOS 上是
+# kern.ipc.somaxconn
+# LISTEN_BACKLOG: 2048
 
 # 工作进程数，-1 为自动按cpu核心数
 WORKER_NUM: 4
