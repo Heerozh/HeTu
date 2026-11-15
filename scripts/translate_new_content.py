@@ -4,9 +4,12 @@
 
 功能：
 1) 全量扫描默认语言 contentDir 下的 Markdown 文件（排除各语言目录）。
-2) 对每个源文件比较“源文件最近提交时间”与“英文翻译文件最近提交时间”。
-3) 若源文件更新更晚，则并发翻译到所有目标语言目录。
-4) 自动 git add 翻译结果，并执行 git commit + git push。
+2) 对每个源文件比较“源文件最近提交时间”与“译文最近提交时间”（第一个目标语言的）。
+3) 若源文件更新更晚，则并发翻译到所有目标语言目录。大文档在标题前切成几段，一段一段翻译再拼起来
+   （split_into_chunks）：一次请求的译文太长会超出模型的输出上限、被截断，长输出也更容易出错。
+4) 每段译文都要过检查（check_translation）：没被截断、代码块外的标题和代码块围栏与原文一致、长度合理。
+   有一篇没过就不提交，没过的不写文件。
+5) 自动 git add 翻译结果，并执行 git commit + git push。
 
 环境变量（OpenAI 兼容接口）：
 - TRANSLATE_API_URL / OPENAI_BASE_URL / OPENAI_API_BASE
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -31,8 +35,16 @@ from urllib.request import Request, urlopen
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 DEFAULT_MAX_WORKERS = 8
-LARGE_SOURCE_SIZE_BYTES_THRESHOLD = 10 * 1024
-LARGE_SOURCE_MAX_TOKENS = 8 * 1024
+# 每次请求的输出上限（token），deepseek-chat 最多 8K。原来只给大于 10KB 的原文设，而且整篇一次翻：
+# 现在的 advanced.md 有 70KB，译文远超这个上限，被截断后只要不是空的就照写、照提交
+MAX_OUTPUT_TOKENS = 8 * 1024
+# 大文档在标题前切开，每段原文尽量不超过这么多字节，译文远小于输出上限
+CHUNK_TARGET_BYTES = 12 * 1024
+# 译文和原文的字节数之比要在这个范围里，不然多半是漏翻了或者重复了一段。原文太小的不查（比例不稳定）
+SIZE_RATIO_RANGE = (0.6, 1.6)
+SIZE_CHECK_MIN_BYTES = 2 * 1024
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+HEADING_RE = re.compile(r"^#{1,6}\s")
 
 # 不参与翻译的源目录：api 由 scripts/gen_api_docs.py 自动生成（重译会被覆盖），
 # plans/superpowers 是开发内部产物。
@@ -230,15 +242,93 @@ def sanitize_translation(text: str) -> str:
             return text
 
 
-def keep_trailing_newline_like(source: str, translated: str) -> str:
-    if source.endswith("\n") and not translated.endswith("\n"):
-        return translated + "\n"
-    if not source.endswith("\n") and translated.endswith("\n"):
-        return translated.rstrip("\n")
-    return translated
+def _front_matter_end(lines: list[str]) -> int:
+    """front matter（--- 或 +++ 包着的）之后第一行的行号，没有 front matter 返回 0"""
+    if not lines or lines[0].strip() not in ("---", "+++"):
+        return 0
+    delimiter = lines[0].strip()
+    for i in range(1, len(lines)):
+        if lines[i].strip() == delimiter:
+            return i + 1
+    return 0
 
 
-def translate_text(
+def document_outline(text: str) -> tuple[list[int], int]:
+    """代码块外每个标题的级别（按顺序），和代码块围栏的行数。front matter 不算"""
+    levels: list[int] = []
+    fences = 0
+    in_fence = False
+    lines = text.splitlines()
+    for line in lines[_front_matter_end(lines) :]:
+        if FENCE_RE.match(line):
+            fences += 1
+            in_fence = not in_fence
+        elif not in_fence and HEADING_RE.match(line):
+            levels.append(len(line) - len(line.lstrip("#")))
+    return levels, fences
+
+
+def check_translation(source: str, translated: str) -> None:
+    """
+    译文和原文对一下结构，对不上就抛 RuntimeError：代码块外的标题（个数、级别、顺序）和代码块围栏的行数
+    要一样；原文不小于 SIZE_CHECK_MIN_BYTES 时，长度之比要在 SIZE_RATIO_RANGE 里。
+
+    能抓到的是漏了段、多了段、整段重复、代码块没闭合、"总结"了而不是逐句翻。在段落里多出、少了几句抓不到。
+    """
+    src_levels, src_fences = document_outline(source)
+    dst_levels, dst_fences = document_outline(translated)
+    if dst_levels != src_levels:
+        raise RuntimeError(
+            f"译文的标题和原文对不上：原文 {len(src_levels)} 个，译文 {len(dst_levels)} 个"
+            "（个数一样就是级别或顺序不同）"
+        )
+    if dst_fences != src_fences:
+        raise RuntimeError(
+            f"译文的代码块围栏和原文对不上：原文 {src_fences} 行，译文 {dst_fences} 行"
+        )
+    src_bytes = len(source.encode("utf-8"))
+    if src_bytes >= SIZE_CHECK_MIN_BYTES:
+        ratio = len(translated.encode("utf-8")) / src_bytes
+        low, high = SIZE_RATIO_RANGE
+        if not low <= ratio <= high:
+            raise RuntimeError(
+                f"译文长度是原文的 {ratio:.2f} 倍，不在 {low}~{high} 之间，多半漏翻了或者重复了一段"
+            )
+
+
+def split_into_chunks(text: str, target_bytes: int = CHUNK_TARGET_BYTES) -> list[str]:
+    """
+    把文档在标题前切成几段，每段尽量不超过 target_bytes 字节；单个章节本身就更大的，自己成一段。只在代码块外
+    的标题行前切，front matter 留在第一段。几段直接拼起来和原文逐字相同。
+    """
+    lines = text.splitlines(keepends=True)
+    starts = [0]
+    in_fence = False
+    for i in range(_front_matter_end(lines), len(lines)):
+        line = lines[i]
+        if FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence and i > 0 and HEADING_RE.match(line):
+            starts.append(i)
+    ends = [*starts[1:], len(lines)]
+    chunks: list[str] = []
+    for start, end in zip(starts, ends, strict=True):
+        section = "".join(lines[start:end])
+        if chunks and len((chunks[-1] + section).encode("utf-8")) <= target_bytes:
+            chunks[-1] += section
+        else:
+            chunks.append(section)
+    return chunks
+
+
+def match_edge_newlines(source: str, translated: str) -> str:
+    """译文开头、结尾的换行和原文一样多：几段译文直接拼起来，段和段之间的空行不多不少"""
+    lead = len(source) - len(source.lstrip("\n"))
+    trail = len(source) - len(source.rstrip("\n"))
+    return "\n" * lead + translated.strip("\n") + "\n" * trail
+
+
+def request_translation(
     endpoint: str,
     token: str,
     model: str,
@@ -246,11 +336,20 @@ def translate_text(
     target_lang_key: str,
     target_lang_name: str,
     source_text: str,
+    part: tuple[int, int] | None = None,
 ) -> str:
+    """翻译一段（或者一整篇小文档）：一次请求，没被截断、过了 check_translation 才返回"""
+    part_note = ""
+    if part is not None:
+        index, total = part
+        part_note = (
+            f"（这是一篇长文档在标题前切开的第 {index}/{total} 段，只翻译这一段，"
+            "不要补出前后的内容，也不要加 front matter）"
+        )
     user_prompt = (
         f"源语言：{source_lang}\n"
         f"目标语言：{target_lang_name} ({target_lang_key})\n\n"
-        "请翻译下面的文档，严格保持原始格式：\n"
+        f"请翻译下面的文档{part_note}，严格保持原始格式：\n"
         "---BEGIN DOCUMENT---\n"
         f"{source_text}\n"
         "---END DOCUMENT---"
@@ -259,15 +358,12 @@ def translate_text(
     payload = {
         "model": model,
         "temperature": 1,
+        "max_tokens": MAX_OUTPUT_TOKENS,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
     }
-
-    source_size_bytes = len(source_text.encode("utf-8"))
-    if source_size_bytes > LARGE_SOURCE_SIZE_BYTES_THRESHOLD:
-        payload["max_tokens"] = LARGE_SOURCE_MAX_TOKENS
 
     req = Request(
         endpoint,
@@ -290,15 +386,65 @@ def translate_text(
 
     try:
         parsed = json.loads(body)
-        translated = parsed["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        choice = parsed["choices"][0]
+        translated = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason")
+    except (
+        KeyError,
+        IndexError,
+        TypeError,
+        AttributeError,
+        json.JSONDecodeError,
+    ) as exc:
         raise RuntimeError(f"翻译接口返回格式异常: {body}") from exc
 
+    if finish_reason == "length":
+        raise RuntimeError(f"译文被截断：输出达到上限 max_tokens={MAX_OUTPUT_TOKENS}")
+    if finish_reason == "content_filter":
+        raise RuntimeError("译文被内容过滤截掉了")
     if not isinstance(translated, str) or not translated.strip():
         raise RuntimeError("翻译接口返回空内容")
 
-    translated = sanitize_translation(translated)
-    translated = keep_trailing_newline_like(source_text, translated)
+    translated = match_edge_newlines(source_text, sanitize_translation(translated))
+    check_translation(source_text, translated)
+    return translated
+
+
+def translate_text(
+    endpoint: str,
+    token: str,
+    model: str,
+    source_lang: str,
+    target_lang_key: str,
+    target_lang_name: str,
+    source_text: str,
+) -> str:
+    """翻译一篇文档：大的在标题前切成几段，一段一段翻再拼起来。任何一段没过检查，整篇失败"""
+    if not source_text.strip():
+        return source_text
+    chunks = split_into_chunks(source_text)
+    total = len(chunks)
+    parts: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        try:
+            parts.append(
+                request_translation(
+                    endpoint,
+                    token,
+                    model,
+                    source_lang,
+                    target_lang_key,
+                    target_lang_name,
+                    chunk,
+                    part=(index, total) if total > 1 else None,
+                )
+            )
+        except RuntimeError as exc:
+            if total == 1:
+                raise
+            raise RuntimeError(f"第 {index}/{total} 段: {exc}") from exc
+    translated = "".join(parts)
+    check_translation(source_text, translated)
     return translated
 
 
@@ -524,15 +670,24 @@ def main() -> int:
             )
             future_map[future] = task
 
+        failures = 0
         for future in as_completed(future_map):
             try:
                 target_path, changed = future.result()
             except Exception as exc:  # noqa: BLE001
+                failures += 1
                 eprint(f"[translate-hook] 并发任务失败: {exc}")
-                return 1
+                continue
 
             if changed:
                 generated_or_updated.append(target_path)
+
+    if failures:
+        eprint(
+            f"[translate-hook] {failures} 个翻译任务失败，不提交。没过检查的没有写文件，"
+            "其余写好的译文留在工作区"
+        )
+        return 1
 
     changed_unique = sorted(set(generated_or_updated))
     if not changed_unique:
