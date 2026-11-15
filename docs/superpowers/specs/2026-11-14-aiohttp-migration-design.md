@@ -1284,6 +1284,33 @@ abort。所以：
 4. 在任务管理器里结束一个 worker 进程：它以同一个序号重启，留下的租约由 `lease_owner_exited` 认出来。
 5. DEBUG 模式下改 app 文件：worker 逐个重启；改坏了时其余 worker 照旧，改好后恢复。
 
+**Windows 上的验证（2026-11-15，Windows 11、Python 3.14.7、aiohttp 3.14.5）**：
+
+- 自动化测试：
+  - `test_supervisor.py` 原来在 Windows 上 3 个失败、其中一个挂住。原因在假 worker：几个进程往同一个
+    `events.log` 追加，Windows 上追加写不是原子的，会丢行；写坏了的行让测试的 watcher 线程解析出错死掉，没人
+    request_stop，就一直挂着。改成每个进程写自己的 `events-<pid>.log`，读的时候合起来按时刻排序。改后 22 个
+    通过，6 个跳过（端到端的 POSIX 信号用例）。
+  - `test_server_signals.py`、`test_aiohttp_adapter.py`：44 个通过，4 个跳过。第 4a 步补的 Windows 用例
+    （§5.4.6）当时没推送，这次一起合进来了。第 4b 步的排空用例在 Windows 上也通过。
+- 人工清单 5 项都做了，用探针脚本，没有写成测试。真起 `hetu start`（aiohttp 栈、`WORKER_NUM: 2`、配置模板
+  的进程安全队列日志），Ctrl+C 的发法同 §5.4.6：
+  1. 两个 worker 都装了 accept 线程。60 个短连接分到两个 worker（23 / 37），`hetu.log` 里 `Srv 0`、`Srv 1`
+     都有"新连接"；
+  2. 40 个已登录的连接（23 / 17），断线 System 每次睡 3 秒。按 Ctrl+C，1.5 秒后（还在关服途中）再按一次：
+     第二次不打断，没有强制结束、没有异常栈。客户端都收到 1001，断线 System 各跑一次，Connection 行为 0，
+     3.3 秒后以 0 退出；
+  3. Redis 后端：开着服时两个租约，主人就是两个 worker 的 pid。按 Ctrl+C 后两把租约的 key 都删掉了（真释放，
+     不是靠 `lease_owner_exited` 排除），`hetu upgrade` 走到了确认提示，没被在线租约拦住；
+  4. 用 `taskkill /F /PID` 结束 worker 1（同任务管理器的"结束任务"，都是 TerminateProcess）。日志打"worker 1
+     意外退出（退出码 1），0.5 秒后以同一序号重启"，换了新进程接连接，worker 0 不受影响。新进程拿了一个新的
+     worker id，旧的 key 还在（主人是已退出的 pid），`live_worker_ids` 按 `lease_owner_exited` 把它排除，只
+     算 2 个。关服之后只剩这把旧 key，活租约为 0，`hetu upgrade` 照常执行；
+  5. DEBUG 开着，改 app 文件：顺序是旧 worker 0 关服 → 起新 worker 0 → 新 worker 0 就绪 → 旧 worker 1 关服
+     → 起新 worker 1 → 就绪，新代码生效。改出语法错误：worker 0 停在那里，SyntaxError 的说明只打一次，30 次调用
+     都由 worker 1（旧进程、旧代码）回答，管理进程不退出。改好后两个 worker 都换成新代码。整个过程没有"连续
+     失败"，Ctrl+C 后以 0 退出。
+
 **和设计的出入**
 
 - 停服通知在所有平台上都走控制管道，Unix 上也不转发 SIGTERM。终端里的 Ctrl+C 照样会发给 worker，靠只认第一个
@@ -1412,7 +1439,8 @@ abort。所以：
 
 ## 9. 风险
 
-- **Windows 没有 CI**：第 3~5 步要按人工清单在 Windows 上验证，包括 Ctrl+C 和多 worker 的 accept。
+- **Windows 没有 CI**：第 3~5 步要按人工清单在 Windows 上验证，包括 Ctrl+C 和多 worker 的 accept。第 4a 步
+  （§5.4.6）、第 5 步（§5.7）已在 Windows 上验证过。
 - **aiohttp 的 ws 语义差异发现得晚**：靠两套实现跑同一套测试，加上假连接的单元测试，在第 3、4a 步提前暴露。
 - **关服时间超过编排器的宽限期**：docker 默认 10 秒、k8s 默认 30 秒后强杀，强杀会跳过清理。关服预算要放进
   宽限期，文档里写明怎么配。
