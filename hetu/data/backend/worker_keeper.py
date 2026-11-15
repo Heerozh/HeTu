@@ -139,7 +139,7 @@ class SQLiteToolWorkerKeeper(WorkerKeeper):
         self.client = client
         self.worker_id = -1
         # 持有者标识 + 本进程随机生成的部分，续约、释放按整个值比对，见 lease_value
-        self.node_id = lease_value(lease_owner_id(pid, tool=True))
+        self.node_id = lease_value(lease_owner_id(pid, tool=True), pid)
         self._token = self.node_id.encode()
 
     @staticmethod

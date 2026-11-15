@@ -245,11 +245,14 @@ def test_token_is_flushed_to_disk_before_linking(new_node, monkeypatch):
 
 
 def test_lease_value_adds_per_process_part():
-    """租约值 = 持有者标识 + "#" + 本进程随机的部分，每个进程都不同；去掉随机部分就是标识"""
-    value = helper.lease_value("host-a:tok:1")
-    assert value.startswith("host-a:tok:1#")
-    assert value != helper.lease_value("host-a:tok:1")
-    assert helper.lease_identity(value) == "host-a:tok:1"
+    """
+    租约值 = 持有者标识 + "#" + 持有者的 pid + "." + 本进程随机的部分：每个进程都不同，去掉 "#" 和之后的
+    就是标识
+    """
+    value = helper.lease_value("host-a:tok:w0:1", 4321)
+    assert value.startswith("host-a:tok:w0:1#4321.")
+    assert value != helper.lease_value("host-a:tok:w0:1", 4321)
+    assert helper.lease_identity(value) == "host-a:tok:w0:1"
     assert helper.lease_identity("host-a:1") == "host-a:1"
 
 
@@ -263,14 +266,15 @@ def test_sqlite_tool_lease_value_has_per_process_part(new_node):
     first = SQLiteToolWorkerKeeper(cast(Any, None), 123)
     second = SQLiteToolWorkerKeeper(cast(Any, None), 123)
     token = helper.node_token()
-    assert helper.lease_identity(first.node_id) == f"cli:host-a:{token}:123"
+    assert first.node_id.startswith(f"cli:host-a:{token}:123#123.")
     assert first.node_id != second.node_id
 
 
 def test_lease_owner_exited_parses_owner_ids(monkeypatch):
     """
-    Windows 上认"租约主人已经退出"：第一段是机器码，最后一段是 pid。管理进程起的 worker 最后一段是管理
-    进程的 pid：worker 被强制结束、管理进程还在时会以同一个序号重启、接着用这把租约，不算退出
+    Windows 上认"租约主人已经退出"：第一段是机器码，标识的最后一段和 "#" 后面持有者自己的 pid 都退出了
+    才算。管理进程起的 worker，标识的最后一段是管理进程的 pid：worker 被强制结束、管理进程还在时会以同一个
+    序号重启、接着用这把租约；管理进程被强制结束、worker 还在时，worker 还要优雅关服、还在写数据
     """
     exited = {111, 222}
     monkeypatch.setattr(helper, "sys", SimpleNamespace(platform="win32"))
@@ -286,6 +290,15 @@ def test_lease_owner_exited_parses_owner_ids(monkeypatch):
     assert not helper.lease_owner_exited("host-a:w0:333#ab12cd34")
     assert not helper.lease_owner_exited("host-b:111")
     assert not helper.lease_owner_exited("pytest-node")
+    # 现在的格式："#" 后面是持有者自己的 pid
+    assert helper.lease_owner_exited("host-a:tok:111#111.ab12cd34")
+    assert helper.lease_owner_exited("host-a:tok:w0:111#222.ab12cd34")
+    assert not helper.lease_owner_exited(
+        "host-a:tok:w0:111#444.ab12cd34"
+    )  # 管理进程被杀
+    assert not helper.lease_owner_exited(
+        "host-a:tok:w0:333#222.ab12cd34"
+    )  # worker 被杀
 
 
 @posix_only

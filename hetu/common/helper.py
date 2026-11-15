@@ -272,21 +272,22 @@ def lease_owner_id(pid: int, *, tool: bool = False) -> str:
     return TOOL_NODE_PREFIX + owner if tool else owner
 
 
-def lease_value(identity: str) -> str:
+def lease_value(identity: str, pid: int) -> str:
     """
-    租约里存的值：持有者标识 + "#" + 本进程启动时随机生成、不落盘的部分。
+    租约里存的值：`持有者标识#持有租约的进程的 pid.随机数`，随机数是本进程生成的、不落盘。
 
     续约、释放都按整个值比对：标识就算撞了，换一个进程随机部分也不同，比对不上。只存标识的话，本进程
     卡住超过租约的 60 秒、key 过期后被标识相同的另一个进程拿走，醒来续约照样比对得上，两边用同一个
     Worker ID。认"自己重启前留下的"只看标识（`lease_identity`），见 RedisWorkerKeeper.get_worker_id。
+    pid 给 Windows 上的退出判断用（`lease_owner_exited`）：管理进程起的 worker，标识里的是管理进程的 pid。
 
-    The stored lease value: owner id plus a random per-process part.
+    The stored lease value: owner id, then the holder's pid and a random per-process part.
     """
-    return f"{identity}{LEASE_NONCE_SEP}{secrets.token_hex(4)}"
+    return f"{identity}{LEASE_NONCE_SEP}{pid}.{secrets.token_hex(4)}"
 
 
 def lease_identity(value: str) -> str:
-    """租约值里的持有者标识（去掉本进程的随机部分）"""
+    """租约值里的持有者标识（去掉 "#" 和之后的部分）"""
     return value.split(LEASE_NONCE_SEP, 1)[0]
 
 
@@ -322,9 +323,12 @@ def windows_pid_exited(pid: int) -> bool:
 
 def lease_owner_exited(owner: bytes | str) -> bool:
     """
-    worker id 租约的主人（node_id，格式见 `lease_owner_id`：第一段是机器码，最后一段是 pid）是本机上
-    已经退出的进程。只在 Windows 上这么认。HeTu 管理进程起的 worker，最后一段是管理进程的 pid：worker
-    被强制结束、管理进程还在时，它会以同一个序号重启、接着用这把租约，不能算退出。
+    worker id 租约的主人是本机上已经退出的进程。只在 Windows 上这么认。
+
+    租约值的格式见 `lease_value`：标识的第一段是机器码，最后一段是 pid（HeTu 管理进程起的 worker 是管理
+    进程的 pid，其余是本进程的），"#" 后面是持有租约的进程自己的 pid（旧格式没有）。这些 pid 都退出了才算：
+    worker 被强制结束、管理进程还在时，它会以同一个序号重启、接着用这把租约；管理进程被强制结束、worker
+    还在时，worker 要读到控制管道断开再优雅关服，这期间还在写数据。
 
     为什么要认：Windows 上进程被强制结束（TerminateProcess）时关服钩子里的 release_worker_id
     没机会跑——任务管理器"结束任务"、`taskkill /F`、单进程模式第二次 Ctrl+C 强退，管理进程等
@@ -346,11 +350,11 @@ def lease_owner_exited(owner: bytes | str) -> bool:
         owner = owner.decode("ascii", errors="replace")
     from .snowflake_id import TOOL_NODE_PREFIX
 
-    parts = lease_identity(owner).removeprefix(TOOL_NODE_PREFIX).split(":")
-    machine_id, pid = parts[0], parts[-1]
-    return (
-        len(parts) >= 2
-        and machine_id == get_machine_id()
-        and pid.isdecimal()
-        and windows_pid_exited(int(pid))
-    )
+    identity, _sep, holder = owner.partition(LEASE_NONCE_SEP)
+    parts = identity.removeprefix(TOOL_NODE_PREFIX).split(":")
+    if len(parts) < 2 or parts[0] != get_machine_id():
+        return False
+    pids = [parts[-1]]
+    if "." in holder:
+        pids.append(holder.split(".", 1)[0])
+    return all(pid.isdecimal() and windows_pid_exited(int(pid)) for pid in pids)

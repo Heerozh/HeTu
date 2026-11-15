@@ -113,8 +113,8 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     `SET key node_id NX EX ttl`（抢新id）本身就是原子的，不需要额外处理。
 
-    比对用的值（node_id）是"持有者标识 + 本进程随机生成的部分"（`lease_value`）：标识就算撞了，
-    换了一个进程也比对不上。
+    比对用的值（node_id）是"持有者标识 + 持有者的 pid + 本进程随机生成的部分"（`lease_value`）：标识
+    就算撞了，换了一个进程也比对不上。
 
     ## 复用
 
@@ -170,7 +170,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 持有者标识：同一个位置重启前后不变，认"自己重启前留下的"租约靠它，格式见 lease_owner_id。
         # 租约里存的是它加上本进程随机生成的部分，续约、释放按整个值比对
         self.identity = lease_owner_id(pid, tool=tool)
-        self.node_id = lease_value(self.identity)
+        self.node_id = lease_value(self.identity, pid)
 
     def _key(self, worker_id: int) -> str:
         return f"{self.worker_id_key}:{worker_id}"
