@@ -23,6 +23,11 @@ async def test_call_not_exist(mod_test_app, mod_executor):
 
 
 async def test_call_args_error(mod_test_app, mod_executor, caplog):
+    # 同一进程里有用例按 DEFAULT_LOGGING_CONFIG 起过服的话（harness 不传 LOGGING 也是它），HeTu.replay
+    # 的级别是 ERROR，replay 那份 INFO 被滤掉。只调级别：它这时不往上传，pytest 会把捕获 handler 直接
+    # 挂在它上面，再打开往上传的话每条会收到两份
+    caplog.set_level(logging.INFO, logger="HeTu.replay")
+
     # 测试参数少一个
     ok, _ = await mod_executor.execute("login")
     assert not ok
