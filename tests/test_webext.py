@@ -1,18 +1,17 @@
-"""自定义HTTP端点（@hetu.define_route / @hetu.on_server_setup）的注册测试。
-
-不需要数据库：worker_main只负责创建Sanic app并挂路由，连后端是在
-before_server_start里做的，这里不启动服务器。
+"""
+自定义HTTP端点（@hetu.define_route / @hetu.on_server_setup）：真起服务、发真实的请求。后端用 SQLite，
+不需要 Docker。
 """
 
-import itertools
+from typing import Any
 
 import pytest
+from fixtures.server_harness import ServerHarness
 
 import hetu
 from hetu import webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.server import worker_main
 from hetu.system import SystemClusters
 
 NAMESPACE = "webext_test"
@@ -20,7 +19,7 @@ NAMESPACE = "webext_test"
 
 @pytest.fixture(autouse=True)
 def clean_registry():
-    """webext的注册表是模块级全局的，用例之间必须清干净，否则会漏到别的测试文件。"""
+    """webext 的注册表、簇、Endpoint 的定义都是进程级的，用例之间必须清干净，否则会漏到别的测试文件。"""
     webext.clear()
     SystemClusters()._clear()
     EndpointDefines()._clear()
@@ -30,12 +29,12 @@ def clean_registry():
     EndpointDefines()._clear()
 
 
-# app文件会被worker_main重复exec（管理进程+worker），所以定义都带force=True。
-# 另外SystemClusters要求namespace下至少有一个System才能build_clusters，这里放个空的。
+# app 文件会被重复 exec，所以定义都带 force=True。SystemClusters 要求 namespace 下至少有一个 System
+# 才能建簇，这里放个空的
 APP_PREAMBLE = """
 import hetu
 import numpy as np
-from sanic import text
+from aiohttp import web
 
 
 @hetu.define_component(namespace="{ns}", force=True)
@@ -50,142 +49,147 @@ async def noop(ctx):
 
 """
 
+DOWNLOAD_APP = """
+@hetu.define_route("/download/{name}")
+async def download(request: web.Request) -> web.StreamResponse:
+    return web.Response(text=f"downloaded {request.match_info['name']}")
+"""
 
-def make_app_file(tmp_path, body: str):
+
+def make_server(tmp_path, body: str, **config: Any) -> ServerHarness:
+    """把 body 接在 APP_PREAMBLE 后面写成 app 文件，建 harness（会加载一遍 app 文件）"""
     app_file = tmp_path / "app.py"
     app_file.write_text(APP_PREAMBLE.format(ns=NAMESPACE) + body, "utf-8")
-    return app_file
-
-
-_app_seq = itertools.count()
-
-
-def build_server(app_file):
-    # Sanic不允许同名app共存于一个进程（生产中每个worker是独立进程），测试里给个唯一名
-    return worker_main(
-        f"Hetu-{NAMESPACE}-{next(_app_seq)}",
+    return ServerHarness(
         {
             "APP_FILE": str(app_file),
             "NAMESPACE": NAMESPACE,
             "INSTANCES": ["webext_1"],
-            "LISTEN": "0.0.0.0:875",
+            "LISTEN": "127.0.0.1:0",
             "PACKET_LAYERS": [{"type": "jsonb"}],
-            "BACKENDS": {},
+            "BACKENDS": {
+                "main": {
+                    "type": "sqlite",
+                    "master": f"sqlite:///{tmp_path / 'webext.db'}",
+                }
+            },
             "LOGGING": DEFAULT_LOGGING_CONFIG,
             "DEBUG": False,
             "WORKER_NUM": 1,
-        },
+            **config,
+        }
     )
 
 
-def route_paths(app) -> set[str]:
-    # sanic的route.path不带开头的"/"，根路径是空字符串
-    return {route.path for route in app.router.routes}
+def test_define_route_serves_requests(tmp_path):
+    """@define_route 的路由能访问到，路径参数从 request.match_info 取；HeTu 自己的入口都还在"""
+    server = make_server(tmp_path, DOWNLOAD_APP)
+
+    response = server.get("/download/abc.zip")
+    assert (response.status, response.text) == (200, "downloaded abc.zip")
+    assert "Powered by HeTu" in server.get("/").text
+    # ws 入口还是 HeTu 的：普通 GET 不是 ws 握手，回 400
+    assert server.get("/hetu/webext_1").status == 400
 
 
-DOWNLOAD_APP = """
-@hetu.define_route("/download/<name:str>")
-async def download(request, name: str):
-    return text(name)
-"""
-
-
-def test_define_route_mounts_on_web_server(tmp_path):
-    """@define_route的路由应该出现在服务器上，且不影响HeTu自己的入口。"""
-    app = build_server(make_app_file(tmp_path, DOWNLOAD_APP))
-
-    paths = route_paths(app)
-    assert "download/<name:str>" in paths
-    # HeTu自己的两个入口都还在
-    assert "" in paths
-    assert "hetu/<db_name:str>" in paths
-
-
-def test_route_can_declare_sanic_kwargs(tmp_path):
-    """kwargs原样透传给sanic，比如限定methods。"""
-    app = build_server(
-        make_app_file(
-            tmp_path,
-            """
+def test_methods_limit_and_request_size(tmp_path):
+    """
+    methods 限制生效：只注册了 POST 的路径，用 GET 请求得到 405；不写 methods 就只有 GET。methods 可以
+    只给一个字符串，大小写重复的只注册一次（aiohttp 上同一方法加两次会报错）。请求体的上限是
+    REQUEST_MAX_SIZE，超过回 413
+    """
+    server = make_server(
+        tmp_path,
+        """
 @hetu.define_route("/upload", methods=["POST"])
 async def upload(request):
-    return text("ok")
+    return web.Response(text=f"got {len(await request.read())} bytes")
+
+
+@hetu.define_route("/ping")
+async def ping(request):
+    return web.Response(text="pong")
+
+
+@hetu.define_route("/delete", methods="DELETE")
+async def delete(request):
+    return web.Response(text="deleted")
+
+
+@hetu.define_route("/both", methods=["get", "GET", "put"])
+async def both(request):
+    return web.Response(text=request.method)
 """,
-        )
+        REQUEST_MAX_SIZE=10,
     )
 
-    route = next(r for r in app.router.routes if r.path == "upload")
-    assert set(route.methods) == {"POST"}
-
-
-def test_worker_main_twice_does_not_conflict(tmp_path):
-    """同一进程内重复调用worker_main（管理进程+worker、或测试）不能撞RouteExists。
-
-    app文件每次都会被重新exec一遍，注册表按函数全限定名去重；路由则是每次新建一个
-    Blueprint重放上去——Blueprint一旦注册到某个app就不能再加路由了。
-    """
-    app_file = make_app_file(tmp_path, DOWNLOAD_APP)
-
-    first = build_server(app_file)
-    # 簇是单件，生产中第二次worker_main在新进程里，这里手动还原成新进程的状态。
-    # 注意webext的注册表**不清**，本用例要的就是它带着上一轮的注册再来一次。
-    SystemClusters()._clear()
-    EndpointDefines()._clear()
-    second = build_server(app_file)
-
-    assert "download/<name:str>" in route_paths(first)
-    assert "download/<name:str>" in route_paths(second)
+    assert server.request("POST", "/upload", data=b"x" * 10).text == "got 10 bytes"
+    assert server.request("POST", "/upload", data=b"x" * 11).status == 413
+    assert server.get("/upload").status == 405
+    assert server.get("/ping").text == "pong"
+    assert server.request("POST", "/ping").status == 405
+    assert server.request("DELETE", "/delete").text == "deleted"
+    assert server.get("/delete").status == 405
+    assert server.get("/both").text == "GET"
+    assert server.request("PUT", "/both").text == "PUT"
 
 
 def test_user_route_replaces_default_welcome_page(tmp_path):
-    """用户注册"/"时，HeTu的默认欢迎页让位，而不是报路由冲突。"""
-    app = build_server(
-        make_app_file(
-            tmp_path,
-            """
+    """
+    用户注册"/"时，HeTu 的默认欢迎页整个让位：用户的路由只收 GET，HEAD 也不会落到默认欢迎页上（aiohttp
+    按注册顺序匹配，默认欢迎页要是照挂，GET 虽然轮不到它，HEAD 还会由它回）
+    """
+    server = make_server(
+        tmp_path,
+        """
 @hetu.define_route("/")
 async def home(request):
-    return text("my home page")
+    return web.Response(text="my home page")
 """,
-        )
     )
 
-    roots = [r for r in app.router.routes if r.path == ""]
-    assert len(roots) == 1
-    assert webext.USER_BLUEPRINT_NAME in roots[0].name
+    response = server.get("/")
+    assert (response.status, response.text) == (200, "my home page")
+    assert server.request("HEAD", "/").status == 405
 
 
 def test_on_server_setup_receives_app(tmp_path):
-    """setup回调能拿到Sanic app，可自建blueprint/静态目录/中间件。"""
-    app = build_server(
-        make_app_file(
-            tmp_path,
-            """
-from sanic import Blueprint
+    """
+    on_server_setup 的回调拿到 aiohttp 的 app：能加路由，往 app.on_startup 挂的钩子在开服时跑；它注册的
+    "/" 同样顶掉默认欢迎页
+    """
+    server = make_server(
+        tmp_path,
+        """
+STARTED = web.AppKey("started", bool)
+
 
 @hetu.on_server_setup
-def setup(app):
-    bp = Blueprint("MyAdmin", url_prefix="/admin")
+def setup(app: web.Application):
+    async def on_startup(app):
+        app[STARTED] = True
 
-    @bp.route("/ping")
     async def ping(request):
-        return text("pong")
+        return web.Response(text=f"pong started={request.app.get(STARTED, False)}")
 
-    app.blueprint(bp)
-    app.ctx.setup_called = True
+    async def home(request):
+        return web.Response(text="setup home")
+
+    app.on_startup.append(on_startup)
+    app.router.add_get("/admin/ping", ping)
+    app.router.add_get("/", home)
 """,
-        )
     )
 
-    assert app.ctx.setup_called is True
-    assert "admin/ping" in route_paths(app)
+    assert server.get("/admin/ping").text == "pong started=True"
+    assert server.get("/").text == "setup home"
 
 
 def test_reserved_and_invalid_uri_rejected():
-    """HeTu的WebSocket入口前缀不能被占用，uri也必须是绝对路径。"""
+    """HeTu的WebSocket入口前缀不能被占用，uri也必须是绝对路径，methods 不能为空。"""
     with pytest.raises(ValueError, match="hetu"):
 
-        @hetu.define_route("/hetu/<db_name>")
+        @hetu.define_route("/hetu/{db_name}")
         async def ws_conflict(request):
             pass
 
@@ -201,43 +205,89 @@ def test_reserved_and_invalid_uri_rejected():
         async def not_absolute(request):
             pass
 
+    with pytest.raises(ValueError, match="methods"):
+
+        @hetu.define_route("/nothing", methods=[])
+        async def no_methods(request):
+            pass
+
     # 只是前缀相似的路径不受影响
     @hetu.define_route("/hetumeta")
     async def similar(request):
         pass
 
 
-def test_worker_main_turns_off_removed_sanic_options(tmp_path, monkeypatch):
-    """访问日志、Inspector 都已删掉：配置里就算还留着这两个键，Sanic 也不打开。深度 Debug
-    （DEBUG > 1）时控制台日志附带 ctx 等 extra 字段"""
-    import logging
+COUNT_APP = (
+    DOWNLOAD_APP
+    + """
 
-    from hetu.safelogging.formatter import ContextAutoFormatter
+def _count(app):
+    return sum(1 for r in app.router.resources() if r.canonical == "/download/{name}")
 
-    monkeypatch.setattr(ContextAutoFormatter, "LOG_EXTRA", False)
-    # DEBUG > 1 会把这几个 logger 调成 DEBUG，测完还原，免得影响同进程后面的用例
-    loggers = [logging.getLogger(name) for name in (None, "HeTu.root", "sanic")]
-    levels = [lg.level for lg in loggers]
-    try:
-        app = worker_main(
-            f"Hetu-{NAMESPACE}-{next(_app_seq)}",
-            {
-                "APP_FILE": str(make_app_file(tmp_path, "")),
-                "NAMESPACE": NAMESPACE,
-                "INSTANCES": ["webext_1"],
-                "LISTEN": "0.0.0.0:875",
-                "PACKET_LAYERS": [{"type": "jsonb"}],
-                "BACKENDS": {},
-                "LOGGING": DEFAULT_LOGGING_CONFIG,
-                "DEBUG": 2,
-                "WORKER_NUM": 1,
-                "ACCESS_LOG": True,
-                "INSPECTOR": True,
-            },
-        )
-    finally:
-        for lg, level in zip(loggers, levels, strict=True):
-            lg.setLevel(level)
-    assert app.config.ACCESS_LOG is False
-    assert app.config.INSPECTOR is False
-    assert ContextAutoFormatter.LOG_EXTRA is True
+
+@hetu.on_server_setup
+def count_routes(app: web.Application):
+    # 回调在 define_route 的路由挂好之后才执行：这时就数得到
+    at_setup = _count(app)
+
+    async def count(request):
+        return web.Response(text=f"{at_setup} {_count(request.app)}")
+
+    app.router.add_get("/route-count", count)
+"""
+)
+
+
+def test_app_file_exec_twice_registers_once(tmp_path):
+    """
+    app 文件在同一进程里被 exec 两遍（嵌入场景、测试）：注册表按函数的全限定名覆盖，路由只挂一次、配置
+    回调只调一次；回调执行时 define_route 的路由已经挂好了。aiohttp 只拦挨着的重复注册（同一路径、
+    同一方法连着加会报错），隔开的照样登记、先注册的那条生效，所以由回调数路由表
+    """
+    make_server(tmp_path, COUNT_APP)
+    # 簇、Endpoint 的定义是单件，生产中第二次加载在新进程里，这里手动还原成新进程的状态。webext 的
+    # 注册表**不清**，本用例要的就是它带着上一轮的声明再来一次
+    SystemClusters()._clear()
+    EndpointDefines()._clear()
+    server = make_server(tmp_path, COUNT_APP)
+
+    assert server.get("/route-count").text == "1 1"
+    assert server.get("/download/x").text == "downloaded x"
+
+
+def test_on_server_setup_error_aborts_before_backends(tmp_path):
+    """
+    on_server_setup 的回调出错就中止开服，而且是在连后端、跑启动 System 之前：配错的路由不用等开完服
+    （最长 STARTUP_TIMEOUT）才报出来，启动 System 也不会已经写过数据。先确认回调正常时启动 System
+    确实会跑（会写标记文件），不然这个用例是空测
+    """
+    marker = tmp_path / "on_start_ran"
+    seed_app = f"""
+from pathlib import Path
+
+
+@hetu.define_system(namespace="{NAMESPACE}", components=(Dummy,), on_start=True, force=True)
+async def seed(ctx):
+    Path({str(marker)!r}).write_text("ran")
+"""
+    server = make_server(tmp_path, seed_app)
+    assert server.get("/").status == 200
+    assert marker.exists()
+
+    marker.unlink()
+    webext.clear()
+    SystemClusters()._clear()
+    EndpointDefines()._clear()
+    server = make_server(
+        tmp_path,
+        seed_app
+        + """
+
+@hetu.on_server_setup
+def broken(app):
+    raise RuntimeError("broken setup")
+""",
+    )
+    with pytest.raises(RuntimeError, match="broken setup"):
+        server.get("/")
+    assert not marker.exists()

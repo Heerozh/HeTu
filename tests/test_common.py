@@ -192,18 +192,12 @@ async def test_fixed_worker_keeper(monkeypatch):
     from hetu.data.backend.worker_keeper import FixedWorkerKeeper
 
     monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
-    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
     assert await FixedWorkerKeeper().get_worker_id() == 0  # 单进程模式
 
     monkeypatch.setenv("HETU_WORKER_INDEX", "3")
     keeper = FixedWorkerKeeper()
     assert await keeper.get_worker_id() == 3
     assert await keeper.get_worker_id() == 3  # 幂等
-
-    # 过渡期：没设 HETU_WORKER_INDEX 时从 Sanic 给 worker 设的标识里取
-    monkeypatch.delenv("HETU_WORKER_INDEX")
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv12")  # sanic对两位数不留空格
-    assert await FixedWorkerKeeper().get_worker_id() == 12
 
     # 续约/释放都是空操作，不该抛异常
     await keeper.keep_alive()
@@ -495,53 +489,6 @@ async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
     assert all(t.done() for t in loops)
 
 
-def test_lease_lost_restarts_only_this_worker_in_multi_process():
-    """多进程模式丢租约：交给 Sanic 管理进程只重启本 worker，新进程会重新租 id"""
-    from types import SimpleNamespace
-
-    from hetu.server.adapters.sanic_app import on_lease_lost
-
-    calls = []
-    app = SimpleNamespace(
-        multiplexer=SimpleNamespace(restart=lambda: calls.append("restart")),
-        stop=lambda: calls.append("stop"),
-    )
-    runtime = WorkerRuntime({}, on_lease_lost=lambda: None)
-    on_lease_lost(cast(Any, app), runtime)
-    assert calls == ["restart"]
-    assert runtime.exit_code == 0
-
-
-@pytest.mark.parametrize("serving", [True, False])
-def test_lease_lost_stops_single_process_with_failure_code(serving):
-    """单进程模式丢租约：没有管理进程可以重启 worker，停服并记下非 0 退出码。已在正常服务就
-    马上停；还在开服（Sanic 用 run_until_complete 跑启动钩子，这时停 loop 会让开服报错）就
-    登记一个任务，等进入正常服务再停"""
-    from types import SimpleNamespace
-
-    from hetu.server.adapters.sanic_app import on_lease_lost
-    from hetu.server.runtime import LEASE_LOST_EXIT_CODE
-
-    calls = []
-
-    def add_task(coro, *, name):
-        coro.close()
-        calls.append(("add_task", name))
-
-    app = SimpleNamespace(
-        state=SimpleNamespace(is_running=serving),
-        stop=lambda: calls.append("stop"),
-        add_task=add_task,
-    )
-    runtime = WorkerRuntime({}, on_lease_lost=lambda: None)
-    on_lease_lost(cast(Any, app), runtime)
-    assert runtime.exit_code == LEASE_LOST_EXIT_CODE != 0
-    if serving:
-        assert calls == ["stop"]
-    else:
-        assert calls == [("add_task", "hetu:stop_on_lease_lost")]
-
-
 async def test_runtime_post_configures_and_closes_each_backend_once(
     monkeypatch, mod_test_app, mod_backend_config
 ):
@@ -571,9 +518,8 @@ async def test_runtime_post_configures_and_closes_each_backend_once(
 async def test_runtime_stop_runs_once_when_called_twice(
     monkeypatch, mod_test_app, mod_backend_config
 ):
-    """Sanic 关服时 after_server_stop 可能跑两遍，而且两遍并发：第二个关服信号让 loop.stop()，
-    正在跑的那遍 run_until_complete 抛 RuntimeError，Sanic 的 _run_shutdown_coro 把它整个重跑一遍，
-    第一遍的 task 还挂着接着跑。stop() 要只真正关一次：租约只释放一次，后端只关一次"""
+    """stop() 可以重复调用、并发调用（原来 Sanic 关服时，第二个关服信号会让关服钩子被整个重跑一遍、
+    两遍并发），只真正关一次：租约只释放一次，后端只关一次"""
     from hetu.data.backend import Backend
     from hetu.data.backend.snowflake_lease import SnowflakeLease
 
@@ -721,38 +667,6 @@ async def test_runtime_start_failure_after_lease_abandons_it(
     finally:
         await runtime.close_backends()
     assert released == [[]], "关服又释放了一次租约"
-
-
-async def test_sanic_start_listener_creates_runtime_and_propagates_abort(monkeypatch):
-    """Sanic 的 before_server_start 监听器：每次开服新建 runtime 挂到 app.ctx 上；开服失败的
-    StartupAborted 原样往外抛（Sanic 靠它中止、以非 0 退出），不能吞掉，也不能改成 app.stop()"""
-    from types import SimpleNamespace
-
-    from hetu.server.adapters.sanic_app import _runtime_start
-    from hetu.server.runtime import StartupAborted
-
-    async def aborted(self):
-        raise StartupAborted("boom at start")
-
-    monkeypatch.setattr(WorkerRuntime, "start", aborted)
-    restarts = []
-    # 故意没有 stop：监听器要是去调 app.stop() 会抛 AttributeError
-    app = SimpleNamespace(
-        config={},
-        ctx=SimpleNamespace(),
-        multiplexer=SimpleNamespace(restart=lambda: restarts.append(1)),
-    )
-    with pytest.raises(StartupAborted, match="boom at start"):
-        await _runtime_start(cast(Any, app))
-    runtime = app.ctx.runtime
-    assert isinstance(runtime, WorkerRuntime)
-    # 丢租约的回调接到了这个 app 上：多进程时只重启本 worker
-    runtime.on_lease_lost()
-    assert restarts == [1]
-    # 再开一次服就是新的 runtime
-    with pytest.raises(StartupAborted):
-        await _runtime_start(cast(Any, app))
-    assert app.ctx.runtime is not runtime
 
 
 async def test_snowflake_lease_fence():
@@ -1046,26 +960,21 @@ async def test_fixed_worker_keeper_leaves_tool_range(monkeypatch):
 
 
 def test_worker_ident(monkeypatch):
-    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和 Sanic 的一样），其他进程是 "Main "。"""
+    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和原来 Sanic 的一样），其他进程是 "Main "。"""
     from hetu.common.helper import worker_ident, worker_index
 
     monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
-    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
     assert (worker_index(), worker_ident()) == (None, "Main ")
     monkeypatch.setenv("HETU_WORKER_INDEX", "3")
     assert (worker_index(), worker_ident()) == (3, "Srv 3")
     monkeypatch.setenv("HETU_WORKER_INDEX", "12")
     assert worker_ident() == "Srv12"
-    # HETU_WORKER_INDEX 优先于 Sanic 的标识
+    # Sanic 给 worker 设的标识不再认
     monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 5")
     assert worker_index() == 12
     monkeypatch.delenv("HETU_WORKER_INDEX")
-    assert (worker_index(), worker_ident()) == (5, "Srv 5")
-    # 过渡期：Sanic 给 Reloader 等进程的标识里没有序号，原样显示
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Reloader")
-    assert (worker_index(), worker_ident()) == (None, "Reloader")
+    assert (worker_index(), worker_ident()) == (None, "Main ")
     # 空串当作没设；其他不是非负整数的值直接报错
-    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER")
     monkeypatch.setenv("HETU_WORKER_INDEX", "")
     assert worker_index() is None
     for bad in ("-1", "abc", "1.5"):
@@ -1145,3 +1054,15 @@ def test_slow_log_table_shows_average_race_count():
         "0.50",
         "4.00",
     ]
+
+
+def test_version_comes_from_the_distribution():
+    """
+    __version__ 按发行包名 hetudb 取（import 名是 hetu）。原来按 hetu 取，取不到，默认欢迎页、握手后的
+    motd 里显示的都是 "hetu is not installed in a proper way"
+    """
+    from importlib.metadata import version
+
+    import hetu
+
+    assert hetu.__version__ == version("hetudb")

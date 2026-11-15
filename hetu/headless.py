@@ -1,7 +1,7 @@
 """
 无服务器进程的表直读写客户端（headless client）。
 
-给**不是** HeTu 应用的可信内部进程用（如独立的战斗模拟进程）：不跑 Sanic、不定义 System、
+给**不是** HeTu 应用的可信内部进程用（如独立的战斗模拟进程）：不起 Web 服务器、不定义 System、
 不建簇、不发雪花号，只用 `Backend` + `Session` 直接读写由 HeTu 服务器建好的组件表。
 
 写入走与 System 完全相同的 `Session.commit()` 提交路径，因此表级 PUBLISH、keyspace 通知、
@@ -10,7 +10,7 @@ headless 进程写的。**不做权限 / RLS 检查。**
 
 Headless table client for trusted non-server processes: read / write component tables
 created by a HeTu server through the exact same `Session.commit()` path Systems use, so
-subscriptions fire identically. No Sanic, no Systems, no cluster building, no snowflake
+subscriptions fire identically. No web server, no Systems, no cluster building, no snowflake
 ids, no permission / RLS checks.
 
 用法 / Usage::
@@ -451,7 +451,7 @@ async def connect(
 ) -> HeadlessClient:
     """连接后端，按服务器写入的表 meta 认下 `components`，返回 `HeadlessClient`。
 
-    不 import sanic、不需要 app 文件、不建簇、不建表、不初始化 `SnowflakeID`。
+    不 import aiohttp、不需要 app 文件、不建簇、不建表、不初始化 `SnowflakeID`。
     `connect` / 使用 / `close` 必须在同一个 event loop 上（Redis 异步连接绑定 loop）。
 
     Parameters
@@ -467,7 +467,7 @@ async def connect(
         可混用。表不存在抛 `TableNotFound`。
 
     Connect to the backend and resolve the given components from server-written
-    table metas. Never imports sanic, builds clusters, creates tables or mints ids.
+    table metas. Never imports aiohttp, builds clusters, creates tables or mints ids.
     """
     backend = Backend(copy.deepcopy(backend_config))
     try:

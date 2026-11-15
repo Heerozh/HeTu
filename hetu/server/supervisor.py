@@ -1,6 +1,6 @@
 """
 aiohttp 栈的多进程管理（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.7），
-替代 Sanic 的 WorkerManager。
+原来用的是 Sanic 的 WorkerManager。
 
 管理进程（`Supervisor`）不加载 app 文件：hetu start 在管理进程里配好日志（建好进程安全队列）、bind 好
 监听 socket 之后交给它。它用 spawn 起 N 个 worker，每个 worker 一对单向的控制管道：
@@ -105,7 +105,7 @@ def worker_stop_timeout(config: Mapping[str, Any]) -> float:
 
 
 def loaded_module_files() -> list[str]:
-    """本进程已加载的模块的源文件。DEBUG 自动重载监视它们，同 Sanic 的 reloader"""
+    """本进程已加载的模块的源文件。DEBUG 自动重载监视它们，同原来 Sanic 的 reloader"""
     files = set()
     for module in list(sys.modules.values()):
         path = getattr(module, "__file__", None)
@@ -262,7 +262,7 @@ class _Worker:
 
 
 class _ModuleWatcher:
-    """DEBUG 自动重载：轮询 worker 报上来的模块文件的修改时间，同 Sanic 的 reloader"""
+    """DEBUG 自动重载：轮询 worker 报上来的模块文件的修改时间，同原来 Sanic 的 reloader"""
 
     def __init__(self, interval: float = RELOAD_INTERVAL) -> None:
         self.interval = interval
@@ -375,7 +375,7 @@ class Supervisor:
 
     def _install_signals(self) -> Callable[[], None]:
         """
-        关服信号（SIGINT、SIGTERM，Windows 上还有 Ctrl+Break）只认第一个，之后的都不理，不会像 Sanic
+        关服信号（SIGINT、SIGTERM，Windows 上还有 Ctrl+Break）只认第一个，之后的都不理，不会像原来 Sanic
         那样第二个信号就强杀所有进程。Docker 里本进程是 PID 1，必须显式装 SIGTERM 的处理
         """
         signals = [signal.SIGINT, signal.SIGTERM]
@@ -453,7 +453,7 @@ class Supervisor:
             name=f"HeTu-Worker-{index}",
         )
         # 序号经环境变量传给 worker：spawn 启动时复制环境变量，日志的进程标识在 import 时就读取，到
-        # worker 里再设就晚了。启动完马上删掉，不留在管理进程的环境里（同 Sanic）
+        # worker 里再设就晚了。启动完马上删掉，不留在管理进程的环境里（同原来的 Sanic）
         os.environ[WORKER_INDEX_ENV] = str(index)
         try:
             process.start()

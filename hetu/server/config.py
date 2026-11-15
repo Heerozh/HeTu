@@ -16,19 +16,18 @@ from typing import Any
 
 # 原来由 Sanic 读取、迁移后仍保留的键，HeTu 自己给默认值（和 Sanic 25.12 的默认值等价，只有
 # PROXIES_COUNT 用 0 代替 None，都表示不解析），免得换框架时默认值悄悄变掉。DEBUG 也给个默认值：
-# worker_main 要按它设日志级别
+# 配日志、建事件循环时要按它
 DEFAULTS: dict[str, Any] = {
     "DEBUG": False,
     # 关服时等连接拆完、等后台任务停下各自的上限（秒）
     "GRACEFUL_SHUTDOWN_TIMEOUT": 15.0,
     # 关服排空的上限（秒）：各连接不再收新消息，已经收到的处理完、回复发出去再断开。超时还没排空的
-    # 直接断开，在途的 RPC 随之取消。目前只在 aiohttp 栈上生效（设计稿 §5.5）
+    # 直接断开，在途的 RPC 随之取消（设计稿 §5.5）
     "SHUTDOWN_DRAIN_TIMEOUT": 5.0,
     # 一条 ws 消息的最大字节数（模板里设的是 0.5MB）
     "WEBSOCKET_MAX_SIZE": 2**20,
-    # ws ping 的间隔、等 pong 的超时（秒）
+    # ws ping 的间隔（秒），等 pong 的时间是它的一半，0 为不发 ping
     "WEBSOCKET_PING_INTERVAL": 20,
-    "WEBSOCKET_PING_TIMEOUT": 20,
     # 前置反向代理的层数、从哪个头取客户端真实 IP（0 / None 为不解析，直接用对端地址）
     "PROXIES_COUNT": 0,
     "REAL_IP_HEADER": None,

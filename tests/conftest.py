@@ -12,7 +12,6 @@ from fixtures.backends import *
 from fixtures.contexts import *
 from fixtures.defines import *
 from fixtures.event_loops import UvloopSignatureLoop
-from fixtures.http_servers import *
 from fixtures.redis_service import *
 from fixtures.sqlite_service import *
 from fixtures.testapp import *
@@ -54,10 +53,9 @@ def pytest_configure_node(node):
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """
-    loadgroup 调度时以（测试文件, 后端, Web 服务器栈）为单位分给 xdist worker：同一单位的
-    测试在同一 worker 上连续跑完，模块级夹具不会在多个 worker 上重复初始化。每个 worker 是
-    独立进程，只启动自己用到的后端容器（见 fixtures/docker_infra.py）。栈也要分开，否则
-    test_websocket.py 两个栈挤在一个组里，成了最长的那条链
+    loadgroup 调度时以（测试文件, 后端）为单位分给 xdist worker：同一单位的测试在同一
+    worker 上连续跑完，模块级夹具不会在多个 worker 上重复初始化。每个 worker 是独立
+    进程，只启动自己用到的后端容器（见 fixtures/docker_infra.py）。
     """
     if getattr(config, "workerinput", {}).get("hetu_loadgroup"):
         # xdist 自己的 collection 钩子看到这个开关，才会按 xdist_group 标记分组
@@ -67,12 +65,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         group = item.nodeid.split("::", 1)[0]
         callspec = getattr(item, "callspec", None)
-        params = callspec.params if callspec else {}
-        for key in ("backend_name", "http_server"):
-            value = params.get(key)
-            # HETU_TEST_BACKENDS 等把某个参数化列表滤空时，pytest 生成的跳过项参数是 NOTSET
-            if isinstance(value, str):
-                group += ":" + value
+        backend = callspec.params.get("backend_name") if callspec else None
+        # HETU_TEST_BACKENDS 把某个参数化列表滤空时，pytest 生成的跳过项参数是 NOTSET
+        if isinstance(backend, str):
+            group += ":" + backend
         item.add_marker(pytest.mark.xdist_group(group))
 
 
@@ -82,7 +78,7 @@ def isolate_snowflake_state():
     进程级单例 SnowflakeID 的状态不能漏给别的模块，每个模块结束时还原成开始时的样子。
     串行时漏出去的状态恰好没砸到谁；xdist 下 worker 跑测试文件的顺序不定，就随机挂：
 
-    * worker_main 起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
+    * 测试起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
       同一进程里别的测试一发号就 WorkerLeaseExpired。
     * last_timestamp 被留在未来（模拟崩溃重启、init 不传时间戳都会这样）：之后同一
       进程里每发一个号都多一条"时钟回拨"告警，数日志条数的用例

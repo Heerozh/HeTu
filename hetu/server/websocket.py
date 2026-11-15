@@ -76,8 +76,9 @@ async def serve_connection(
 
     握手、建连接上下文之后，收、发各起一个协程，任意一边结束就拆连接（停收发协程、断线 System、
     删 Connection 行、退订）；关服排空时接收那一边先停，等发送那一边发完回复再拆。返回时连接已经
-    拆完。收发期间本协程被框架取消（Sanic：传输层断开、关服）时照常拆完再返回，取消不往外抛；拆连接的
-    任务受 shield 保护，本协程再被取消也会跑完。
+    拆完。收发期间本协程被取消（框架在断线、关服时取消 handler，比如开了 aiohttp 的
+    handler_cancellation）时照常拆完再返回，取消不往外抛；拆连接的任务受 shield 保护，本协程再被
+    取消也会跑完。
 
     Serve one WebSocket connection after the framework finished the opening handshake.
     Returns once the connection is torn down.
@@ -289,7 +290,7 @@ async def serve_connection(
 
         # 收、发各起一个协程，下面等任意一边结束。不能只等发送循环：接收协程结束时队列要是满着，
         # PUSH_CLOSE 塞不进去，而发送循环可能正卡在 send 上（对端不读数据），要等到 fail 的
-        # abort 兜底才醒（Sanic 上是框架取消本协程），这期间连接拆不掉，还会多打一条发送异常
+        # abort 兜底才醒，这期间连接拆不掉，还会多打一条发送异常
         recv_task = runtime.tasks.spawn(
             client_handler(
                 conn,
@@ -333,7 +334,7 @@ async def serve_connection(
                 # 兜底（fail 再取消收发协程）
                 await asyncio.wait((send_task,))
         except asyncio.CancelledError:
-            # 框架取消了本协程（Sanic：传输层断开、关服）：照常拆连接，取消不往外抛（撤销这次
+            # 本协程被取消了（框架在断线、关服时取消 handler）：照常拆连接，取消不往外抛（撤销这次
             # 取消请求，免得 cancelling() 一直留着计数）。wait 被取消时不会取消它在等的协程，
             # 由下面的清理去取消
             current_task.uncancel()
@@ -343,9 +344,9 @@ async def serve_connection(
             logger.error(err_msg, exc_info=protocol_error)
     finally:
         # 连接断开，强制关闭此协程时也会调用。
-        # 清理放进独立 task 并 shield：fail() 之后传输层一关，Sanic 会取消本协程（connection_lost
-        # → 取消连接 task），要是正落在清理里的某个 await 上，后面的 terminate() 就跑不到，
-        # Connection 行同样泄漏；shield 让本协程被取消时清理照常跑完。
+        # 清理放进独立 task 并 shield：本协程要是在清理里的某个 await 上被取消（框架在断线时取消
+        # handler，原来的 Sanic 就是这样），后面的 terminate() 就跑不到，Connection 行同样泄漏；
+        # shield 让本协程被取消时清理照常跑完。
         # 不登记进任务表，关服时不能被取消：runtime.stop() 先等它跑完（wait_connections_closed）
         # 再关后端
         closing = True
@@ -521,8 +522,8 @@ async def _cleanup_connection(
     replay.info(close_msg)
     logger.info(close_msg)
     # 收发两个协程都停下来之后才退订、删行：接收协程可能正在处理消息（调 System、订阅），发送
-    # 循环可能正卡在 send 上。两个一起取消、一起等，不让发送循环多跑一阵（Sanic 上它可能正占着
-    # 发送锁，拖住关服时发的 1001）。用 wait 不用 await task，理由同 TaskRegistry.cancel
+    # 循环可能正卡在 send 上。两个一起取消、一起等，不让发送循环多跑一阵。用 wait 不用 await task，
+    # 理由同 TaskRegistry.cancel
     tasks = [task for task in io_tasks if task is not None and not task.done()]
     for task in tasks:
         task.cancel()

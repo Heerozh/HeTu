@@ -57,7 +57,7 @@ class ContextAutoFormatter(logging.Formatter):
     要读原样的 ident、levelname，不能被染上颜色码。
 
     `LOG_EXTRA` 为真时，把 record 上非标准的字段（如 ctx）逐行附在后面。深度 Debug（DEBUG > 1）
-    时由 worker_main 打开。
+    时由 setup_logging 打开。
 
     Colored console formatter that prefers the ``ident`` put on the record by
     ContextFilter and never mutates the record.

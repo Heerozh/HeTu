@@ -28,7 +28,8 @@ property_field = data.property_field
 
 
 try:
-    __version__ = version("hetu")
+    # 按发行包名取（pyproject.toml 的 name），import 名 hetu 取不到
+    __version__ = version("hetudb")
 except PackageNotFoundError:
     __version__ = "hetu is not installed in a proper way"
 

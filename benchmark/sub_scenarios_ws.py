@@ -94,13 +94,13 @@ REDIS_CMDS = ("zrange", "hgetall", "subscribe", "unsubscribe", "evalsha", "publi
 # --show 默认打印的列
 SHOW_KEYS = {
     "item": (
-        "tag,http_server,item_op,target_rate,write_rate,worker_cores,"
+        "tag,item_op,target_rate,write_rate,worker_cores,"
         "worker_kcycles_u_per_op,"
         "ticks_ps,items_per_tick,ins_lat_p50_ms,ins_lat_p99_ms,del_lat_p99_ms,"
         "rpc_rtt_p99_ms,rpc_rtt_max_ms,replica_cmds_ps,cons_bad_conns"
     ),
     "chat": (
-        "tag,http_server,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
+        "tag,target_rate,msgs,worker_cores,worker_mcycles_u_per_msg,"
         "worker_us_per_msg_conn,lat_p50_ms,lat_p99_ms,fanout_done_p50_ms,"
         "fanout_done_p99_ms,rpc_rtt_p99_ms,rpc_rtt_max_ms,worker_rss_mb,cons_bad_conns"
     ),
@@ -838,6 +838,15 @@ def redis_snap(urls: list[str]) -> dict[str, Any]:
     return out
 
 
+def _established(proc: psutil.Process, port: int) -> int:
+    """proc 手上已建立的、本端口是 port 的 TCP 连接数"""
+    return sum(
+        1
+        for c in proc.net_connections(kind="tcp")
+        if c.status == "ESTABLISHED" and c.laddr.port == port
+    )
+
+
 class PerfStat:
     """`perf stat` 数 worker 的 user 态周期与指令（混合架构只取 P 核的计数）"""
 
@@ -986,7 +995,7 @@ class Harness:
     def start_server(self) -> None:
         args = self.args
         cfg = write_config(args, self.workdir)
-        env = dict(os.environ, PYTHONUTF8="1", HETU_HTTP_SERVER=args.http_server)
+        env = dict(os.environ, PYTHONUTF8="1")
         if args.server_pythonpath:
             env["PYTHONPATH"] = args.server_pythonpath
         log = open(os.path.join(self.workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115
@@ -1003,7 +1012,7 @@ class Harness:
         self.sproc = psutil.Process(self.server.pid)
         wait_port(args.port)
         time.sleep(2)
-        # WORKER_NUM=1 时单进程运行（Sanic、aiohttp 都是），主进程就是 worker；多 worker 时
+        # WORKER_NUM=1 时单进程运行，主进程就是 worker；多 worker 时
         # 是子进程
         self.workers = (
             [self.sproc] if args.workers == 1 else self.sproc.children(recursive=True)
@@ -1159,10 +1168,14 @@ class Harness:
         res: dict[str, Any] = {
             "scenario": args.scenario,
             "tag": args.tag,
-            "http_server": args.http_server,
             "conns": args.conns,
             "limit": args.limit,
             "workers": args.workers,
+            # 各 worker 手上的连接数（共享一个监听 socket，看分得匀不匀）
+            "worker_conns": sorted(
+                (n for n in (_established(p, args.port) for p in self.workers) if n),
+                reverse=True,
+            ),
             "servants": len(args.replicas),
             "step": step,
             "target_rate": rate,
@@ -1201,6 +1214,8 @@ class Harness:
             "rpc_rtt_p999_ms": round(pct(rtts, 0.999) * 1000, 2),
             "rpc_rtt_max_ms": round(max(rtts, default=float("nan")) * 1000, 2),
             "rpc_probes": len(rtts),
+            # 比一轮扇出（约 30ms）长得多的离群点个数
+            "rpc_rtt_over_40ms": sum(1 for r in rtts if r > 0.040),
             "probe_random": args.probe_random,
         }
         for name in REDIS_CMDS:
@@ -1420,12 +1435,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--show", default="", help="只打印这个结果文件（JSONL）的主要列")
     ap.add_argument("--show-keys", default="", help="--show 打印哪些列（逗号分隔）")
     ap.add_argument("--tag", default="", help="写进结果的标签（区分代码版本等）")
-    ap.add_argument(
-        "--http-server",
-        choices=("sanic", "aiohttp"),
-        default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
-        help="服务器用哪个 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）",
-    )
     ap.add_argument("--master", default="redis://127.0.0.1:23400/0")
     ap.add_argument(
         "--replica",

@@ -109,8 +109,7 @@ uv run hetu start \
   --instance=dev
 ```
 
-你应该会看到 Sanic 的启动横幅以及一行 `WebSocket listening on
-ws://0.0.0.0:2466`。
+你应该会看到 HeTu 的 LOGO、一行 `监听地址： http://0.0.0.0:2466`，最后是 `服务器已就绪，开始接受连接`。
 
 如果你想要改用 Redis（首次运行之后推荐），请在本地安装 Redis 并替换为：
 
@@ -132,7 +131,8 @@ ws://0.0.0.0:2466`。
 
 ```csharp
 // Connect is a blocked async function, so we use fire and forget.
-_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
+// 路径最后一段是实例名，也就是开服时的 --instance
+_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/dev");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
 

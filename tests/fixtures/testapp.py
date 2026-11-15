@@ -7,7 +7,7 @@ def _load_test_app():
     """
     清空各注册表，再加载 tests/app.py、建簇。
 
-    先清再导入：同一进程里 worker_main 可能已经以别的模块名 exec 过这个文件，注册过同名的
+    先清再导入：同一进程里 prepare_worker 可能已经以别的模块名 exec 过这个文件，注册过同名的
     Endpoint，这时第一次 `import app` 就会撞"Endpoint重复定义"。第一次导入就是执行，不能再
     reload 一遍
     """

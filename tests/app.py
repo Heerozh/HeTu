@@ -447,8 +447,9 @@ async def guarded_add(ctx: hetu.SystemContext, value):
 # 自定义HTTP端点：和HeTu数据无关的普通web请求（见 hetu/webext.py）
 
 
-@hetu.define_route("/webext-test/<name:str>")
-async def webext_test_download(request, name: str):
-    from sanic import text
+@hetu.define_route("/webext-test/{name}")
+async def webext_test_download(request):
+    # 在处理函数里才 import：好些测试会加载这个 app 文件，它们的进程不该因此加载 aiohttp
+    from aiohttp import web
 
-    return text(f"downloaded {name}")
+    return web.Response(text=f"downloaded {request.match_info['name']}")

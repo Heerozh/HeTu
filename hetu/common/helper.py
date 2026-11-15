@@ -1,6 +1,5 @@
 import itertools
 import os
-import re
 import sys
 import uuid
 
@@ -60,8 +59,8 @@ def is_container_env():
 def enable_windows_console_ansi() -> None:
     """
     在 Windows 控制台打开 ANSI 转义支持，彩色日志和启动 LOGO 才不会显示成裸转义码。移植自 Sanic 的
-    `enable_windows_color_support`（MIT License），原来 `import sanic.app` 时会顺带调用；不加载 sanic
-    的启动路径要自己调。其他平台什么也不做。
+    `enable_windows_color_support`（MIT License），原来 `import sanic.app` 时会顺带调用，现在由
+    hetu start 开服前调。其他平台什么也不做。
 
     Enable ANSI escape sequences on the Windows console; a no-op elsewhere.
     """
@@ -75,10 +74,8 @@ def enable_windows_console_ansi() -> None:
 
 def worker_index() -> int | None:
     """
-    本进程在本机内的 worker 序号；单进程模式、管理进程、工具进程没有，返回 None。
-
-    过渡期（Sanic 还没删掉时）没设 HETU_WORKER_INDEX，就照旧从 Sanic 给 worker 设的
-    SANIC_WORKER_IDENTIFIER（形如 "Srv 0"、"Srv12"）里取。
+    本进程在本机内的 worker 序号，读多进程管理进程给每个 worker 设的 HETU_WORKER_INDEX；单进程模式、
+    管理进程、工具进程没有，返回 None。
 
     This process's worker index on this machine, or None outside a multi-worker server.
     """
@@ -91,17 +88,13 @@ def worker_index() -> int | None:
                 )
             )
         return int(value)
-    match = re.search(r"(\d+)", os.environ.get("SANIC_WORKER_IDENTIFIER", ""))
-    return int(match.group(1)) if match else None
+    return None
 
 
 def worker_ident() -> str:
     """日志里的进程标识：worker 是 "Srv 0"、"Srv12" 这样（两位宽，和原来 Sanic 的一样），其他进程是 "Main "。"""
     index = worker_index()
-    if index is not None:
-        return f"Srv{index:2}"
-    # 过渡期：Sanic 给 Reloader 等进程的标识里没有序号，原样显示
-    return os.environ.get("SANIC_WORKER_IDENTIFIER") or "Main "
+    return "Main " if index is None else f"Srv{index:2}"
 
 
 def get_machine_id():
@@ -164,16 +157,16 @@ def lease_owner_exited(owner: bytes | str) -> bool:
     worker id 租约的主人（node_id，即 `机器码:pid`，工具进程再带 `cli:` 前缀）是本机上已经
     退出的进程。只在 Windows 上这么认。
 
-    为什么要认：Windows 上 sanic 停 worker 是 TerminateProcess 硬杀——Ctrl+C 走
-    `WorkerProcess.terminate()` 的 `os.kill(pid, SIGINT)`，DEBUG 自动重载走
-    `multiprocessing.Process.terminate()`，从外面 `taskkill /F` 也一样——关服钩子里的
-    release_worker_id 没机会跑。这些租约照算的话，upgrade 就得干等它们过期。
+    为什么要认：Windows 上进程被强制结束（TerminateProcess）时关服钩子里的 release_worker_id
+    没机会跑——任务管理器"结束任务"、`taskkill /F`、单进程模式第二次 Ctrl+C 强退，管理进程等
+    worker 停服超时后也会强制结束它（原来 Sanic 连 Ctrl+C、DEBUG 自动重载都是这样硬杀）。这些
+    租约照算的话，upgrade 就得干等它们过期。
 
     为什么只在 Windows：判断的前提是"机器码相同就是同一个 PID 空间，本地查得到那个 pid"。
     容器里机器码是 hostname（识别不出容器时是 MAC），host 网络或写死 hostname 时多个容器
     共用一个机器码、PID 空间却各自独立，本地查不到 pid 不代表进程不在，会把活着的服务器当成
-    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 sanic
-    用信号优雅停 worker，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
+    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 worker
+    都是用信号或管理进程的通知优雅停的，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
 
     只认不删：key 照旧等 TTL 过期，开服分配有的是空位。按值删会撞上"pid 被回收、新 worker
     接手同一把 key"的竞态，删掉的就成了活租约。

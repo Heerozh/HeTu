@@ -42,8 +42,8 @@ docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
 The Docker workflow exists primarily so you can run on cheap Spot
-instances behind a reverse proxy: containers come and go, and the proxy
-drops or adds them automatically.
+instances behind a gateway: machines come and go, and the gateway discovers
+them automatically (see Load balancing below).
 
 ### `pip` native (no container)
 
@@ -179,31 +179,110 @@ To stay ready for that future, design your `Components` with sharding in mind:
 
 ## Load balancing
 
-You can start any number of Hetu servers to increase server capacity in parallel, but a
-reverse proxy is required.
+You can run any number of HeTu servers to add capacity in parallel, with a
+gateway in front of them. The reference deployment (multiple machines in the
+cloud):
 
-### Caddy (recommended)
+- **Gateway**: one fixed machine (not a spot instance) with a public IP,
+  running the official Caddy image. It obtains certificates, terminates TLS,
+  writes access logs and forwards the websockets to HeTu.
+- **HeTu**: runs in an autoscaling group, cheap spot instances included, one
+  container per machine (`WORKER_NUM` set to the CPU count). The group's health
+  check can probe HeTu's root path `/`.
+- **Backend discovery**: keep one name, say `hetu.internal`, in your cloud's
+  private DNS (Alibaba Cloud PrivateZone, an AWS Route 53 private hosted zone,
+  and so on). Each HeTu machine adds its private IP on boot and removes it
+  before shutting down. Caddy's built-in dynamic upstreams (`dynamic a`) poll
+  that name, so scaling never touches Caddy's config: Caddy doesn't reload, and
+  connections on the other machines are left alone.
 
-The recommended setup is `caddy-docker-proxy` running in **controller mode**
-inside Docker Swarm. HeTu containers carry labels that Caddy reads to
-auto-register them in the reverse-proxy pool. When a container stops, Caddy
-drops it; when one starts, Caddy adds it. Free TLS via Let's Encrypt is
-automatic.
+```
+game.example.com {
+	reverse_proxy {
+		# look up the private DNS name every 2 seconds for the current HeTu nodes
+		dynamic a {
+			name hetu.internal
+			port 2466
+			refresh 2s
+		}
+		# websockets are long-lived: send new ones to the least busy node
+		lb_policy least_conn
+		# if a node can't be reached, try others for 5s and skip it for 30s
+		lb_try_duration 5s
+		fail_duration 30s
+		# when you do edit the Caddy config, keep open websockets up to 2 hours
+		stream_close_delay 2h
+		transport http {
+			dial_timeout 2s
+		}
+	}
+}
+```
 
-This pairs well with pre-emptible / spot instances: the game-server fleet
-churns continuously while the proxy keeps a stable client-facing endpoint.
-Game clients need automatic reconnect, this is easily achievable using the official SDK.
+Things to know:
 
-If you'd rather not run Swarm, talk to Caddy's admin API directly from your
-own orchestration code.
+- **The client's real IP.** Caddy adds `X-Forwarded-For`, and with
+  `PROXIES_COUNT: 1` (the config template's default) HeTu reads the client
+  address from it; the per-IP limit on anonymous connections depends on it.
+  HeTu only reads this header, not `Forwarded`. Use a security group so that
+  only the gateway can reach HeTu's port, or `X-Forwarded-For` can be forged.
+  If you put a CDN or load balancer in front of the gateway, add its addresses
+  to Caddy's `trusted_proxies` and set `PROXIES_COUNT` to the total number of
+  proxies.
+- **Stopping a HeTu machine** (scaling in, or a spot instance getting its
+  reclaim notice): remove it from DNS first, then stop the server (see
+  "Shutting down" below). Its players get a 1001 and reconnect to another
+  machine automatically.
+- **A machine that vanished without removing its record**: Caddy fails to
+  reach it and moves on, so players just wait a moment. Clean up stale records
+  with a periodic reconcile or the autoscaling group's scale-in hook.
+- **The gateway is a single point of failure.** Use a stable machine; if it
+  goes down, players reconnect automatically. At larger scale, add gateways
+  behind your cloud's load balancer.
 
-*You can use the HeTu server root path（http://localhost/） as the health check
-endpoint.*
+## Shutting down
 
-### Why not Nginx
+On SIGTERM (what `docker stop`, systemd and k8s send) or Ctrl+C, `hetu start`
+shuts down in this order:
 
-Nginx works, but its config syntax for the dynamic add/remove pattern HeTu
-encourages is verbose and easy to get wrong. Caddy fits the workload better.
+1. Stop accepting new connections.
+2. **Drain**: every connection stops reading new messages; RPCs already
+   received run to completion and their replies are sent, then the connection
+   is closed with close code 1001 (the SDK reconnects automatically). Messages
+   queued behind them are not executed, so resending them after reconnecting
+   does not run anything twice. This waits at most `SHUTDOWN_DRAIN_TIMEOUT`
+   (5 seconds by default); RPCs still running then are cancelled. A
+   cancellation that lands before the commit means nothing is committed, but
+   one that lands in the middle of the commit may leave it committed with the
+   reply lost, so the client's retry after reconnecting runs it again. For
+   calls that must not run twice (charges, item grants), have the client send an
+   order id and call a `call_lock=True` System from an Endpoint with
+   `ctx.systems.call(..., uuid=order_id)` to deduplicate (see
+   [Advanced](advanced.md)).
+3. Run the disconnect System and delete the Connection rows, waiting at most
+   `GRACEFUL_SHUTDOWN_TIMEOUT` (15 seconds by default).
+4. Stop FutureCalls, release the Worker ID lease and disconnect from the
+   backends.
+
+Further SIGTERMs or Ctrl+Cs during shutdown do not interrupt it (the exception
+is a single-process server on Windows, where a second Ctrl+C forces an exit).
+
+With several workers, the manager process tells each worker to stop and waits
+up to `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` seconds
+(60 by default) for it, then kills any worker still running. A normal shutdown
+takes nowhere near that long; it is the worst case, because after draining,
+cancelling the connections, waiting for them to be torn down and stopping
+FutureCalls each get their own `GRACEFUL_SHUTDOWN_TIMEOUT`.
+
+**Give your orchestrator a longer grace period than that.** Docker waits only
+10 seconds and k8s 30 before sending SIGKILL, and a kill skips the cleanup
+above: disconnect Systems don't run, and `hetu upgrade` has to wait for the
+Worker ID leases to expire (at most 60 seconds). With the default settings, set
+the grace period to 70 seconds or more, or lower the two timeouts accordingly:
+
+- docker compose: `stop_grace_period: 70s`
+- `docker stop -t 70`
+- k8s: `terminationGracePeriodSeconds: 70`
 
 ## Migrations
 
@@ -432,9 +511,10 @@ Before doing anything, `upgrade` checks whether any server is still running
 leaving everything untouched: migrating, wiping volatile tables and rebuilding
 indexes all corrupt data while servers are running. If a server crashed, wait
 for its lease to expire (at most 60 seconds) and try again. On Windows there is
-no need to wait for servers on the same machine that have already exited:
-Sanic stops Windows workers with a hard kill, so they never get to release
-their leases, and such leases are not counted. Servers on the SQLite backend
+no need to wait for servers on the same machine that have already exited: a
+process that is force-killed (ended from Task Manager, or a second Ctrl+C on a
+single-process server) never gets to release its lease, and such leases are
+not counted. Servers on the SQLite backend
 have no leases, so the check can't see them; make sure they are stopped
 yourself. `hetu call` / `hetu shell` hold leases too (on Redis and SQLite), so
 `upgrade` also refuses while they run and lists them separately.

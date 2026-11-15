@@ -10,7 +10,6 @@ import os
 import socket
 import sys
 import time
-from functools import partial
 
 from ..i18n import _
 from .base import (
@@ -24,10 +23,6 @@ from .base import (
 # 命令行参数模式下的默认值。参数本身默认为 None，才能判断是否显式给出（见 flag_mode_requested）
 DEFAULT_APP_FILE = "/app/app.py"
 DEFAULT_DB = "redis://127.0.0.1:6379/0"
-# 换 aiohttp 的过渡期里选 Web 服务器：sanic（默认）或 aiohttp。只在过渡期用，不写进配置模板和文档，
-# 删掉 Sanic 时一起删（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §4.3）
-HTTP_SERVER_ENV = "HETU_HTTP_SERVER"
-HTTP_SERVERS = ("sanic", "aiohttp")
 
 logger = logging.getLogger("HeTu.root")
 
@@ -45,16 +40,15 @@ FULL_COLOR_LOGO = """
 def resolve_worker_num(worker_num: int) -> int:
     """把配置的 WORKER_NUM 解析成真实的工作进程数，负数表示按CPU核心数自动。
 
-    没用sanic的fast=True来实现"自动"：fast和single_process互斥（单worker时要用
-    single_process），而且自己算才能让显示的进程数、auto_reload等判断都拿到真实值。
-    process_cpu_count()和sanic的fast一样会考虑CPU亲和性(cgroup/taskset)，容器里更准。
+    自己算才能让显示的进程数、是否走多进程、DEBUG 自动重载等判断都拿到真实值。
+    process_cpu_count() 会考虑CPU亲和性(cgroup/taskset)，容器里更准。
     """
     if worker_num < 0:
         return os.process_cpu_count() or 1
     return worker_num
 
 
-def log_server_info(config, name: str, workers: int, http_server: str) -> None:
+def log_server_info(config, name: str, workers: int) -> None:
     """开服前打一遍服务器信息：LOGO、模式、进程数、监听地址、消息流水线、auth_key 指纹"""
     from ..server.pipeline import CryptoLayer
 
@@ -73,7 +67,6 @@ def log_server_info(config, name: str, workers: int, http_server: str) -> None:
             version=sys.version, platform=sys.platform
         )
     )
-    logger.info(_("ℹ️ Web 服务器：{server}").format(server=http_server))
     # TLS 由前面的反向代理（推荐 Caddy）终止，HeTu 自己只监听明文
     logger.info(_("📡 监听地址： http://{host}:{port}").format(host=host, port=port))
     layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
@@ -198,22 +191,12 @@ class StartCommand(CommandInterface):
     def execute(cls, args):
         from ..common.helper import WORKER_INDEX_ENV
         from ..server.config import HeTuConfig
+        from ..server.runtime import LoggingConfigError, check_logging_config
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 
-        # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能传给 worker：它比 Sanic 给的
-        # 序号优先，所有 worker 会拿到同一个，SQLite 后端上 Worker ID 就重了
+        # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能留着：单进程时会被当成本进程
+        # 的序号，SQLite 后端上就是 Worker ID
         os.environ.pop(WORKER_INDEX_ENV, None)
-
-        http_server = os.environ.get(HTTP_SERVER_ENV) or "sanic"
-        if http_server not in HTTP_SERVERS:
-            print(
-                _("环境变量 {name} 只能是 {choices}，现在是 {value!r}").format(
-                    name=HTTP_SERVER_ENV,
-                    choices=" / ".join(HTTP_SERVERS),
-                    value=http_server,
-                )
-            )
-            sys.exit(2)
 
         # 命令行转配置文件
         config_file = locate_config_file(args)
@@ -228,6 +211,12 @@ class StartCommand(CommandInterface):
             # 已按配置文件所在目录解析，而非进程 CWD
             config.update_config(config_dict)
             config_for_factory = config
+            # LOGGING 里还引用着 Sanic 的类：开服之前就报，说明怎么改
+            try:
+                check_logging_config(config.get("LOGGING") or {})
+            except LoggingConfigError as e:
+                print(e)
+                sys.exit(2)
         else:
             args.app_file = args.app_file or DEFAULT_APP_FILE
             args.db = args.db or DEFAULT_DB
@@ -273,24 +262,22 @@ class StartCommand(CommandInterface):
         # per-boot uuid：main进程每次开服生成一次，经config_for_factory透传给每个worker，
         # 使 on_start System 在本次开服只跑一次（去重见 hetu.system.startup）
         config_for_factory[ON_START_UUID_CONFIG_KEY] = make_boot_uuid()
-        if http_server == "aiohttp":
-            cls.serve_aiohttp(config_for_factory, workers)
-            return
-        cls.serve_sanic(config, config_for_factory, workers)
+        cls.serve(config_for_factory, workers)
 
     @classmethod
-    def serve_aiohttp(cls, config_for_factory, workers: int) -> None:
+    def serve(cls, config_for_factory, workers: int) -> None:
         """
-        aiohttp 栈（设计稿 §5.4.3、§5.7）。单进程时在本进程里开服；多进程时本进程是管理进程，不加载
-        app 文件，交给 supervisor 起 worker。两种都先配日志、启动日志 Listener，再 bind 监听 socket
-        （端口冲突在这里就失败，不会先跑一遍开服）
+        开服（aiohttp，设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.4.3、
+        §5.7）。单进程时在本进程里开服；多进程时本进程是管理进程，不加载 app 文件，交给 supervisor 起
+        worker。两种都先配日志、启动日志 Listener，再 bind 监听 socket（端口冲突在这里就失败，不会先跑
+        一遍开服）
         """
         from ..common.helper import enable_windows_console_ansi
         from ..safelogging import handlers as log_handlers
         from ..server import StartupAborted
         from ..server.adapters import aiohttp_app
 
-        # 原来 import sanic 时会顺带打开；这条路径不加载 sanic
+        # Windows 控制台打开 ANSI 转义支持，彩色日志和启动 LOGO 才不会显示成裸转义码
         enable_windows_console_ansi()
         if workers == 1:
             config = aiohttp_app.prepare(config_for_factory)
@@ -304,7 +291,7 @@ class StartCommand(CommandInterface):
             if "LOGGING" in config:
                 log_handlers.share_queues(config.LOGGING)
         log_handlers.AutoListener.start_all()
-        log_server_info(config, f"Hetu-{config.NAMESPACE}", workers, "aiohttp")
+        log_server_info(config, f"Hetu-{config.NAMESPACE}", workers)
         try:
             sock = aiohttp_app.bind_socket(config.LISTEN)
         except OSError as e:
@@ -330,71 +317,5 @@ class StartCommand(CommandInterface):
             sock.close()
             # 退出log listener，run() 抛别的异常时也要
             log_handlers.stop_all_logging_handlers()
-        if exit_code:
-            sys.exit(exit_code)
-
-    @classmethod
-    def serve_sanic(cls, config, config_for_factory, workers: int) -> None:
-        """Sanic 栈：单进程或多进程，由 Sanic 管"""
-        from sanic import Sanic
-        from sanic.worker.loader import AppLoader
-
-        from ..safelogging import handlers as log_handlers
-        from ..server import StartupAborted, worker_main
-
-        # 加载app
-        loader = AppLoader(
-            factory=partial(worker_main, f"Hetu-{config.NAMESPACE}", config_for_factory)
-        )
-        app = loader.load()
-        # 配置log，上面 loader.load() 跑 worker_main 时会 dictConfig(config.LOGGING)
-        # 把dictConfig生成的queue实例存到config里，好传递到子进程
-        if "LOGGING" in config:
-            log_handlers.share_queues(config.LOGGING)
-
-        # 启动日志Listener
-        log_handlers.AutoListener.start_all()
-
-        # 显示服务器信息
-        host, port = config.LISTEN.rsplit(":", 1)
-        log_server_info(config, app.name, workers, "sanic")
-
-        # 准备启动服务器
-        os.environ["SANIC_IGNORE_PRODUCTION_WARNING"] = "1"
-        app.prepare(
-            debug=int(config.DEBUG) > 1,
-            # 访问日志交给前面的反向代理（推荐 Caddy）
-            access_log=False,
-            motd=False,
-            host=host,
-            port=int(port),
-            auto_reload=config.DEBUG and workers > 1,
-            workers=workers,
-            single_process=workers == 1,
-        )
-        # 启动并堵塞
-        try:
-            if workers == 1:
-                Sanic.serve_single(primary=app)
-            else:
-                Sanic.serve(primary=app, app_loader=loader)
-        except StartupAborted as e:
-            # 单进程模式下worker异常会一路冒到这里（多进程模式则由管理进程中止），
-            # 打友好提示后以非0退出码结束，让docker/systemd/k8s能识别为启动失败
-            logger.error(
-                _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
-            )
-            log_handlers.stop_all_logging_handlers()
-            sys.exit(1)
-        except PermissionError as e:
-            print_port_hint(e)
-            raise
-
-        # 单进程模式丢租约时 on_lease_lost 停服并把 runtime.exit_code 置为非 0（app.stop() 本身
-        # 退出码是 0），让 docker/systemd/k8s 按失败重启。多进程时管理进程没有 runtime
-        runtime = getattr(app.ctx, "runtime", None)
-        exit_code = runtime.exit_code if runtime is not None else 0
-        # 退出log listener
-        log_handlers.stop_all_logging_handlers()
         if exit_code:
             sys.exit(exit_code)

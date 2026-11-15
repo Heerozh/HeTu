@@ -545,8 +545,8 @@ def test_disabled_layer_after_handshake():
 
 
 def test_clean_resets_disabled_layers():
-    """clean 后重新加的层不继承之前的禁用标记（服务端的管道是单件，每次 worker_main
-    都会 clean 再重新加层）"""
+    """clean 后重新加的层不继承之前的禁用标记（服务端的管道是单件，每次
+    setup_message_pipeline 都会 clean 再重新加层）"""
     pipe, _ctx = _jsonb_zlib_pipe()
     pipe.disable_layer(1)
     pipe.clean()

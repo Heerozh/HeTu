@@ -294,8 +294,8 @@ async def client_handler(
     connection_closed = False
     # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
-    # 连接断开后 conn.recv() 在 aiohttp 上抛 ConnectionClosed；在 Sanic 上可能一直挂着，等
-    # serve_connection 拆连接时取消本协程，走下面静默的 CancelledError 出口。
+    # 连接断开后 conn.recv() 抛 ConnectionClosed；serve_connection 拆连接时取消本协程的，走下面
+    # 静默的 CancelledError 出口。
     # 其余出口都在各自分支里写明原因和 close 码（客户端按码决定重不重连），这里只是兜底
     exit_reason = _("接收循环意外结束")
     close_code = connection.CLOSE_INTERNAL_ERROR

@@ -261,8 +261,8 @@ async def test_runtime_start_aborts_on_on_start_failure(
 ):
     """on_start System 启动失败时，runtime.start() 抛 StartupAborted 中止整个服务器启动。
 
-    必须是抛异常而不是让框架停服：只有异常能让 Sanic 单/多进程都立刻中止且退出码非0，
-    app.stop() 两种模式下退出码都是0，会被docker/systemd当成正常退出。"""
+    必须是抛异常而不是让框架停服：只有异常能让单/多进程都立刻中止且退出码非0，
+    框架正常停服的退出码是0，会被docker/systemd当成正常退出。"""
     import pytest
 
     from hetu.manager import ComponentTableManager
@@ -382,26 +382,6 @@ def test_resolve_ack_timeout_follows_startup_timeout():
     assert resolve_ack_timeout({"STARTUP_TIMEOUT": 30}) == 30 + ACK_TIMEOUT_MARGIN
     assert resolve_ack_timeout({}) == DEFAULT_STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN
     assert resolve_ack_timeout({"STARTUP_TIMEOUT": 0}) is None
-
-
-def test_resolve_ack_threshold_follows_startup_timeout():
-    """Sanic 的 ack 阈值由同一个超时换算（第 6 步删掉 Sanic 时一起删）"""
-    from hetu.server.adapters.sanic_app import (
-        UNLIMITED_ACK_THRESHOLD,
-        resolve_ack_threshold,
-    )
-    from hetu.server.runtime import ACK_TIMEOUT_MARGIN, DEFAULT_STARTUP_TIMEOUT
-
-    # sanic的THRESHOLD单位是0.1秒
-    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 30}) == int(
-        (30 + ACK_TIMEOUT_MARGIN) * 10
-    )
-    # 没配则用默认值推算
-    assert resolve_ack_threshold({}) == int(
-        (DEFAULT_STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN) * 10
-    )
-    # 0 是不限制，不能原样传给sanic（sanic的0是"立刻判定启动失败"）
-    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 0}) == UNLIMITED_ACK_THRESHOLD
 
 
 def test_on_start_rejects_client_permission(new_component_env, new_clusters_env):

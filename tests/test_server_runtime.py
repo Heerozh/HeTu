@@ -152,6 +152,69 @@ async def test_renamed_task_releases_its_name():
     await reg.cancel(again)
 
 
+def test_logging_config_referencing_sanic_is_rejected(monkeypatch):
+    """
+    LOGGING 里还引用着 Sanic 的类：setup_logging 先报 LoggingConfigError，写明是哪几项、要改成什么，
+    不去 dictConfig（不然只报一句 "Unable to configure formatter"）。QueueHandler 的 queue、listener
+    也查。文件名、logger 名里出现 sanic、名字以 sanic 开头的别的包都不算；配置模板、默认配置都能过
+    """
+    import logging.config
+    from pathlib import Path
+
+    import yaml
+
+    import hetu
+    from hetu.common import yamlloader
+    from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
+    from hetu.server.runtime import (
+        LoggingConfigError,
+        check_logging_config,
+        setup_logging,
+    )
+
+    configured = []
+    monkeypatch.setattr(logging.config, "dictConfig", configured.append)
+    old_config = {
+        "version": 1,
+        "formatters": {"colour": {"class": "sanic.logging.formatter.AutoFormatter"}},
+        "filters": {"verbosity": {"()": "sanic.logging.filter.VerbosityFilter"}},
+        "handlers": {
+            "console": {"class": "logging.StreamHandler"},
+            "queued": {
+                "class": "logging.handlers.QueueHandler",
+                "queue": "sanic.compat.Queue",
+                "listener": "sanic.logging.Listener",
+            },
+        },
+    }
+    with pytest.raises(LoggingConfigError) as exc_info:
+        setup_logging({"LOGGING": old_config})
+    message = str(exc_info.value)
+    assert "formatters.colour.class: sanic.logging.formatter.AutoFormatter" in message
+    assert "filters.verbosity.(): sanic.logging.filter.VerbosityFilter" in message
+    assert "handlers.queued.queue: sanic.compat.Queue" in message
+    assert "handlers.queued.listener: sanic.logging.Listener" in message
+    assert "hetu.safelogging.formatter.ContextAutoFormatter" in message
+    assert "logging.StreamHandler" not in message
+    assert configured == []
+
+    # 名字以 sanic 开头的别的包（sanic_tools 之类）也不算
+    check_logging_config(
+        {
+            "version": 1,
+            "formatters": {"plain": {"class": "sanic_tools.PlainFormatter"}},
+            "handlers": {
+                "file": {"class": "logging.FileHandler", "filename": "sanic.log"}
+            },
+            "loggers": {"sanic.root": {"level": "INFO"}},
+        }
+    )
+    check_logging_config(DEFAULT_LOGGING_CONFIG)
+    template = Path(hetu.__file__).parent / "CONFIG_TEMPLATE.yml"
+    config = yaml.load(template.read_text(encoding="utf-8"), yamlloader.Loader)
+    check_logging_config(config["LOGGING"])
+
+
 def test_hetu_config_defaults_and_attribute_access():
     """HeTuConfig：只收大写键，可以按属性读，没给的键用默认值（和原来 Sanic 的默认值相同）"""
     import pickle
@@ -171,16 +234,16 @@ def test_hetu_config_defaults_and_attribute_access():
     # 按属性写也写进 dict
     config.NEW_KEY = 1
     assert config["NEW_KEY"] == config.get("NEW_KEY") == 1
-    # Sanic 多进程时要把配置 pickle 给 spawn 出来的 worker
+    # 多进程时要把配置 pickle 给 spawn 出来的 worker
     restored = pickle.loads(pickle.dumps(config))
     assert type(restored) is HeTuConfig
     assert restored == config
 
 
-def test_connection_handling_does_not_load_sanic():
+def test_connection_handling_does_not_load_web_server():
     """
     处理连接的代码（serve_connection、client_handler、WsConnection）与 Web 框架无关：在干净的子进程
-    里 import 它们不加载 sanic。pytest 主进程早被别的测试 import 过 sanic，只能在子进程里看
+    里 import 它们不加载 aiohttp。pytest 主进程早被别的测试 import 过 aiohttp，只能在子进程里看
     """
     import os
     import subprocess
@@ -190,7 +253,7 @@ def test_connection_handling_does_not_load_sanic():
         "import sys\n"
         "import hetu.endpoint.context, hetu.server.conn, hetu.server.receiver, "
         "hetu.server.websocket\n"
-        "print('sanic' in sys.modules)\n"
+        "print('aiohttp' in sys.modules)\n"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],

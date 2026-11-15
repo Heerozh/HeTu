@@ -105,29 +105,28 @@ def test_config_template_console_formatter_is_context_aware():
     )
 
 
-def _pair_of_records(level: int = logging.INFO):
-    """两条一模一样的 record（同一个时间戳），分别给两个 formatter 用"""
-    first, second = _make_record(level), _make_record(level)
-    second.created, second.msecs = first.created, first.msecs
-    return first, second
-
-
 def test_context_auto_formatter_plain_output_matches_sanic(monkeypatch):
     """
     不在终端里（不上颜色）时，输出和原来 Sanic 25.12 的 AutoFormatter 逐字一致，带不带 extra
-    字段都一样。第 6 步删 Sanic 时，把这里的对照换成固定的字符串。
+    字段都一样。期望的字符串是删 Sanic 之前拿它的 AutoFormatter 跑出来的；时间的格式也写死在这里，
+    不读被测类的 DATE_FORMAT
     """
-    from sanic.logging.formatter import AutoFormatter
+    import time
 
     monkeypatch.setattr(formatter_mod, "_use_color", lambda: False)
-    monkeypatch.setattr(AutoFormatter, "ATTY", False)
+    expected = {
+        False: "Main  {asctime} WARNING: test message",
+        True: "Main  {asctime} WARNING: test message\nctx=[uid|conn|MySystem]",
+    }
     for log_extra in (False, True):
-        monkeypatch.setattr(AutoFormatter, "LOG_EXTRA", log_extra)
+        monkeypatch.setattr(ContextAutoFormatter, "IDENT", "Main ")
         monkeypatch.setattr(ContextAutoFormatter, "LOG_EXTRA", log_extra)
-        ours, theirs = _pair_of_records(logging.WARNING)
-        for record in (ours, theirs):
-            record.ctx = "[uid|conn|MySystem]"
-        assert ContextAutoFormatter().format(ours) == AutoFormatter().format(theirs)
+        record = _make_record(logging.WARNING)
+        record.ctx = "[uid|conn|MySystem]"
+        asctime = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(record.created))
+        assert ContextAutoFormatter().format(record) == expected[log_extra].format(
+            asctime=asctime
+        )
 
 
 def test_context_auto_formatter_color_output(monkeypatch):

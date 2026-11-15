@@ -36,7 +36,7 @@ docker build -t my-game .
 docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
-Docker 工作流的主要目的是让您能够在反向代理后面运行廉价的 Spot 实例：容器可以随时创建或销毁，代理会自动增减它们。
+Docker 工作流的主要目的是让您能够在网关后面运行廉价的 Spot 实例：机器可以随时创建或销毁，网关会自动发现它们（见下面的负载均衡）。
 
 ### `pip` 原生安装（无容器）
 
@@ -124,19 +124,78 @@ HeTu 仅使用 Redis 的基本功能（哈希、有序集合、发布/订阅）�
 
 ## 负载均衡
 
-### Caddy（推荐）
+HeTu 可以起任意多台来并行扩容，前面要有一层网关。参考部署（云上多机）：
 
-推荐的方案是在 Docker Swarm 中以**控制器模式**运行 `caddy-docker-proxy`。HeTu 容器会携带 Caddy 能够读取的标签，从而自动注册到反向代理池中。当容器停止时，Caddy 会将其移除；容器启动时自动添加。通过 Let's Encrypt 自动提供免费 TLS。
+- **网关**：一台固定的机器（不用抢占式实例），绑公网 IP，跑官方 Caddy 镜像：自动申请证书、终止 TLS、记访问日志，
+  再把 ws 转给后面的 HeTu。
+- **HeTu**：跑在弹性伸缩组里，可以用便宜的抢占式实例，每台机器一个容器（`WORKER_NUM` 按 CPU 数）。伸缩组的健康
+  检查可以探 HeTu 的根路径 `/`。
+- **发现后端**：在云厂商的内网 DNS（阿里云 PrivateZone、AWS Route 53 私有托管区等）里维护一个名字，比如
+  `hetu.internal`，HeTu 机器开机时把自己的内网 IP 加进去，停服前删掉。Caddy 用自带的动态上游 `dynamic a` 定时查
+  这个名字，扩缩容不用改 Caddy 的配置，Caddy 不重载，别的机器上的连接都不受影响。
 
-这种方式非常适用于抢占式/Spot 实例：游戏服务器集群不断更新，而代理则保持稳定的客户端访问端点。游戏客户端需要自动重连，使用官方 SDK 即可轻松实现。
+```
+game.example.com {
+	reverse_proxy {
+		# 每 2 秒查一次内网 DNS，拿到当前所有 HeTu 节点
+		dynamic a {
+			name hetu.internal
+			port 2466
+			refresh 2s
+		}
+		# ws 是长连接：新连接给连接数最少的那台
+		lb_policy least_conn
+		# 连不上就在 5 秒内换别的，30 秒内不再选它
+		lb_try_duration 5s
+		fail_duration 30s
+		# 改了 Caddy 配置重载时，已有的 ws 最多再留 2 小时
+		stream_close_delay 2h
+		transport http {
+			dial_timeout 2s
+		}
+	}
+}
+```
 
-如果您不想运行 Swarm，可以直接从自己的编排代码与 Caddy 的管理 API 交互。
+要点：
 
-*您可以使用 HeTu 服务器的根路径（https://localhost/）作为健康检查端点。*
+- **客户端的真实 IP**：Caddy 会加上 `X-Forwarded-For`，HeTu 按 `PROXIES_COUNT: 1`（配置模板的默认值）从里面取
+  客户端地址，按 IP 限制匿名连接数靠它；HeTu 只认这个头，不认 `Forwarded` 头。用安全组只让网关访问 HeTu 的端口，
+  否则 `X-Forwarded-For` 可以伪造。网关前面再加 CDN、负载均衡的话，把它们的地址配进 Caddy 的 `trusted_proxies`，
+  `PROXIES_COUNT` 设成总层数。
+- **停一台 HeTu**（缩容、抢占式实例收到回收通知）：先从 DNS 里删掉，再停服（见下面"停服"），它上面的玩家收到
+  1001 后自动重连到别的机器。
+- **没来得及删记录就没了的机器**：Caddy 连不上会换别的，玩家只是多等一下；残留的记录用定时对账或伸缩组的缩容
+  钩子清掉。
+- **网关是单点**：用稳定的机器，挂了玩家会自动重连；规模大了再加网关、在前面放云厂商的负载均衡。
 
-### 为什么不选择 Nginx
+## 停服
 
-Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模式来说，显得冗长且容易出错。Caddy 更适合这种工作负载。
+`hetu start` 收到 SIGTERM（`docker stop`、systemd、k8s 停容器时发的）或 Ctrl+C 后，按这个顺序关服：
+
+1. 不再接受新连接；
+2. **排空**：各连接不再读新消息，已经收到的 RPC 照常执行完、回复发出去，再以 close 码 1001 断开（SDK 会自动
+   重连）。排在后面、还没读的消息不执行，客户端重连后重发不会重复执行。最多等 `SHUTDOWN_DRAIN_TIMEOUT`
+   （默认 5 秒），到时还没执行完的 RPC 被取消：取消落在提交之前的不会提交，正好落在提交途中的可能已经
+   提交、回复却发不出去，客户端重连后重发就会再执行一次。不能重复执行的调用（扣款、发货），让客户端带上
+   单号，在 Endpoint 里用 `ctx.systems.call(..., uuid=单号)` 调声明了 `call_lock=True` 的 System 去重（见
+   [高级功能](advanced.md)）；
+3. 跑断线 System、删掉 Connection 行，最多等 `GRACEFUL_SHUTDOWN_TIMEOUT`（默认 15 秒）；
+4. 停掉未来调用（FutureCalls），释放 Worker ID 租约，断开后端。
+
+关服途中再来的 SIGTERM / Ctrl+C 不会打断它（例外：Windows 上单进程运行时，第二次 Ctrl+C 是强制退出）。
+
+多进程时，管理进程通知各 worker 停服，每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 ×
+GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒），超时还没退出的强制结束。平时关服远用不了这么久，这是最坏
+情况：排空之后，取消收发、等连接拆完、停未来调用各有一份 `GRACEFUL_SHUTDOWN_TIMEOUT` 的预算。
+
+**编排器的停机宽限期要比它长。** docker 默认只等 10 秒、k8s 默认 30 秒就发 SIGKILL，强杀会跳过上面的清理：
+断线 System 不跑，Worker ID 租约要等过期（最多 60 秒）`hetu upgrade` 才能执行。按默认配置，宽限期设到 70 秒
+以上，或者相应调小上面两个超时：
+
+- docker compose：`stop_grace_period: 70s`；
+- `docker stop -t 70`；
+- k8s：`terminationGracePeriodSeconds: 70`。
 
 ## 数据迁移
 
@@ -282,8 +341,8 @@ HeTu 自己改了索引的存储格式时也一样。比如同一个索引值下
 
 `upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
 不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
-秒）后再试。Windows 上本机已经退出的服务器不用等：Sanic 在 Windows 上停 worker 是硬杀，租约来不及释放，
-所以这种租约不算。SQLite 后端的服务器没有租约、检查不出来，请自己确认已经停服。`hetu call` / `hetu shell`
+秒）后再试。Windows 上本机已经退出的服务器不用等：进程被强制结束时（任务管理器结束进程、单进程运行时第二次
+Ctrl+C 强退）租约来不及释放，这种租约不算。SQLite 后端的服务器没有租约、检查不出来，请自己确认已经停服。`hetu call` / `hetu shell`
 也持有租约（Redis 与 SQLite 都是），它们在跑时 `upgrade` 同样拒绝执行，提示里会单独列出。
 
 ### `hetu build`

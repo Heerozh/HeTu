@@ -997,8 +997,8 @@ def _exited_process() -> subprocess.Popen:
 
 @use_redis_family_backend_only
 async def test_live_worker_ids_skips_exited_local_workers(mod_auto_backend):
-    """Windows 上 sanic 停 worker 是硬杀（Ctrl+C、DEBUG 自动重载都是 TerminateProcess），
-    租约来不及释放。本机上进程已经退出了的租约不算"服务器在跑"，不然 upgrade 得干等它过期。
+    """Windows 上 worker 被强制结束（TerminateProcess）时租约来不及释放。本机上进程已经退出了的
+    租约不算"服务器在跑"，不然 upgrade 得干等它过期。
 
     只在 Windows 上这么认：别的平台上同一个机器码下可能是另一个 PID 空间（容器用 host
     网络），本地查不到 pid 不代表进程不在，照旧算在跑。本机活着的、别的机器的、值不是

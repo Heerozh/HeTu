@@ -45,7 +45,7 @@ class Context:
     """调用时间戳。"""
 
     request: Any
-    """framework原始请求对象（现在是 Sanic 的 Request），unsafe，普通业务代码请避免直接使用。"""
+    """framework原始请求对象（aiohttp 的 `web.Request`），unsafe，普通业务代码请避免直接使用。"""
 
     systems: SystemCaller
     """全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。"""

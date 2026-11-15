@@ -3,7 +3,7 @@ serve_connection 的单元测试：用内存里的假连接（FakeWsConnection�
 握手、收发和拆连接（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.3）。
 
 假连接按 aiohttp 的语义实现：fail 之后、对端断开之后，新的收发立即抛 ConnectionClosed，不靠框架
-取消连接的协程；正卡在发送上的 send 要等 abort 兜底（ABORT_DELAY 秒）才醒。走真网络、跑在 Sanic 上的
+取消连接的协程；正卡在发送上的 send 要等 abort 兜底（ABORT_DELAY 秒）才醒。走真网络、跑在 aiohttp 上的
 测试在 test_websocket.py。
 """
 
@@ -471,7 +471,7 @@ async def test_framework_cancel_stops_both_sides_before_unsubscribe(
     monkeypatch, mod_runtime
 ):
     """
-    框架取消连接协程（Sanic：传输层断开、关服）时，照常拆完连接，取消不往外抛。asyncio.wait 被取消
+    框架取消连接协程（断线、关服时取消 handler）时，照常拆完连接，取消不往外抛。asyncio.wait 被取消
     时不会取消它在等的收发协程，清理要先把这两个停下来，再退订、删行
     """
     from hetu.data.sub import SubscriptionBroker
@@ -504,8 +504,8 @@ async def test_cancel_during_initialize_still_deletes_connection_row(
     monkeypatch, mod_runtime
 ):
     """
-    Connection 行已经提交、initialize 还在等副本同步时，连接协程被取消（Sanic：客户端握手完立刻
-    断开）：拆连接照样要把这一行删掉，删之前先等副本同步；连接没建立起来，不跑断线 System。以前
+    Connection 行已经提交、initialize 还在等副本同步时，连接协程被取消（框架在客户端握手完立刻
+    断开时取消 handler）：拆连接照样要把这一行删掉，删之前先等副本同步；连接没建立起来，不跑断线 System。以前
     initialize 在拆连接的 try 外面、行 id 也是返回之后才记下，这一行就永远留在库里
     """
     from hetu.data.backend import Backend

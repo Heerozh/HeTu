@@ -1,6 +1,6 @@
 """
 aiohttp 适配：跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md
-§5.4、§5.7）。和 Sanic 并存的过渡期里由环境变量 `HETU_HTTP_SERVER=aiohttp` 选用（见 hetu/cli/start.py）。
+§5.4、§5.7），由 `hetu start`（hetu/cli/start.py）调用。
 
 - `AiohttpWsConnection`：把 aiohttp 的 WebSocketResponse 包成 `WsConnection`；
 - `AiohttpServer`：一次开服到关服，`hetu start` 和测试 harness 共用；
@@ -12,7 +12,8 @@ aiohttp 适配：跑 HeTu 的服务（设计稿 docs/superpowers/specs/2026-11-1
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 
-aiohttp adapter: serves HeTu from a single process on aiohttp.
+aiohttp adapter: serves HeTu on aiohttp, in a single process or in each worker of the
+supervisor.
 """
 
 import asyncio
@@ -50,10 +51,10 @@ logger = logging.getLogger("HeTu.root")
 # 关闭握手时等对端回 close 帧的时间（秒）。aiohttp 默认等 10 秒。等不到就 transport.close()，写缓冲里
 # 剩下的数据（包括 close 帧）照常发完
 CLOSE_TIMEOUT = 2.0
-# 开始关闭之后，最多再过多久直接 abort（秒），同 Sanic 的 close_timeout。abort 会丢掉写缓冲里还没发出的
+# 开始关闭之后，最多再过多久直接 abort（秒），同原来 Sanic 的 close_timeout。abort 会丢掉写缓冲里还没发出的
 # 数据，太短的话链路慢、积压多的客户端收不到 close 帧（比如顶号的 4001）
 ABORT_TIMEOUT = 10.0
-# HTTP keep-alive 的空闲超时（秒），对应 Sanic 的 REQUEST_TIMEOUT。aiohttp 默认 3630 秒
+# HTTP keep-alive 的空闲超时（秒），对应原来 Sanic 的 REQUEST_TIMEOUT。aiohttp 默认 3630 秒
 KEEPALIVE_TIMEOUT = 60.0
 # runner.cleanup() 等还在处理的 HTTP 请求的时间（秒）。ws 连接在那之前已经由 HeTu 自己拆完
 SHUTDOWN_TIMEOUT = 2.0
@@ -297,11 +298,11 @@ class AiohttpWsConnection:
 
 def ws_response_options(config: Mapping[str, Any]) -> dict[str, Any]:
     """
-    建 WebSocketResponse 的参数。和 Sanic 不一样的默认值都显式设置（设计稿 §5.4.2）：
+    建 WebSocketResponse 的参数。aiohttp 和原来 Sanic 不一样的默认值都显式设置（设计稿 §5.4.2）：
 
     - 不协商 permessage-deflate：HeTu 自己有 zlib 层，浏览器又一定会请求压缩；
     - 消息上限是 `WEBSOCKET_MAX_SIZE`：aiohttp 判超限用的是 `>=`，所以加 1，刚好等于上限的消息能收；
-      超限以 1009 关闭。None 不限；0 和 Sanic 一样，只收空消息；
+      超限以 1009 关闭。None 不限；0 和原来 Sanic 一样，只收空消息；
     - 每 `WEBSOCKET_PING_INTERVAL` 秒发一次 ping，等 pong 的时间是它的一半，超时直接关 transport（不发
       close 帧）。没配就不发；
     - 关闭时等对端回 close 帧 `CLOSE_TIMEOUT` 秒。
@@ -376,14 +377,17 @@ class AiohttpServer:
 
     async def start(self, sock: socket.socket) -> None:
         """
-        开服：`runtime.start()`（连后端、拿租约、跑启动 System），在已经 bind 好的 sock 上开始监听，再起
-        后台任务（FutureCalls）。开服失败时 `StartupAborted` 原样抛出；开始监听这一步失败时先关服
-        （释放租约、关后端）再抛出。
+        开服：建 aiohttp 的 app（用户的 `on_server_setup` 回调在这里跑），`runtime.start()`（连后端、拿租约、
+        跑启动 System），在已经 bind 好的 sock 上开始监听，再起后台任务（FutureCalls）。开服失败时
+        `StartupAborted` 原样抛出；开始监听这一步失败时先关服（释放租约、关后端）再抛出。
         """
+        # 先建 app：用户的回调（webext）出错时还没连后端、没跑启动 System，马上就能报出来，不用等开完服，
+        # 启动 System 也不会已经写过数据。同原来 Sanic 的时机（建 app 时，后端还没连）
+        app = build_app(self)
         await self.runtime.start()
         try:
             self._runner = web.AppRunner(
-                build_app(self),
+                app,
                 handle_signals=False,
                 # 访问日志交给前面的反向代理（推荐 Caddy）。aiohttp 默认开着
                 access_log=None,
@@ -501,23 +505,32 @@ async def _web_root(request: web.Request) -> web.Response:
 
 def build_app(server: AiohttpServer) -> web.Application:
     """
-    建 aiohttp 的 app：ws 入口 /hetu/{db_name}（带尾斜杠的也注册，和 Sanic 一样能连上）、默认欢迎页 "/"。
-    用户的 webext 路由这一步不支持（声明是 Sanic 形状的），见 `prepare`
+    建 aiohttp 的 app，路由按这个顺序注册：
+
+    1. ws 入口 /hetu/{db_name}，带尾斜杠的也注册（和原来 Sanic 一样能连上）。aiohttp 先按路径前缀的
+       索引找 resource，同一个前缀里才按注册顺序，所以用户在 "/" 下注册的通配路由抢不走 /hetu 下的它；
+       排在最前，是让用户在 on_server_setup 里绕过 define_route 的检查、注册到 /hetu 下的路由也排在后面；
+    2. 用户的 `@hetu.define_route` 路由、`@hetu.on_server_setup` 回调（hetu/webext.py）；
+    3. 默认欢迎页 "/"：用户自己注册了 "/"（或挂在 "/" 上的静态目录）就让给用户。
     """
     app = web.Application(client_max_size=int(server.config["REQUEST_MAX_SIZE"]))
     app[SERVER_KEY] = server
     app.router.add_get("/hetu/{db_name}", _websocket_handler)
     app.router.add_get("/hetu/{db_name}/", _websocket_handler)
-    app.router.add_get("/", _web_root)
+    webext.apply_to(app)
+    # 挂在 "/" 上的静态目录，canonical 是空串
+    if not any(resource.canonical in ("", "/") for resource in app.router.resources()):
+        app.router.add_get("/", _web_root)
     return app
 
 
 def prepare(config: Mapping[str, Any]) -> HeTuConfig:
     """
-    进程级的准备，同 Sanic 适配层 `worker_main` 里与框架无关的那几步：加载玩家的 app 文件、建簇、配
-    日志、建消息流水线。aiohttp 的日志并到 HeTu.root 下面。返回 `HeTuConfig`
+    进程级的准备：加载玩家的 app 文件、建簇、配日志、建消息流水线。aiohttp 的日志并到 HeTu.root
+    下面。返回 `HeTuConfig`
 
-    Process-wide preparation shared with the Sanic adapter. Returns the HeTuConfig.
+    Process-wide preparation: load the app file, build the clusters, configure logging and
+    the message pipeline. Returns the HeTuConfig.
     """
     if not isinstance(config, HeTuConfig):
         config = HeTuConfig(config)
@@ -529,8 +542,8 @@ def prepare(config: Mapping[str, Any]) -> HeTuConfig:
 
 def finish_prepare(config: HeTuConfig) -> None:
     """
-    `prepare` 的后半段（加载完 app、配好日志之后）：aiohttp 的日志并到 HeTu.root 下面，建消息流水线，
-    提示 aiohttp 栈还不支持的 webext 声明。多进程的 worker 先配日志再加载 app，分开调用
+    `prepare` 的后半段（加载完 app、配好日志之后）：aiohttp 的日志并到 HeTu.root 下面，建消息流水线。
+    多进程的 worker 先配日志再加载 app，分开调用
 
     The second half of `prepare`, after the app is loaded and logging is configured.
     """
@@ -539,19 +552,12 @@ def finish_prepare(config: HeTuConfig) -> None:
     if int(config["DEBUG"]) > 1:
         aiohttp_logger.setLevel(logging.DEBUG)
     setup_message_pipeline(config)
-    if skipped := webext.registered():
-        logger.warning(
-            _(
-                "⚠️ [📡Server] aiohttp 栈还不支持 @hetu.define_route / @hetu.on_server_setup，"
-                "已跳过：{items}"
-            ).format(items=", ".join(skipped))
-        )
 
 
 def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
     """
-    按 LISTEN（host:port）建好监听 socket，端口冲突等错误在这里就抛出，不会先跑一遍开服。和 Sanic 的
-    bind_socket 一样：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上
+    按 LISTEN（host:port）建好监听 socket，端口冲突等错误在这里就抛出，不会先跑一遍开服。和原来 Sanic
+    的 bind_socket 一样：IPv6 地址用 AF_INET6（是否双栈按系统默认），主机名用 AF_INET；只是 Windows 上
     不设 SO_REUSEADDR：那里设了它，端口冲突报的是 10013（WSAEACCES）而不是 10048，会被当成端口落在
     excludedportrange 里、打出误导的提示（Win11 实测，设了也抢不到别的进程正在监听的同一个地址）
     """
@@ -593,12 +599,12 @@ def _install_stop_signals(
     """
     装上关服信号（SIGINT / SIGTERM）的处理，返回卸载用的函数。
 
-    非 Windows：关服信号只认第一个，同 Sanic 栈（设计稿 §5.2 末尾）。第一个一到就把两种信号都忽略掉，
+    非 Windows：关服信号只认第一个，同原来的 Sanic 栈（设计稿 §5.2 末尾）。第一个一到就把两种信号都忽略掉，
     之后再来的不会打断关服；卸载之后也继续忽略，免得关完服、进程退出前的收尾（关事件循环、刷日志）
     被它直接杀掉。代价是第二次 Ctrl+C 不能强退。
 
     Windows：事件循环不支持 add_signal_handler，在 Python 的信号处理里转回事件循环，再定时叫醒事件循环，
-    信号才能及时处理；第二次 Ctrl+C 强退。都同 Sanic 的 ctrlc_workaround_for_windows。
+    信号才能及时处理；第二次 Ctrl+C 强退。都同原来 Sanic 的 ctrlc_workaround_for_windows。
     """
     if not IS_WINDOWS:
         signalled = False

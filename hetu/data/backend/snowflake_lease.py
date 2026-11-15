@@ -113,7 +113,7 @@ class SnowflakeLease:
         """每 RENEW_INTERVAL 秒续约一次，直到被取消；租约丢失时调用 ``on_lost()`` 后退出。"""
         while True:
             await asyncio.sleep(RENEW_INTERVAL)
-            # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
+            # Windows 多 worker 共享监听 socket 时，accept 曾经把事件循环堵死，续约跟着停摆、失败
             # （已由 server/threaded_accept.py 根治，accept 不再跑在事件循环线程上）
             try:
                 await self.keeper.keep_alive()

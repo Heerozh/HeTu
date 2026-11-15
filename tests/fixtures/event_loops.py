@@ -1,5 +1,5 @@
 """
-测试用的事件循环。生产在 Linux / macOS 上跑 uvloop（Sanic 默认启用），本机（Windows）测试跑的是
+测试用的事件循环。生产在 Linux / macOS 上跑 uvloop（hetu start 用它），本机（Windows）测试跑的是
 标准事件循环，两者的 API 并不完全一样。
 """
 

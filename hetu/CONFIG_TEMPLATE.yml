@@ -30,8 +30,10 @@ CLI_ALLOW_WRITE: true
 # 改了哪些行。相对路径按本配置文件所在目录解析；设为 "" 关闭。
 CLI_AUDIT_LOG: logs/hetu_cli_audit.jsonl
 
-# 前置反向代理的数量。用于获取真实IP，host等，一般为1，除非是多级代理。
-# HeTu 不处理 TLS 和访问日志，都交给前面的反向代理（推荐 Caddy）
+# 前置反向代理的数量，一般为1，除非是多级代理。用于从 X-Forwarded-For 取客户端的真实IP（按IP限制
+# 匿名连接数靠它），只认这个头，不认 RFC 7239 的 Forwarded 头。多级代理时外层代理（CDN 等）要配进
+# Caddy 的 trusted_proxies，否则 Caddy 会丢掉它们带来的 X-Forwarded-For。请用防火墙挡住绕过代理的
+# 直连，否则 X-Forwarded-For 可以伪造。HeTu 不处理 TLS 和访问日志，都交给前面的反向代理（推荐 Caddy）
 PROXIES_COUNT: 1
 
 # 服务器Websocket监听地址
@@ -45,11 +47,20 @@ WORKER_NUM: 4
 # （退出码非0），避免服务器静默挂起起不来。如果首次开服建表、播种数据本来就慢，请调大
 STARTUP_TIMEOUT: 60
 
-# 传入消息的最大字节、ping间隔秒、ping无响应关闭连接秒
+# 关服排空的上限（秒）：关服时各连接不再收新消息，已经收到的调用处理完、回复发出去再断开，超时还没
+# 处理完的取消
+# SHUTDOWN_DRAIN_TIMEOUT: 5
+# 关服时等连接拆完（跑断线System）、等后台任务停下，各自的上限（秒）。docker / k8s 的停机宽限期
+# （compose 的 stop_grace_period、k8s 的 terminationGracePeriodSeconds）要长于
+# SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10，按默认值是 60 秒，见运维文档的"停服"
+# GRACEFUL_SHUTDOWN_TIMEOUT: 15
+
+# 传入消息的最大字节；ping间隔秒（等pong的时间是它的一半，等不到就断开连接；0为不发ping）
 # !eval表示返回后面中括号内的代码执行结果
 WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ] # 0.5MB
-# WEBSOCKET_PING_INTERVAL = 20
-# WEBSOCKET_PING_TIMEOUT = 20
+# WEBSOCKET_PING_INTERVAL: 20
+# @hetu.define_route 自定义HTTP端点的请求体上限（字节），超过返回413
+# REQUEST_MAX_SIZE: !eval [ 100 * 1000 * 1000 ] # 100MB
 
 # 闲置多少秒未调用System/Endpoint则视为断线
 ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
@@ -171,8 +182,8 @@ LOGGING:
       propagate: false # 不向上级传递，不然会传递给root
       handlers:
         - replay_queue
-    # 第三方库的日志记录器在DEBUG级别可能会刷屏，想让它们安静的（如websockets）可照此添加：
-    # websockets:
+    # 第三方库的日志记录器在DEBUG级别可能会刷屏，想让它们安静的（如aiohttp）可照此添加：
+    # aiohttp:
     #   level: INFO
 
   filters:

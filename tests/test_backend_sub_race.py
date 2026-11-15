@@ -466,7 +466,7 @@ async def _deliver_one_update(autostart: bool) -> dict[str, dict]:
 @pytest.mark.parametrize("autostart", [True, False], ids=["loop", "manual"])
 def test_tick_runs_on_uvloop(autostart: bool):
     """
-    生产在 Linux / macOS 上跑 uvloop（Sanic 默认启用），hub 的 tick 在它上面照常处理、交付。
+    生产在 Linux / macOS 上跑 uvloop（hetu start 用它），hub 的 tick 在它上面照常处理、交付。
     Windows 没有 uvloop 跳过（本机的异步用例跑在 conftest 的 UvloopSignatureLoop 上兜着）
     """
     uvloop = pytest.importorskip("uvloop")

@@ -17,10 +17,7 @@ from asyncio import selector_events
 from types import SimpleNamespace
 from typing import Any
 
-from hetu.server.threaded_accept import (
-    install_threaded_accept,
-    threaded_accept_listener,
-)
+from hetu.server.threaded_accept import install_threaded_accept
 
 BACKLOG = 1
 FIONBIO = 0x8004667E
@@ -227,15 +224,6 @@ def test_install_threaded_accept_only_on_selector_loops():
             )
         finally:
             other.close()
-    finally:
-        loop.close()
-
-
-def test_listener_installs_on_running_loop():
-    loop = asyncio.SelectorEventLoop()
-    try:
-        loop.run_until_complete(threaded_accept_listener(None))
-        assert getattr(loop, "_hetu_threaded_accept", False)
     finally:
         loop.close()
 

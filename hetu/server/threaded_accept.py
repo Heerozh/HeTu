@@ -7,8 +7,9 @@
 
 ## 病因
 
-Sanic 在 Windows 多 worker 时把同一个监听 socket 复制进每个 worker（socket.share /
-fromshare），各 worker 用 selector 事件循环 select() + accept()。Windows 共享 socket 上的
+Windows 多 worker 时，同一个监听 socket 复制进每个 worker（管理进程把它传给 worker，Windows 上
+multiprocessing 走的是 socket.share / fromshare，见 supervisor.py），各 worker 用 selector
+事件循环 select() + accept()。Windows 共享 socket 上的
 操作协调由涉及的进程自己负责（MSDN 对 WSADuplicateSocket 的说明），抢输的 worker 会真的
 堵死在 accept() 系统调用里：卡死现场 Python 层 gettimeout() 是 0.0，内核层却是阻塞模式
 （往监听端口连喂 backlog 次才能把 asyncio 的 `for _ in range(backlog + 1)` 循环喂出来，
@@ -27,8 +28,8 @@ WorkerKeeper 续约、FutureCalls、该 worker 上所有已建立的连接全部
 * 客户端在 accept 前 RST：8 线程 × 150 次风暴不触发
 
 为什么不干脆换成 IOCP(Proactor)：Proactor 用 AcceptEx 重叠 I/O，根本没有阻塞 accept，
-Sanic 也跑得起来，但实测 200 个并发连接会全部落到同一个 worker，多进程等于废掉。Windows
-又没有 SO_REUSEPORT，没法一个 worker 一个监听 socket。
+Web 服务器也跑得起来，但实测（当时跑的是 Sanic）200 个并发连接会全部落到同一个 worker，
+多进程等于废掉。Windows 又没有 SO_REUSEPORT，没法一个 worker 一个监听 socket。
 
 ## 修法
 
@@ -37,22 +38,20 @@ Sanic 也跑得起来，但实测 200 个并发连接会全部落到同一个 wo
 _accept_connection2 建 transport。accept 就算真堵住，堵的也只是这个线程，事件循环照转；
 线程堵在 accept 里时，下一个连接进来就会被它接走，等于退化成阻塞 accept 模型，同样正确。
 
-注入点是 asyncio 而不是 Sanic：只在 worker 自己的事件循环实例上替换 _start_serving /
-_stop_serving 两个方法（在 before_server_start 里装，Sanic 的约定是此时还没开始监听）。
-Sanic 的代码一行不动，升级 Sanic 不受影响。依赖的是 CPython selector 事件循环的三个私有
-方法，签名由 tests/test_threaded_accept.py 守门，CPython 改了会在 CI 上直接红。
+注入点是 asyncio 而不是 Web 框架：只在 worker 自己的事件循环实例上替换 _start_serving /
+_stop_serving 两个方法，在开始监听之前装（aiohttp 适配层的 `_serve`）。框架的代码一行不动，
+升级它不受影响。依赖的是 CPython selector 事件循环的三个私有方法，签名由
+tests/test_threaded_accept.py 守门，CPython 改了会在 CI 上直接红。
 
-Move accept() of listening sockets off the event loop thread. On Windows, Sanic shares one
-listening socket between workers, and a worker that loses the select()/accept() race can
+Move accept() of listening sockets off the event loop thread. On Windows, one listening
+socket is shared between workers, and a worker that loses the select()/accept() race can
 block inside accept() for real, freezing its whole event loop. Accepting in a dedicated
-thread makes that block harmless. Only the worker's own loop instance is patched; Sanic's
-code is untouched.
+thread makes that block harmless. Only the worker's own loop instance is patched; the web
+framework's code is untouched.
 """
 
 import asyncio
 import errno
-import logging
-import os
 import select
 import socket
 import sys
@@ -60,8 +59,6 @@ import threading
 from asyncio import constants, selector_events
 
 from ..i18n import _
-
-logger = logging.getLogger("HeTu.root")
 
 IS_WINDOWS = sys.platform == "win32"
 # accept 线程 select 的超时。有连接来 select 立刻返回，所以它不影响接连接的延迟，
@@ -179,9 +176,8 @@ class _AcceptThread:
 def install_threaded_accept(loop: asyncio.AbstractEventLoop) -> bool:
     """给 selector 事件循环实例装上"accept 在专用线程里做"的补丁，返回是否装上。
 
-    必须在该事件循环开始监听之前调用（Sanic 里就是 before_server_start）。不是 selector
-    事件循环（Proactor、uvloop 等）就不装，返回 False。只改这一个 loop 实例，不影响别的
-    loop，也不改 Sanic 的代码。
+    必须在该事件循环开始监听之前调用。不是 selector 事件循环（Proactor、uvloop 等）就不装，
+    返回 False。只改这一个 loop 实例，不影响别的 loop，也不改 Web 框架的代码。
 
     Patch a selector event loop instance so that listening sockets are accepted in a
     dedicated thread instead of on the loop thread. Must be called before the loop starts
@@ -233,27 +229,3 @@ def install_threaded_accept(loop: asyncio.AbstractEventLoop) -> bool:
     loop._stop_serving = _stop_serving  # type: ignore
     setattr(loop, _INSTALLED_FLAG, True)
     return True
-
-
-async def threaded_accept_listener(_app):
-    """Sanic before_server_start 监听器：给本 worker 的事件循环装 accept 线程补丁。
-
-    worker_main 只在 Windows 上注册它。装不上（事件循环不是 selector 的）就保持原样，
-    只打一条警告。
-
-    Sanic before_server_start listener that installs the threaded accept patch on this
-    worker's event loop (registered on Windows only). Leaves the loop untouched and
-    logs a warning if it is not a selector loop.
-    """
-    loop = asyncio.get_running_loop()
-    if install_threaded_accept(loop):
-        logger.info(
-            _("🧵 进程[{pid}] 监听socket改由accept线程接连接").format(pid=os.getpid())
-        )
-    else:
-        logger.warning(
-            _(
-                "⚠️ 事件循环 {loop} 不是 selector 事件循环，没装上 accept 线程补丁，"
-                "Windows 多 worker 下如遇 worker 卡住不响应，请改用 WORKER_NUM: 1"
-            ).format(loop=type(loop).__name__)
-        )

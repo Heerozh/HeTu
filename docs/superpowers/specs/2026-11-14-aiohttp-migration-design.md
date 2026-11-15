@@ -1,8 +1,8 @@
 # 用 aiohttp 替换 Sanic — 设计稿
 
 - 日期：2026-11-14
-- 状态：实施中，设计做过一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0~4c 步已合并（PR #226~#232，
-  第 4c 步的实测见 §12.2），第 5 步在 `feat/supervisor` 分支上做。已定事项见 §13，待定问题见 §14。
+- 状态：实施中，设计做过一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；第 0~5 步已合并（PR #226~#233，
+  第 4c 步的实测见 §12.2），第 6 步在 `feat/drop-sanic` 分支上做（§5.8）。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -1136,7 +1136,7 @@ abort。所以：
 
     初版有两条结论因此作废："推送那几档频率 0.8~4.7GHz"，"聊天 10 条/秒探针 p99 aiohttp 高 0.15ms"。
 
-### 5.7 第 5 步：自己的多进程 supervisor（已实施，分支 `feat/supervisor`）
+### 5.7 第 5 步：自己的多进程 supervisor（已实施，PR #233）
 
 替代 Sanic 的 WorkerManager，只给 aiohttp 栈用（Sanic 栈继续用它自己的，直到第 6 步）。代码在
 `hetu/server/supervisor.py`（管理进程、worker 的入口）和 `aiohttp_app.run_worker`（worker 里跑的服）。
@@ -1338,7 +1338,9 @@ abort。所以：
   - 补了"重启出来的卡在开服里""稳定跑满之后从头计数"的测试（原来删掉这两条行为测试也照样过）；
   - 信号测试改用 `signal.raise_signal`。
 
-### 5.8 第 6 步：切换默认、删除 Sanic
+### 5.8 第 6 步：切换默认、删除 Sanic（已实施，分支 `feat/drop-sanic`）
+
+下面先是原计划，和实现不一致的地方见后面的"实施记录"。
 
 - 默认值改为 `HETU_HTTP_SERVER=aiohttp`，然后删除：开关本身、`adapters/sanic_app.py`、`start.py` 里的
   Sanic 分支、`SANIC_WORKER_IDENTIFIER` 回退、harness 的 Sanic 实现，以及依赖 `sanic` 和 `sanic-testing`。
@@ -1383,7 +1385,168 @@ abort。所以：
 - 守门测试：`test_headless_process.py`、`test_cli_debug.py` 里"不加载 sanic"的检查，改成"不加载 aiohttp"。
 - 版本：下一个 minor 版本，发版说明里列出 §6 的全部变更。
 
+#### 实施记录
+
+分 7 个提交：
+
+1. `refactor(server)!`：删 Sanic 栈（适配层、开关、Sanic 分支、依赖、harness 的 Sanic 实现、只测 Sanic 的用例）；
+2. `feat(webext)!`：`define_route` / `on_server_setup` 改成 aiohttp 的接口，`test_webext.py` 改成行为测试；
+3. `feat(server)`：LOGGING 还引用 Sanic 的类时给出明确报错；
+4. `bench`：压测脚本去掉 `--http-server`；
+5. `docs(server)`：代码、测试的注释里去掉已经不成立的 Sanic 说法；
+6. `docs`：用户文档、配置模板、llms.txt；
+7. `docs(spec)`：本节。
+
+**删掉的**
+
+- `adapters/sanic_app.py`（`worker_main`、`SanicWsConnection`、`resolve_ack_threshold`、Sanic 的 `on_lease_lost`）、
+  `server/web.py`；`hetu.server` 不再导出 `worker_main`。
+- `hetu start` 的 `HETU_HTTP_SERVER` 和 Sanic 分支：环境变量里还设着它也不理，不报错（它只在过渡期用过，没写进
+  文档）。开服信息不再打"Web 服务器：xx"那一行。
+- `threaded_accept_listener`（Sanic 的 before_server_start 钩子），aiohttp 适配层的 `_serve` 直接调
+  `install_threaded_accept`。
+- `worker_index()` 对 `SANIC_WORKER_IDENTIFIER` 的回退。
+- `HeTuConfig` 和模板里的 `WEBSOCKET_PING_TIMEOUT`：只有 Sanic 读它，aiohttp 上等 pong 的时间是 heartbeat 的一半
+  （§6 已列）。
+- `webext.registered()`（aiohttp 栈打"跳过"警告用的）、`USER_BLUEPRINT_NAME`。
+- 依赖：`sanic`、`sanic-testing`；`websockets` 挪进 dev 组（只有测试的 ws 客户端用它，动手前 grep 过 `hetu/`）。
+  uv.lock 里随之去掉 sanic-routing、httpx、tracerite 等。
+
+**webext**
+
+- `define_route(uri, *, methods=("GET",), **aiohttp_kwargs)`：
+  - methods 统一大写、去重（同一路径同一方法在 aiohttp 上加两次会报错）；只注册给出的方法，不像 aiohttp 的
+    `add_get` 那样顺带注册 HEAD；
+  - 其余参数透传给 `UrlDispatcher.add_route`。同一路径的几个方法连着加，aiohttp 会复用刚建的 resource，带
+    `name` 也不会撞名。
+- `build_app` 的注册顺序：HeTu 的 ws 入口 → `webext.apply_to`（先路由，再按注册顺序调 setup 回调）→ 默认欢迎页。
+  aiohttp（3.10 起）先按路径前缀的索引找 resource，从最具体的前缀往上找，同一个前缀里才按注册顺序。所以用户
+  在 "/" 下注册的通配路由本来就抢不走 /hetu 下的 ws 入口；ws 入口排最前，防的是用户在 `on_server_setup` 里绕过
+  `define_route` 的检查、注册到 /hetu 下的路由。（初版写的是"aiohttp 按注册顺序匹配"，不准确，审查时纠正。）
+- 用户占了 "/" 就不挂默认欢迎页，判断看 resource 的 `canonical` 是不是 "/" 或空串（挂在 "/" 上的静态目录是
+  空串）。这个判断不能省：
+  - 照挂的话，GET 虽然轮不到默认欢迎页（用户的先注册），HEAD 还会落到它上面；
+  - 用户在 `on_server_setup` 里**最后**注册 "/" 时，aiohttp 的 `add_resource` 会复用最后那个 resource，
+    默认欢迎页的 GET 跟用户的重复，开服时抛 RuntimeError（变异检查时发现的）。
+- `on_server_setup` 的回调在 `AiohttpServer.start()` 一开头执行，在 `runtime.start()`（连后端、跑启动 System）
+  之前，同原来 Sanic 的时机（建 app 时后端还没连）。回调出错马上中止开服（多进程时整体中止），不用等开完服，
+  启动 System 也不会已经写过数据（初版放在 `runtime.start()` 之后，审查后挪的）。每 worker 的初始化和清理往
+  `app.on_startup` / `app.on_cleanup` 挂：`on_startup` 在 `runner.setup()` 里跑，那时后端已经连上；`on_cleanup` 在
+  `runner.cleanup()` 里跑，那时后端已经关了，webext 本来就不碰数据库，没有影响。
+- `webext` 不在顶层 import aiohttp（类型标注放在 TYPE_CHECKING 里，3.14 的注解是惰性求值的），`import hetu`
+  照旧不加载 Web 框架；`tests/app.py` 的路由也在处理函数里才 import。
+
+**LOGGING 的报错**
+
+- `runtime.check_logging_config`：formatter / filter / handler 里按名字 import 对象的键（`class`、`()`、
+  `queue`、`listener`）指向 `sanic` 的，抛 `LoggingConfigError`（`ValueError` 的子类），列出是哪几项，提示改用
+  `ContextAutoFormatter`。别的键（`filename: sanic.log` 之类）和 logger 名（`sanic.root`）不算：前者会误报，后者
+  无害，只是配了一个没人用的 logger。
+- `setup_logging` 在 dictConfig 之前先查，harness、嵌入场景、worker 都走它。`hetu start` 读完配置文件就查，
+  打出说明、以 2 退出（同别的配置错误），不先加载 app：单进程时 `prepare()` 是先加载 app 再配日志的。
+
+**测试**
+
+- harness 只剩 aiohttp 实现，改名 `ServerHarness`，去掉 `make_harness` 和空的 `stop()`；加了 `request(method,
+  path)`。`HETU_TEST_HTTP_SERVERS`、`fixtures/http_servers.py`、xdist 分组键里的栈都删了（分组恢复成迁移前的
+  写法）；`test_websocket.py` 两个栈各用一个 Redis 库的安排也撤了，回到 0 号库。
+- 删掉的用例（只测 Sanic，aiohttp 上有对应的）：`SanicWsConnection` 的 3 个单元测试；Sanic 的 `on_lease_lost`
+  （aiohttp 的在 `test_aiohttp_adapter.py`）和 before_server_start 监听器；ack 阈值的换算；关服时第二个 SIGINT
+  不跳过清理（aiohttp 上是 `test_signals_during_slow_disconnect_do_not_interrupt_shutdown`）；关服取消在途 RPC
+  （aiohttp 上是排空的两个用例）；`threaded_accept_listener`；`HETU_HTTP_SERVER` 取值不对。
+- 原来带 `aiohttp` 前缀的用例去掉前缀；`test_server_signals.py` 去掉按栈的参数化，关服的 close 码都是 1001。
+- 和 Sanic 逐条对照的两处换成固定值，都是删 Sanic 之前拿 Sanic 25.12 跑出来的：客户端地址的 18 种情况
+  （`test_forwarded.py`）、formatter 不上颜色时带不带 extra 字段（`test_safelogging.py`）。
+- 守门测试改成检查 aiohttp：`import hetu`、headless 的 `connect`、`hetu call` 这几个 CLI 命令、处理连接的模块
+  （websocket / receiver / conn / endpoint.context）都不加载 aiohttp。
+- `test_required_parameters` 的最后一条改成 `--workers=1`：默认 4 个 worker 时管理进程不加载 app 文件，找不到
+  app 的错误由 worker 报、管理进程以 1 退出，不再在本进程里抛 FileNotFoundError（还会真去 bind 2466 端口）。
+- `test_webext.py` 改成行为测试，真起服务（SQLite，不要 Docker）发请求：路由可访问、ws 入口还是 HeTu 的；
+  methods 限制（405）；`REQUEST_MAX_SIZE`（413）；"/" 顶掉默认欢迎页，HEAD 也不落到默认欢迎页；
+  `on_server_setup` 拿到 app，挂的 `on_startup` 在开服时跑，它注册的 "/" 同样顶掉默认欢迎页；app 文件被 exec
+  两遍时，路由表里只有一条、回调只调一次（aiohttp 只拦挨着的重复注册：同一路径、同一方法连着加会报错，隔开的
+  照样登记、先注册的生效，所以由回调数路由表）；`/hetu` 前缀被拒。SQLite 起停很快，整个文件不到 1 秒（核实过确实
+  每次都起了服务）。
+- LOGGING：报错写明了哪几项、没去 dictConfig；文件名、logger 名不误报；配置模板、默认配置都能过；
+  `hetu start` 以 2 退出、没开服。
+- 变异检查 10 个都被抓到：不挂 webext；methods 不生效；总是挂默认欢迎页；路由、回调的注册表改成追加（各一个）；
+  不调回调；请求体上限不映射；`setup_logging` 不查 LOGGING；`hetu start` 不提前查；LOGGING 的所有键都查。
+
+**文档**
+
+- `advanced.md`（中英文）：webext 一节按 aiohttp 重写，附 Sanic → aiohttp 的对照（同上面的示例）。
+- `getting-started.md`：开服时看到的是 LOGO、监听地址和"已就绪"。原来写的 `WebSocket listening on ...` 那行
+  日志并不存在。
+- `operations.md`（中英文）：
+  - 负载均衡一节改成只写一种参考部署：云上多机，一台固定的 Caddy 网关用自带的动态上游 `dynamic a` 从内网 DNS
+    发现 HeTu 节点（节点开机时注册、停服前注销），HeTu 跑在弹性伸缩组里。不再推荐 caddy-docker-proxy：单人维护、
+    更新慢，要挂 docker.sock，而且每增减一个容器就重载一次 Caddy 的配置，默认会断开所有 ws；用 `dynamic a` 时扩缩容
+    不改配置、Caddy 不重载。另外写明：TLS、访问日志交给 Caddy；`PROXIES_COUNT` 与 `X-Forwarded-For`，不认
+    `Forwarded` 头（§5.4.1）；安全组挡住直连；网关前面还有 CDN 时配 `trusted_proxies`；`stream_close_delay` 只在
+    改 Caddy 配置时用得上。README 的负载均衡一段同步精简。
+    - 示例 Caddyfile 用 caddy 2 的 `caddy adapt` 和 `caddy fmt` 校验过；
+    - 在本机实测过这个方案：三个 HeTu 监听 127.0.0.1/2/3 的同一端口，Caddy 容器的 /etc/hosts 模拟内网 DNS。连接按
+      least_conn 分到各节点；从"DNS"删掉一台再停服，它上面的连接收到 1001、其余照常调用；重连都落到剩下的节点；
+      加一台后新连接都落到它上面。测试时注意：Go 读 /etc/hosts 有最多 5 秒的缓存，改完要多等一会儿；真 DNS 的
+      查询 Go 不缓存，由 `refresh` 决定；
+  - 新增"停服"一节：关服顺序、两个超时、多进程时每个 worker 最多等多久（§5.5、§5.7），编排器的宽限期设到
+    70 秒以上（docker 默认 10 秒、k8s 默认 30 秒）；
+  - `hetu upgrade` 一节的 Windows 硬杀改成"进程被强制结束时"。
+- `CONFIG_TEMPLATE.yml`：补上 `SHUTDOWN_DRAIN_TIMEOUT`、`GRACEFUL_SHUTDOWN_TIMEOUT`、`REQUEST_MAX_SIZE` 的说明
+  （注释掉的默认值）。
+- `hetu/skills/building-on-hetu/SKILL.md` 里没有 webext、Sanic 的内容，不用改。docs/api 照规矩不提交。
+
+**没做的、留下的**
+
+- 发版说明（§6）在发版时写。
+- `benchmark/hypothesis/ws_bench_servers.py` 里还有一个 Sanic 服务器（函数里才 import），是当时框架对比的实验
+  脚本，留着不动；要重跑 Sanic 那一项得自己装 sanic。各 `*_report.md`、`*_result.md` 里的 Sanic 是历史记录。
+- LOGGING 的检查不看用户自己装没装 sanic：装了的话，一份本来能用的老配置也会被拒（以 2 退出）。符合"不做兼容"的
+  原则（§13 第 9 条），有意如此。
+
+**顺手修的现存问题**（和迁移无关，各一个提交）：
+
+- `getting-started.md` 的客户端示例连 `ws://127.0.0.1:2466/hetu/Hello`，开服命令却是 `--instance=dev`：路径最后
+  一段是实例名，这样连服务器以 4002 拒绝（"实例名不存在"）。改连 `/hetu/dev`，照文档实测能调通。聊天室教程是同一个
+  错：命令行用 `--instance=dev`、示例的 `config.yml` 用 `chat-room-1`，客户端连的 `/hetu/Chat` 两个都对不上；命令行也
+  改成 `chat-room-1`，客户端连 `/hetu/chat-room-1`（示例客户端的默认地址），两种开服方式都能连。
+- `docker-compose.yaml`：`depends_on: - redis` 和服务名 `database` 对不上，compose 直接拒绝这个文件；改好之后又卡在
+  `.env` 不存在（它在 .gitignore 里，仓库里也没说要先建），改成 `required: false`。`docker compose config` 校验通过。
+- `hetu/__init__.py` 一直按 `hetu` 取版本，发行包名是 `hetudb`，默认欢迎页、motd 显示的都是兜底的
+  "hetu is not installed in a proper way"。改按 `hetudb` 取，加了直接比对 `importlib.metadata` 的测试。
+- dev 组的 `trustme` 删了：它是给 Sanic 的 auto_tls 用的（`hetu start --cert auto` 时生成本地开发证书），HeTu 自己的
+  代码从没 import 过；第 2 步删了 `--cert` 之后就没人用了。
+
+**PR #234 审查后的修改**：
+
+- 高：`define_route` 的示例（docstring 和 `advanced.md`）是 `web.FileResponse(f"/data/{request.match_info['name']}")`，
+  照抄就能被路径穿越：aiohttp 匹配路由时 `%2F` 不算分隔符，交给 `match_info` 时却解码成 "/"，
+  `/download/..%2Fsecret.txt` 拿到的是 `../secret.txt`（审查实测返回了目录外的文件；原来 Sanic 给的是没解码的值，
+  同样的写法回 500）。示例改成普通的文本响应，写明路径参数已经解码过、下载文件用 `add_static`。
+- 低：
+  - `on_server_setup` 的回调挪到 `runtime.start()` 之前（见上）；
+  - methods 为空时报错，原来静默地一条路由也不注册（"/" 上还会照挂默认欢迎页）；
+  - 排空超时的文档说法改准确：取消正好落在提交途中的可能已经提交、回复丢了（§5.5 本来就是这么写的），不能
+    重复执行的调用用 `call_lock` 按单号去重；
+  - 文档补上从 Sanic 迁移时 `define_route` 的两处行为差别：尾斜杠严格匹配（§3.2 第 12 条点过名，第 4a 步只给
+    ws 入口补了带尾斜杠的路由），处理函数没有总时长上限（Sanic 的 `RESPONSE_TIMEOUT` 60 秒，超时回 503，§3.2
+    没列）；
+  - Caddy 前面还有 CDN、负载均衡时要配 `trusted_proxies`：Caddy 2.5 起默认丢掉不可信来源带来的
+    `X-Forwarded-For`、只写直连的对端，`PROXIES_COUNT` 设大了条目不够，会退回 Caddy 的地址；
+  - 仓库的 `docker-compose.yaml` 加上 `stop_grace_period: 70s`；
+  - 注释改正：同一 uri 登记两条时挂到 aiohttp 上是挨着加的，会撞 "method GET is already registered" 开服失败，
+    不是静默；aiohttp 的匹配顺序（见上）。
+- 测试：formatter 的固定值原来用被测类自己的 `DATE_FORMAT` 算时间，改格式抓不到，现在格式写死在测试里。审查时
+  存活的变异都补了测试，加上"回调挪回 `runtime.start()` 之后"，共 8 个，都被抓到：回调在路由之前执行；methods
+  只给一个字符串时不包成元组（aiohttp 会静默注册成 P、O、S、T 四个方法）；methods 不去重；methods 为空不报错；
+  LOGGING 不查 queue / listener；前缀判断去掉点号（会把 `sanic_tools` 之类的别的包也报出来）；改日期格式。
+- 审查核过没问题的：§5.8 和各节"留到第 6 步"的事项（除了上面的尾斜杠）；四条启动路径都会查 LOGGING；非 editable
+  安装、不装 sanic 和 websockets 时单进程、2 个 worker 都能开服；`import hetu`、`hetu range` 不加载 aiohttp；两处
+  固定值和 Sanic 25.12.1 的输出逐条一致；文档里关服的顺序和预算、`stream_close_delay` 的语义和代码一致。
+
 ## 6. 对外变更汇总（写进发版说明）
+
+第 6 步之后只剩 aiohttp 一个栈，表里标着"aiohttp 栈"的变更对所有人生效。
 
 | 变更 | 第几步 | 兼容处理 |
 |---|---|---|
@@ -1391,7 +1554,7 @@ abort。所以：
 | 删除 `ACCESS_LOG`、`INSPECTOR`、`INSPECTOR_PORT` | 2 | 无：直接不读，Sanic 栈强制关掉 |
 | 关颜色改用标准的 `NO_COLOR` 环境变量，`SANIC_NO_COLOR` 不再认；YAML 里 Sanic 的 `LOG_EXTRA` / `NO_COLOR` 键不再生效 | 2 | 无 |
 | worker 收到关服信号后忽略之后的关服信号：单进程模式下第二次 Ctrl+C 不再强退 | 2 | 无 |
-| LOGGING 里的 `sanic.logging.formatter.AutoFormatter` 等 `sanic.*` 类 | 2、6 | 无：第 6 步删 Sanic 后 dictConfig 会 ImportError |
+| LOGGING 里的 `sanic.logging.formatter.AutoFormatter` 等 `sanic.*` 类 | 2、6 | 不改写：第 6 步起 `hetu start` 读完配置就以 2 退出，说明是哪几项、改用 `ContextAutoFormatter` |
 | `SANIC_` 前缀的环境变量配置失效 | 2 | 无 |
 | `FORWARDED_SECRET` 不再支持 | 4a（aiohttp 栈）、6 | 无（同 §14 第 2 条） |
 | `@hetu.define_route` / `@hetu.on_server_setup` 在 aiohttp 栈上被跳过（打警告），第 6 步改成 aiohttp 接口 | 4a（aiohttp 栈） | 无 |
@@ -1407,6 +1570,8 @@ abort。所以：
 | 落库 Connection 行失败时（包括同 IP 匿名连接数超限）：close 码从 1000 变成 1011；匿名连接数超限时不再打堆栈 | 3 | 无 |
 | Windows 开发环境关服时，客户端收到的 close 码从 1000（清理完才发）变成 1001。C# SDK 对 1000 会把 reason 置为 null（`WebSocketTransport.cs:62-65`），按 reason 判断"正常关闭"的代码会受影响 | 4a（aiohttp 栈）、6 | 无 |
 | 崩溃的 worker 会被自动重启（Sanic 不会） | 5（aiohttp 栈）、6 | 无 |
+| 不再依赖 `sanic`；`websockets` 不再是运行时依赖（HeTu 自己不用它），自己的代码用到它的要自己装 | 6 | 无 |
+| `define_route` 的路由严格区分尾斜杠（Sanic 默认 `/ping/` 也能命中 `/ping`）；处理函数没有总时长上限（Sanic 的 `RESPONSE_TIMEOUT` 是 60 秒，超时回 503） | 6 | 无，文档写明 |
 | 多进程时管理进程只认第一个关服信号：关服途中再按 Ctrl+C 不再强杀所有进程（Sanic 第二次就强杀）；关服时每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒）才强制结束 | 5（aiohttp 栈）、6 | 无 |
 
 ## 7. 测试计划汇总
@@ -1421,7 +1586,7 @@ abort。所以：
 | 4b | 排空测试（只在 aiohttp 栈）：在途的 RPC 回复送达后才收到 1001；没读的消息不执行；总时长不超过预算 |
 | 4c | 性能对比（§5.6），结果写进 §12 |
 | 5 | 新增 supervisor 测试（§5.7）；Windows 人工检查清单 |
-| 6 | 全部测试只跑 aiohttp；`test_webext.py` 改成行为测试；守门测试改成检查 aiohttp |
+| 6 | 全部测试只跑 aiohttp；`test_webext.py` 改成行为测试；守门测试改成检查 aiohttp；LOGGING 引用 Sanic 的类时的报错 |
 
 每一步都是一个 PR，CI 只在 PR 上跑。docs/api 不提交。新增的用户可见字符串用 `_()` 包起来。
 
@@ -1636,9 +1801,88 @@ Unity 客户端（Windows，Unity 6000.7，`--workers=1`、SQLite）连 `tests/a
   - 每帧成本：RPC、推送都下降；
   - p99：定速 RPC 更低；推送 p99 每档持平或更低；RPC 探针（随机间隔）的 p99 每档都更低。碰上全量 GC 的窗口两边都
     有，不计。
-- 第 5 步多 worker 实测时再看一项：聊天 10 条/秒下 45~55ms 的离群点 aiohttp 略多（见上），不影响 p99。
+- 第 5 步多 worker 实测时再看一项：聊天 10 条/秒下 45~55ms 的离群点 aiohttp 略多（见上），不影响 p99。§12.3 复查过：
+  两栈没有差别，多 worker 时没有了。
 
-### 12.3 第 5 步多 worker（待测）
+### 12.3 第 5 步多 worker（2026-11-15）
+
+同一份代码（dev `fa24a74f`，第 5 步合并后），只用 `HETU_HTTP_SERVER` 切换两个栈，做法同 §12.2：服务器跑 dev 的
+worktree（还带着 Sanic），客户端源码固定在 `52feb264`。压测脚本用第 6 步分支上的版本：`rpc_throughput.py` 加了
+`--workers`、多核绑定，`sub_scenarios_ws.py` 加了离群点计数和各 worker 的连接数（`ec44a99d`）。环境同 §12.2：笔记本
+4 个 P 核（CPU 0-3），Python 3.14.10 + uvloop 0.23.0，Sanic 25.12.1、aiohttp 3.14.5，Redis 8.10.3（docker host 网络），
+`platform_profile=performance`。
+
+**RPC（hello_world），满载**
+
+`rpc_throughput.py --perf --workers N`。服务器整个进程树绑在 N 个 P 核上：1 个 worker 用 CPU 3，2 个用 CPU 2-3，
+3 个用 CPU 1-3，worker 不单独绑核，由系统调度。客户端是 8 个进程、各 16 个连接，绑 E 核 4-11（§12.2 是 4 个进程、
+共 64 个连接；改多一点，免得 3 个 worker 时客户端先到顶）。预热 5 秒，每批 5 × 10 秒窗口，两批、两个栈交替跑，
+表中是 10 个窗口的中位数。
+
+| 栈 | worker | QPS | 相对 1 个 | CPU µs/RPC | user kcycles/RPC | 服务器核空闲 | 频率 / TSC | 各 worker 的连接 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Sanic | 1 | 44,612 | 1.00 | 21.43 | 93.2 | 0% | 1.27 | 128 |
+| | 2 | 82,639 | 1.85 | 23.21 | 97.2 | 0% | 1.21 | 64 / 64 |
+| | 3 | 110,474 | 2.48 | 26.12 | 100.3 | 0% | 1.11 | 43 / 43 / 42 |
+| aiohttp | 1 | 79,765 | 1.00 | 11.67 | 48.5 | 0% | 1.27 | 128 |
+| | 2 | 150,284 | 1.88 | 12.44 | 48.4 | 0% | 1.18 | 71 / 57，64 / 64 |
+| | 3 | 197,328 | 2.47 | 14.32 | 50.0 | 0% | 1.05 | 43 / 43 / 42 |
+
+- aiohttp 的 QPS 是 Sanic 的 1.79 / 1.82 / 1.79 倍，第 4c 步的收益在多 worker 下照样成立。
+- 扩展：2 个 worker 1.85~1.88 倍，3 个 2.47~2.48 倍，两个栈一样。不到线性是因为笔记本的 P 核同时满载时降频，
+  频率相对 TSC 从 1.27 降到 1.05~1.11。每个核每秒的 user 态周期数下降的比例和频率几乎一样：3 个 worker 时
+  aiohttp 周期是 1 个 worker 的 0.849 倍、频率 0.828 倍，Sanic 0.894、0.872 倍。每次 RPC 的周期基本不变
+  （aiohttp 48.5 → 48.4 → 50.0k，Sanic 93.2 → 97.2 → 100.3k），多进程本身没有看得出的开销。
+- 共享监听 socket 的连接分配：几乎都是平均分。只有一次 aiohttp 2 个 worker 分成 71 / 57，那一批的 QPS（15.05 万）
+  和平均分的那批（14.95 万）一样：闭环满载时每个 worker 都有足够的连接把它压满。SO_REUSEPORT 暂时不需要
+  （§14 第 7 条）。
+- 服务器核空闲都是 0%，瓶颈在服务器。负载最重的 aiohttp 3 个 worker 时，客户端进程在整个生命周期里大约 85% 的时间
+  在忙（Sanic 那组约一半），还有余量。
+- 读写类系统调用两个栈每次 RPC 都是 2 次。单 worker 的数和 §12.2 一致：aiohttp 79.8k QPS、48.5 kcycles，§12.2 是
+  81.6k、48.2；Sanic 44.6k、93.2，§12.2 是 43.8k、96.7。这里是 128 个连接，§12.2 是 64 个。
+
+**推送（聊天）**
+
+`sub_scenarios_ws.py --scenario chat --probe-random`，2000 个连接。1 个 worker 绑 CPU 0，2 个绑 CPU 0-1；Redis 主 / 副本
+CPU 2 / 3；客户端 8 个进程在 E 核 4-11；写进程 CPU 13-15。RPC 探针从 §12.2 的 CPU 1 挪到低功耗核 CPU 12（第二个
+worker 要用 CPU 1），几种配置都在 CPU 12。每种配置跑聊天 10 条/秒 6 个窗口、100 条/秒 2 个窗口，每个窗口 5 秒预热
+加 30 秒；一批，顺序是 Sanic 1 个、aiohttp 1 个、Sanic 2 个、aiohttp 2 个 worker。
+
+| 负载 | 栈 | worker | 每帧 user kcycles | 推送 p99 | 全员送达 p99 | 探针 p50 / p99 / p999 / 最大 | 探针 > 40ms 的样本（各窗口） |
+|---|---|---:|---:|---:|---:|---|---|
+| 聊天 10 条/秒 | Sanic | 1 | 68.8 | 127.7 | 135.2 | 0.45 / 32.6 / 36.9 / 58.5 | 1, 2, 1, 0, 1, 2（共 7） |
+| | aiohttp | 1 | 61.4 | 124.7 | 131.0 | 0.42 / 29.0 / 30.6 / 54.5 | 1, 1, 0, 1, 1, 1（共 5） |
+| | Sanic | 2 | 73.4 | 113.3 | 119.5 | 0.45 / 16.1 / 17.3 / 31.7 | 全 0 |
+| | aiohttp | 2 | 65.1 | 112.4 | 118.1 | 0.40 / 14.8 / 17.3 / 29.3 | 全 0 |
+| 聊天 100 条/秒 | Sanic | 1 | 114.2 | 146.2 | 156.7 | 0.46 / 54.3 / 72.6 / 73.1 | 140, 139 |
+| | aiohttp | 1 | 107.8 | 143.4 | 154.1 | 0.40 / 53.3 / 67.4 / 67.5 | 116, 138 |
+| | Sanic | 2 | 122.1 | 123.0 | 131.3 | 0.43 / 27.4 / 35.3 / 46.7 | 1, 0 |
+| | aiohttp | 2 | 117.0 | 122.0 | 129.2 | 0.41 / 25.8 / 32.7 / 35.7 | 0, 0 |
+
+延迟的单位都是 ms，表中是各窗口的中位数，"最大"取所有窗口里最大的。
+
+- 所有窗口的交付数都等于应交付数，一致性核对都是 0 差异。2 个 worker 时连接分成 1016 / 985（aiohttp）、1007 / 994
+  （Sanic），含探针的连接，平均分。
+- 每帧成本 aiohttp 每档都比 Sanic 低：10 条/秒低 10.8% / 11.3%（1 / 2 个 worker），100 条/秒低 5.6% / 4.2%。
+- 2 个 worker 时每帧成本两个栈都比 1 个 worker 高 6~9%：每个 worker 的订阅 hub 各自从副本重读、比对一遍变更。
+  聊天的所有连接都订同一个频道，每条消息被两个 worker 各读一遍：副本上的 hgetall 每秒 20 → 40 次，100 条/秒时
+  200 → 400 次。这是 worker 级 hub 的设计（docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md），副本的读
+  按订阅了这个频道的 worker 数放大，不碰主库。
+- 延迟：2 个 worker 时一轮扇出只有约 1000 个连接，推送 p99 低 12~23ms，探针 p99 减半（10 条/秒 29.0 → 14.8ms，
+  100 条/秒 53.3 → 25.8ms）。
+- §12.2 留下的离群点：单 worker 时 45~55ms 的样本，aiohttp 6 个窗口共 5 个，Sanic 共 7 个，这次反而是 Sanic 略多。
+  §12.2 的"aiohttp 略多"（每个窗口 2 对 1）在噪声范围内，两个栈没有差别。它们是探针排在一轮完整扇出（2000 个连接
+  约 30ms）之后、偶尔又碰上下一轮造成的：2 个 worker 时一轮减半，两个栈都一个都没有（最大值 29.3 / 31.7ms）。
+- 单 worker 的数和 §12.2 一致：每帧 61.4 / 68.8k，§12.2 是 61.5 / 68.8；推送 p99 124.7 / 127.7，§12.2 是 122.6~125.8 /
+  126.7~129.6；探针 p99 29.0 / 32.6，§12.2 是 29.1 / 33.0。探针挪到低功耗核 CPU 12 没有影响。
+
+**结论**
+
+- 多 worker 下 aiohttp 对 Sanic 的收益不变：RPC 吞吐约 1.8 倍，推送每帧低 4~11%。
+- supervisor 共享一个监听 socket，连接分得均匀；吞吐随 worker 数扩展，打折的部分是笔记本多核满载时降频，每次 RPC
+  的周期不变。
+- 多 worker 时推送每帧多 6~9%，来自每个 worker 各自重读变更（副本的读随 worker 数放大），换来更低的推送和探针延迟。
+- §12.2 的离群点：两个栈没有差别，多 worker 时消失。
 
 ## 13. 已定事项（2026-11-14）
 

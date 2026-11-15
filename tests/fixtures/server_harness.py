@@ -2,11 +2,10 @@
 测试里起停 HeTu 服务、跑客户端 routine 的封装。
 
 测试只经它和服务器打交道，不直接碰 Web 框架（设计稿
-docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.0）。两个实现：`SanicHarness` 内部用
-sanic_testing；`AiohttpHarness` 每次调用都新建事件循环和 `AiohttpServer`，走的就是 `hetu start` 单进程的
-开服、关服代码。用 `make_harness` 按栈建。
+docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §5.0）。`ServerHarness` 每次调用都新建事件
+循环和 `AiohttpServer`，走的就是 `hetu start` 单进程的开服、关服代码。
 
-两个实现都必须满足的语义，测试依赖它们：
+测试依赖的语义：
 
 1. 每次 `websocket()` / `get()` 都完整起停一次服务：启动钩子（连后端、跑启动 System、起后台
    任务）和关服钩子（拆连接、停后台任务、释放租约、关后端）都跑，每次一个新的事件循环。
@@ -27,12 +26,12 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-import sanic_testing.testing
+import aiohttp
 from nacl.public import PrivateKey
-from sanic import Sanic
 from websockets.exceptions import ConnectionClosedOK
 
 from hetu.server import pipeline
+from hetu.server.adapters import aiohttp_app
 
 logger = logging.getLogger("HeTu.root")
 
@@ -163,90 +162,13 @@ class _ClientSession:
             await ws.close()
 
 
-class _SanicTestingResponse:
-    """交给 sanic_testing 的返回值：它跑完 routine 后会调 `.ws.close()` 关客户端，再停服务"""
-
-    def __init__(self, session: _ClientSession):
-        self.ws = session
-
-
-class SanicHarness:
+class ServerHarness:
     """
-    Sanic 栈上一个 HeTu 服务的测试封装，语义见模块说明。
+    一个 HeTu 服务的测试封装，语义见模块说明。
 
     `config` 是起服时用的配置，可以在调用 `websocket()` / `get()` 之前修改。`runtime` 是本次（或
-    上一次）起服的 `WorkerRuntime`，每次起服新建一个。
-    """
-
-    def __init__(self, app: Sanic, routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT):
-        self._app = app
-        self.routine_timeout = routine_timeout
-
-    @property
-    def config(self) -> MutableMapping[str, Any]:
-        return self._app.config
-
-    @property
-    def runtime(self) -> Any:
-        return self._app.ctx.runtime
-
-    def _test_client(self) -> Any:
-        # sanic_testing 第一次随机选端口后会记下来，下次照用，刚停的服务还占着它就 bind 失败。
-        # 每次清掉，让它重新随机选
-        client = self._app.test_client
-        client.port = None
-        return client
-
-    def websocket(self, path: str, mimic: Routine, **connect_kwargs: Any) -> WsResult:
-        """
-        起服，用 `mimic(connect)` 跑客户端逻辑，再停服。`connect_kwargs` 原样传给客户端的
-        `connect()`，比如 `extra_headers`。
-        """
-        sessions: list[_ClientSession] = []
-        errors: list[BaseException] = []
-
-        async def websocket_proxy(url: str, *, mimic: Routine, **kwargs: Any):
-            session = _ClientSession(url, kwargs)
-            sessions.append(session)
-            try:
-                async with asyncio.timeout(self.routine_timeout):
-                    await mimic(session.connect)
-            except ConnectionClosedOK:
-                pass
-            except _PASS_THROUGH:
-                raise
-            except BaseException as e:  # noqa: BLE001 留到服务停下之后原样抛给测试
-                errors.append(e)
-            return _SanicTestingResponse(session)
-
-        # sanic_testing 每次请求都按这个模块级名字找 ws 客户端，换成自己的，用完换回去
-        original = sanic_testing.testing.websocket_proxy
-        sanic_testing.testing.websocket_proxy = websocket_proxy
-        try:
-            self._test_client().websocket(path, mimic=mimic, **connect_kwargs)
-        finally:
-            sanic_testing.testing.websocket_proxy = original
-        if errors:
-            raise errors[0]
-        assert sessions, "服务没跑到 routine"
-        return sessions[0].result
-
-    def get(self, path: str) -> HttpResult:
-        """起服，发一个 GET 请求，再停服"""
-        _request, response = self._test_client().get(path)
-        assert response is not None
-        return HttpResult(status=response.status, text=response.text)
-
-    def stop(self) -> None:
-        self._app.stop()
-
-
-class AiohttpHarness:
-    """
-    aiohttp 栈上一个 HeTu 服务的测试封装，语义见模块说明。
-
-    每次调用都新建事件循环（Linux / macOS 上是 uvloop）和 `AiohttpServer`，runtime 和
-    `web.Application` 跟着新建：一个 Application 只能绑定一个事件循环。
+    上一次）起服的 `WorkerRuntime`。每次调用都新建事件循环（Linux / macOS 上是 uvloop）和
+    `AiohttpServer`，runtime 和 `web.Application` 跟着新建：一个 Application 只能绑定一个事件循环。
     """
 
     def __init__(
@@ -254,8 +176,6 @@ class AiohttpHarness:
         config: Mapping[str, Any],
         routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT,
     ):
-        from hetu.server.adapters import aiohttp_app
-
         self._config = aiohttp_app.prepare(config)
         self._runtime: Any = None
         self.routine_timeout = routine_timeout
@@ -270,7 +190,6 @@ class AiohttpHarness:
 
     def _run(self, body: Callable[[str], Awaitable[Any]]) -> Any:
         """新建事件循环，开服，跑 body("127.0.0.1:端口")，再关服。返回 body 的返回值"""
-        from hetu.server.adapters import aiohttp_app
 
         async def main() -> Any:
             server = aiohttp_app.AiohttpServer(self._config)
@@ -315,32 +234,18 @@ class AiohttpHarness:
             raise errors[0]
         return result
 
-    def get(self, path: str) -> HttpResult:
-        """起服，发一个 GET 请求，再停服"""
-        import aiohttp
+    def request(self, method: str, path: str, **kwargs: Any) -> HttpResult:
+        """起服，发一个 HTTP 请求，再停服。kwargs 原样传给 aiohttp 客户端的 request（比如 data）"""
 
         async def body(host: str) -> HttpResult:
             async with (
                 aiohttp.ClientSession() as http,
-                http.get(f"http://{host}{path}") as response,
+                http.request(method, f"http://{host}{path}", **kwargs) as response,
             ):
                 return HttpResult(status=response.status, text=await response.text())
 
         return self._run(body)
 
-    def stop(self) -> None:
-        """每次调用都已经停服了，这里什么也不做"""
-
-
-def make_harness(
-    http_server: str,
-    app_name: str,
-    config: Mapping[str, Any],
-    routine_timeout: float = DEFAULT_ROUTINE_TIMEOUT,
-) -> SanicHarness | AiohttpHarness:
-    """按 Web 服务器栈（sanic / aiohttp）建 harness。Sanic 栈用 app_name 建 Sanic app"""
-    if http_server == "aiohttp":
-        return AiohttpHarness(config, routine_timeout)
-    from hetu.server import worker_main
-
-    return SanicHarness(worker_main(app_name, config), routine_timeout)
+    def get(self, path: str) -> HttpResult:
+        """起服，发一个 GET 请求，再停服"""
+        return self.request("GET", path)
