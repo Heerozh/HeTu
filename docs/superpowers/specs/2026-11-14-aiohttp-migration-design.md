@@ -1478,10 +1478,17 @@ abort。所以：
 - `getting-started.md`：开服时看到的是 LOGO、监听地址和"已就绪"。原来写的 `WebSocket listening on ...` 那行
   日志并不存在。
 - `operations.md`（中英文）：
-  - Caddy 一节补上：TLS、访问日志交给 Caddy；`PROXIES_COUNT` 与 `X-Forwarded-For`，不认 `Forwarded` 头
-    （§5.4.1）；防火墙挡住直连；`stream_close_delay`。Caddy 默认不延迟，重载配置时马上断开所有 ws，而
-    caddy-docker-proxy 每增减一个容器就重载一次。示例给了 Caddyfile 和容器标签两种写法，标签的写法是按
-    caddy-docker-proxy "点号表示嵌套"的规则写的，没有实际跑过；
+  - 负载均衡一节改成只写一种参考部署：云上多机，一台固定的 Caddy 网关用自带的动态上游 `dynamic a` 从内网 DNS
+    发现 HeTu 节点（节点开机时注册、停服前注销），HeTu 跑在弹性伸缩组里。不再推荐 caddy-docker-proxy：单人维护、
+    更新慢，要挂 docker.sock，而且每增减一个容器就重载一次 Caddy 的配置，默认会断开所有 ws；用 `dynamic a` 时扩缩容
+    不改配置、Caddy 不重载。另外写明：TLS、访问日志交给 Caddy；`PROXIES_COUNT` 与 `X-Forwarded-For`，不认
+    `Forwarded` 头（§5.4.1）；安全组挡住直连；网关前面还有 CDN 时配 `trusted_proxies`；`stream_close_delay` 只在
+    改 Caddy 配置时用得上。README 的负载均衡一段同步精简。
+    - 示例 Caddyfile 用 caddy 2 的 `caddy adapt` 和 `caddy fmt` 校验过；
+    - 在本机实测过这个方案：三个 HeTu 监听 127.0.0.1/2/3 的同一端口，Caddy 容器的 /etc/hosts 模拟内网 DNS。连接按
+      least_conn 分到各节点；从"DNS"删掉一台再停服，它上面的连接收到 1001、其余照常调用；重连都落到剩下的节点；
+      加一台后新连接都落到它上面。测试时注意：Go 读 /etc/hosts 有最多 5 秒的缓存，改完要多等一会儿；真 DNS 的
+      查询 Go 不缓存，由 `refresh` 决定；
   - 新增"停服"一节：关服顺序、两个超时、多进程时每个 worker 最多等多久（§5.5、§5.7），编排器的宽限期设到
     70 秒以上（docker 默认 10 秒、k8s 默认 30 秒）；
   - `hetu upgrade` 一节的 Windows 硬杀改成"进程被强制结束时"。

@@ -42,8 +42,8 @@ docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
 The Docker workflow exists primarily so you can run on cheap Spot
-instances behind a reverse proxy: containers come and go, and the proxy
-drops or adds them automatically.
+instances behind a gateway: machines come and go, and the gateway discovers
+them automatically (see Load balancing below).
 
 ### `pip` native (no container)
 
@@ -179,75 +179,66 @@ To stay ready for that future, design your `Components` with sharding in mind:
 
 ## Load balancing
 
-You can start any number of Hetu servers to increase server capacity in parallel, but a
-reverse proxy is required.
+You can run any number of HeTu servers to add capacity in parallel, with a
+gateway in front of them. The reference deployment (multiple machines in the
+cloud):
 
-### Caddy (recommended)
+- **Gateway**: one fixed machine (not a spot instance) with a public IP,
+  running the official Caddy image. It obtains certificates, terminates TLS,
+  writes access logs and forwards the websockets to HeTu.
+- **HeTu**: runs in an autoscaling group, cheap spot instances included, one
+  container per machine (`WORKER_NUM` set to the CPU count). The group's health
+  check can probe HeTu's root path `/`.
+- **Backend discovery**: keep one name, say `hetu.internal`, in your cloud's
+  private DNS (Alibaba Cloud PrivateZone, an AWS Route 53 private hosted zone,
+  and so on). Each HeTu machine adds its private IP on boot and removes it
+  before shutting down. Caddy's built-in dynamic upstreams (`dynamic a`) poll
+  that name, so scaling never touches Caddy's config: Caddy doesn't reload, and
+  connections on the other machines are left alone.
 
-The recommended setup is `caddy-docker-proxy` running in **controller mode**
-inside Docker Swarm. HeTu containers carry labels that Caddy reads to
-auto-register them in the reverse-proxy pool. When a container stops, Caddy
-drops it; when one starts, Caddy adds it. Free TLS via Let's Encrypt is
-automatic.
+```
+game.example.com {
+	reverse_proxy {
+		# look up the private DNS name every 2 seconds for the current HeTu nodes
+		dynamic a {
+			name hetu.internal
+			port 2466
+			refresh 2s
+		}
+		# websockets are long-lived: send new ones to the least busy node
+		lb_policy least_conn
+		# if a node can't be reached, try others for 5s and skip it for 30s
+		lb_try_duration 5s
+		fail_duration 30s
+		# when you do edit the Caddy config, keep open websockets up to 2 hours
+		stream_close_delay 2h
+		transport http {
+			dial_timeout 2s
+		}
+	}
+}
+```
 
-This pairs well with pre-emptible / spot instances: the game-server fleet
-churns continuously while the proxy keeps a stable client-facing endpoint.
-Game clients need automatic reconnect, this is easily achievable using the official SDK.
+Things to know:
 
-If you'd rather not run Swarm, talk to Caddy's admin API directly from your
-own orchestration code.
-
-*You can use the HeTu server root path（http://localhost/） as the health check
-endpoint.*
-
-HeTu itself only listens for plain `ws://`; TLS and access logs are Caddy's
-job. Three things to get right:
-
-- **The client's real IP.** Caddy adds `X-Forwarded-For` by default. Set
-  `PROXIES_COUNT` to the number of reverse proxies in front of HeTu (1 for a
-  single Caddy, which is what the config template uses): HeTu takes the
-  `PROXIES_COUNT`-th entry from the end of `X-Forwarded-For` as the client
-  address, and the per-IP limit on anonymous connections
-  (`MAX_ANONYMOUS_CONNECTION_BY_IP`) depends on it. HeTu only reads
-  `X-Forwarded-For` (or the header named by `REAL_IP_HEADER`), not the RFC 7239
-  `Forwarded` header. If a CDN or load balancer sits in front of Caddy, add its
-  addresses to Caddy's `trusted_proxies`: by default Caddy drops an
-  `X-Forwarded-For` that arrives from an untrusted peer and writes only the
-  peer it sees, so HeTu gets a single entry, a larger `PROXIES_COUNT` runs out
-  of entries and falls back to Caddy's own address, and the per-IP limit hits
-  the wrong address.
-- **Block direct access.** Use a firewall or a private network so that only
-  Caddy can reach HeTu's port. A client that bypasses Caddy can forge
-  `X-Forwarded-For` freely, which defeats the per-IP limit.
-- **`stream_close_delay`.** By default Caddy closes every proxied WebSocket as
-  soon as it reloads its config, and `caddy-docker-proxy` reloads on every
-  container that comes or goes, so each scale-up or scale-down would drop and
-  reconnect every player. Set `stream_close_delay` on `reverse_proxy`: after a
-  reload, existing connections are kept for up to that long before Caddy closes
-  them (clients reconnect as usual):
-
-  ```
-  game.example.com {
-      reverse_proxy hetu1:2466 hetu2:2466 {
-          stream_close_delay 2h
-      }
-  }
-  ```
-
-  With `caddy-docker-proxy`, put it in the HeTu container's labels (dots mark
-  sub-directives):
-
-  ```yaml
-  labels:
-    caddy: game.example.com
-    caddy.reverse_proxy: "{{upstreams 2466}}"
-    caddy.reverse_proxy.stream_close_delay: 2h
-  ```
-
-### Why not Nginx
-
-Nginx works, but its config syntax for the dynamic add/remove pattern HeTu
-encourages is verbose and easy to get wrong. Caddy fits the workload better.
+- **The client's real IP.** Caddy adds `X-Forwarded-For`, and with
+  `PROXIES_COUNT: 1` (the config template's default) HeTu reads the client
+  address from it; the per-IP limit on anonymous connections depends on it.
+  HeTu only reads this header, not `Forwarded`. Use a security group so that
+  only the gateway can reach HeTu's port, or `X-Forwarded-For` can be forged.
+  If you put a CDN or load balancer in front of the gateway, add its addresses
+  to Caddy's `trusted_proxies` and set `PROXIES_COUNT` to the total number of
+  proxies.
+- **Stopping a HeTu machine** (scaling in, or a spot instance getting its
+  reclaim notice): remove it from DNS first, then stop the server (see
+  "Shutting down" below). Its players get a 1001 and reconnect to another
+  machine automatically.
+- **A machine that vanished without removing its record**: Caddy fails to
+  reach it and moves on, so players just wait a moment. Clean up stale records
+  with a periodic reconcile or the autoscaling group's scale-in hook.
+- **The gateway is a single point of failure.** Use a stable machine; if it
+  goes down, players reconnect automatically. At larger scale, add gateways
+  behind your cloud's load balancer.
 
 ## Shutting down
 

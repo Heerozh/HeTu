@@ -277,17 +277,10 @@ Proxy，Redis Cluster。
 
 ### 负载均衡
 
-生产环境下，对河图还要设立一层反向代理，并进行负载均衡。
-
-反向代理选择：
-
-- Caddy: 自动 https 证书，自动反代
-    - 负载均衡机启动 caddy-docker-proxy 的 Docker Swarm 容器
-    - caddy-docker-proxy 切到 controller 模式读集群 service label
-    - 河图的容器只要附带label，启动后即可自动被反代，关机自动离线。
-    - 游戏客户端需要有自动重连功能
-    - 如果不想用 swarm，可以自己调用Caddy的admin api自己控制。
-- Nginx: 老了，配置复杂歧义多，不推荐
+生产环境下，河图前面要有一层 Caddy 网关（自动 HTTPS、负载均衡）。参考部署是云上多机：网关一台固定的机器，
+河图跑在弹性伸缩组里（可以用抢占式实例），网关用 Caddy 自带的动态上游 `dynamic a` 从内网 DNS 发现河图节点，
+扩缩容不用改网关的配置。游戏客户端需要自动重连（官方 SDK 的 `HeTuSessionClient` 自带）。详见
+[运维文档](docs/zh/operations.md)。
 
 ## ⚙️ 客户端 SDK 安装
 

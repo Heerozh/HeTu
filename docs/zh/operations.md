@@ -36,7 +36,7 @@ docker build -t my-game .
 docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
-Docker 工作流的主要目的是让您能够在反向代理后面运行廉价的 Spot 实例：容器可以随时创建或销毁，代理会自动增减它们。
+Docker 工作流的主要目的是让您能够在网关后面运行廉价的 Spot 实例：机器可以随时创建或销毁，网关会自动发现它们（见下面的负载均衡）。
 
 ### `pip` 原生安装（无容器）
 
@@ -124,52 +124,50 @@ HeTu 仅使用 Redis 的基本功能（哈希、有序集合、发布/订阅）�
 
 ## 负载均衡
 
-### Caddy（推荐）
+HeTu 可以起任意多台来并行扩容，前面要有一层网关。参考部署（云上多机）：
 
-推荐的方案是在 Docker Swarm 中以**控制器模式**运行 `caddy-docker-proxy`。HeTu 容器会携带 Caddy 能够读取的标签，从而自动注册到反向代理池中。当容器停止时，Caddy 会将其移除；容器启动时自动添加。通过 Let's Encrypt 自动提供免费 TLS。
+- **网关**：一台固定的机器（不用抢占式实例），绑公网 IP，跑官方 Caddy 镜像：自动申请证书、终止 TLS、记访问日志，
+  再把 ws 转给后面的 HeTu。
+- **HeTu**：跑在弹性伸缩组里，可以用便宜的抢占式实例，每台机器一个容器（`WORKER_NUM` 按 CPU 数）。伸缩组的健康
+  检查可以探 HeTu 的根路径 `/`。
+- **发现后端**：在云厂商的内网 DNS（阿里云 PrivateZone、AWS Route 53 私有托管区等）里维护一个名字，比如
+  `hetu.internal`，HeTu 机器开机时把自己的内网 IP 加进去，停服前删掉。Caddy 用自带的动态上游 `dynamic a` 定时查
+  这个名字，扩缩容不用改 Caddy 的配置，Caddy 不重载，别的机器上的连接都不受影响。
 
-这种方式非常适用于抢占式/Spot 实例：游戏服务器集群不断更新，而代理则保持稳定的客户端访问端点。游戏客户端需要自动重连，使用官方 SDK 即可轻松实现。
+```
+game.example.com {
+	reverse_proxy {
+		# 每 2 秒查一次内网 DNS，拿到当前所有 HeTu 节点
+		dynamic a {
+			name hetu.internal
+			port 2466
+			refresh 2s
+		}
+		# ws 是长连接：新连接给连接数最少的那台
+		lb_policy least_conn
+		# 连不上就在 5 秒内换别的，30 秒内不再选它
+		lb_try_duration 5s
+		fail_duration 30s
+		# 改了 Caddy 配置重载时，已有的 ws 最多再留 2 小时
+		stream_close_delay 2h
+		transport http {
+			dial_timeout 2s
+		}
+	}
+}
+```
 
-如果您不想运行 Swarm，可以直接从自己的编排代码与 Caddy 的管理 API 交互。
+要点：
 
-*您可以使用 HeTu 服务器的根路径（https://localhost/）作为健康检查端点。*
-
-HeTu 自己只监听明文的 ws（`ws://`），TLS 和访问日志都交给 Caddy。部署时注意三点：
-
-- **客户端的真实 IP**：Caddy 默认会给请求加上 `X-Forwarded-For`。把配置里的 `PROXIES_COUNT` 设成 HeTu
-  前面反向代理的层数（只有一层 Caddy 就是 1，配置模板里就是这个值），HeTu 取 `X-Forwarded-For` 的倒数第
-  `PROXIES_COUNT` 项作为客户端地址，按 IP 限制匿名连接数（`MAX_ANONYMOUS_CONNECTION_BY_IP`）靠的就是它。
-  HeTu 只认 `X-Forwarded-For`（或 `REAL_IP_HEADER` 指定的头），不认 RFC 7239 的 `Forwarded` 头。
-  Caddy 前面还有 CDN、负载均衡时，要把它们的地址配进 Caddy 的 `trusted_proxies`：Caddy 默认丢掉不可信来源
-  带来的 `X-Forwarded-For`，只写它直接看到的对端，HeTu 就只能拿到一项，`PROXIES_COUNT` 设大了条目不够，退回
-  Caddy 自己的地址，按 IP 的限制就错位了。
-- **挡住直连**：用防火墙或内网只让 Caddy 访问 HeTu 的端口。绕过 Caddy 直接连 HeTu 时，`X-Forwarded-For`
-  可以随便伪造，按 IP 的限制就失效了。
-- **`stream_close_delay`**：Caddy 每次重载配置，默认会马上断开所有经它转发的 WebSocket。用
-  `caddy-docker-proxy` 时每增减一个容器就重载一次，也就是每次扩缩容，所有玩家都要掉线重连一次。给
-  `reverse_proxy` 设上 `stream_close_delay`，重载后已有的连接最多再保留这么久，到时才由 Caddy 断开
-  （客户端照常重连）：
-
-  ```
-  game.example.com {
-      reverse_proxy hetu1:2466 hetu2:2466 {
-          stream_close_delay 2h
-      }
-  }
-  ```
-
-  用 `caddy-docker-proxy` 时写在 HeTu 容器的标签上（点号表示子指令）：
-
-  ```yaml
-  labels:
-    caddy: game.example.com
-    caddy.reverse_proxy: "{{upstreams 2466}}"
-    caddy.reverse_proxy.stream_close_delay: 2h
-  ```
-
-### 为什么不选择 Nginx
-
-Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模式来说，显得冗长且容易出错。Caddy 更适合这种工作负载。
+- **客户端的真实 IP**：Caddy 会加上 `X-Forwarded-For`，HeTu 按 `PROXIES_COUNT: 1`（配置模板的默认值）从里面取
+  客户端地址，按 IP 限制匿名连接数靠它；HeTu 只认这个头，不认 `Forwarded` 头。用安全组只让网关访问 HeTu 的端口，
+  否则 `X-Forwarded-For` 可以伪造。网关前面再加 CDN、负载均衡的话，把它们的地址配进 Caddy 的 `trusted_proxies`，
+  `PROXIES_COUNT` 设成总层数。
+- **停一台 HeTu**（缩容、抢占式实例收到回收通知）：先从 DNS 里删掉，再停服（见下面"停服"），它上面的玩家收到
+  1001 后自动重连到别的机器。
+- **没来得及删记录就没了的机器**：Caddy 连不上会换别的，玩家只是多等一下；残留的记录用定时对账或伸缩组的缩容
+  钩子清掉。
+- **网关是单点**：用稳定的机器，挂了玩家会自动重连；规模大了再加网关、在前面放云厂商的负载均衡。
 
 ## 停服
 

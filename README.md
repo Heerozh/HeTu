@@ -284,18 +284,13 @@ Aliyun Tair. Redis Proxy and Redis Cluster are also supported.
 
 ### Load balancing
 
-In production, put a reverse proxy in front of HeTu for load balancing.
-
-Reverse proxy choices:
-
-- Caddy: automatic HTTPS certificates and automatic reverse proxying
-    - Run the caddy-docker-proxy Docker Swarm container on the load-balancer machine
-    - Switch caddy-docker-proxy to controller mode so it reads the cluster's service labels
-    - HeTu containers just need the labels. They are added to the proxy when they start
-      and removed when they shut down.
-    - Game clients need to reconnect automatically
-    - If you don't want Swarm, you can control Caddy yourself through its admin API.
-- Nginx: dated, with complex and ambiguous configuration. Not recommended.
+In production, put a Caddy gateway in front of HeTu (automatic HTTPS, load balancing).
+The reference deployment is multiple machines in the cloud: one fixed gateway machine,
+HeTu in an autoscaling group (spot instances are fine), and the gateway discovering
+HeTu nodes from your private DNS with Caddy's built-in dynamic upstreams
+(`dynamic a`), so scaling never touches the gateway's config. Game clients need to
+reconnect automatically (`HeTuSessionClient` in the official SDK does). See the
+[operations guide](docs/en/operations.md).
 
 ## ⚙️ Client SDK Installation
 
