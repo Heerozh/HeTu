@@ -1494,7 +1494,6 @@ abort。所以：
 - 发版说明（§6）在发版时写。
 - `benchmark/hypothesis/ws_bench_servers.py` 里还有一个 Sanic 服务器（函数里才 import），是当时框架对比的实验
   脚本，留着不动；要重跑 Sanic 那一项得自己装 sanic。各 `*_report.md`、`*_result.md` 里的 Sanic 是历史记录。
-- dev 组的 `trustme` 从第 2 步删掉 TLS 之后就没人用了，不属于这一步，没删。
 - LOGGING 的检查不看用户自己装没装 sanic：装了的话，一份本来能用的老配置也会被拒（以 2 退出）。符合"不做兼容"的
   原则（§13 第 9 条），有意如此。
 
@@ -1508,6 +1507,8 @@ abort。所以：
   `.env` 不存在（它在 .gitignore 里，仓库里也没说要先建），改成 `required: false`。`docker compose config` 校验通过。
 - `hetu/__init__.py` 一直按 `hetu` 取版本，发行包名是 `hetudb`，默认欢迎页、motd 显示的都是兜底的
   "hetu is not installed in a proper way"。改按 `hetudb` 取，加了直接比对 `importlib.metadata` 的测试。
+- dev 组的 `trustme` 删了：它是给 Sanic 的 auto_tls 用的（`hetu start --cert auto` 时生成本地开发证书），HeTu 自己的
+  代码从没 import 过；第 2 步删了 `--cert` 之后就没人用了。
 
 **PR #234 审查后的修改**：
 

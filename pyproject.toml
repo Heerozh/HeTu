@@ -76,7 +76,6 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
-    "trustme>=1.2.1",
     # 测试里的 ws 客户端（服务端用的是 aiohttp）
     "websockets>=15.0.1",
 ]
