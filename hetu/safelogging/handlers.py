@@ -67,6 +67,29 @@ def share_queues(logging_config):
                 handler_dict["queue"] = handler.queue
 
 
+def abandon_queues():
+    """
+    读日志队列的进程（管理进程）没了时调用：退出时不再等队列的后台线程把积压写完。没人读的话管道
+    写满，那个线程就一直卡着（还可能拿着跨进程的写锁，卡住别的 worker），进程永远退不出去；积压的
+    日志本来也没人收了。
+
+    Call when the process draining the log queues is gone: don't wait at exit for the
+    queue feeder threads to flush, which would otherwise block forever.
+    """
+    loggers = [logging.getLogger()]
+    loggers += [
+        lg
+        for lg in logging.Logger.manager.loggerDict.values()
+        if isinstance(lg, logging.Logger)
+    ]
+    for lg in loggers:
+        for handler in lg.handlers:
+            if isinstance(handler, logging.handlers.QueueHandler):
+                cancel = getattr(handler.queue, "cancel_join_thread", None)
+                if cancel is not None:
+                    cancel()
+
+
 def stop_all_logging_handlers():
     AutoListener.stop_all()
 

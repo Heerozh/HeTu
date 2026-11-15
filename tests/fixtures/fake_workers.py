@@ -94,7 +94,23 @@ def worker(
     if behavior == "reload_broken" and Path(config["BROKEN"]).exists():
         outbox.send((MSG_FAILED, FAILED_ERROR, "SyntaxError: broken\n"))
         sys.exit(1)
+    if behavior == "crash_then_hang" and index == config.get("CRASH_INDEX"):
+        if not _once(config, index):
+            # 重启出来的：一直不就绪，但听停服通知
+            how = _wait_stop(inbox)
+            record(config, f"exit-{how}")
+            sys.exit(0)
+        _ready(config, outbox, report_modules)
+        time.sleep(0.05)
+        os._exit(1)
     _ready(config, outbox, report_modules)
+    if behavior == "crash_after_delay" and index == config.get("CRASH_INDEX"):
+        time.sleep(config["CRASH_DELAY"])
+        os._exit(1)
+    if behavior == "error_after_ready" and _once(config, index):
+        detail = "Traceback (most recent call last):\nRuntimeError: boom-after-ready\n"
+        outbox.send((MSG_FAILED, FAILED_ERROR, detail))
+        sys.exit(1)
     if behavior == "crash_once" and _once(config, index):
         time.sleep(0.05)
         os._exit(1)
@@ -111,4 +127,8 @@ def worker(
     if behavior == "slow_stop":
         time.sleep(1)
     record(config, f"exit-{how}")
+    if behavior == "error_on_stop":
+        detail = "Traceback (most recent call last):\nRuntimeError: boom-on-stop\n"
+        outbox.send((MSG_FAILED, FAILED_ERROR, detail))
+        sys.exit(1)
     sys.exit(0)

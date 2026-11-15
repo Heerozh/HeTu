@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import multiprocessing
+import multiprocessing.connection
 import os
 import signal
 import socket
@@ -224,7 +225,6 @@ def test_worker_that_ignores_stop_is_killed_after_the_timeout(tmp_path, logs):
     assert any("没在 0.5 秒内退出，强制结束" in m for m in logs.messages())
 
 
-@POSIX_ONLY
 def test_only_the_first_shutdown_signal_counts(tmp_path, logs):
     """
     关服信号只认第一个：关服途中再来的不打断它（不会像 Sanic 那样第二个信号就强杀），worker 照常关完服
@@ -235,11 +235,11 @@ def test_only_the_first_shutdown_signal_counts(tmp_path, logs):
 
     def until() -> bool:
         if len(_events(tmp_path, "ready")) == 2 and not sent:
-            os.kill(os.getpid(), signal.SIGTERM)
+            signal.raise_signal(signal.SIGTERM)
             sent.append(1)
             time.sleep(0.3)  # 关服已经开始，worker 正慢慢停
-            os.kill(os.getpid(), signal.SIGTERM)
-            os.kill(os.getpid(), signal.SIGINT)
+            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(signal.SIGINT)
         return False
 
     try:
@@ -252,6 +252,94 @@ def test_only_the_first_shutdown_signal_counts(tmp_path, logs):
     assert code == 0
     assert sorted(e[2] for e in _events(tmp_path, "exit-stop")) == [0, 1]
     assert not any("强制结束" in m for m in logs.messages())
+
+
+def test_ctrl_c_interrupting_the_wait_still_shuts_down_cleanly(
+    tmp_path, logs, monkeypatch
+):
+    """
+    Windows 上主线程在 multiprocessing.connection.wait 里等的时候按 Ctrl+C：信号处理跑完之后它抛
+    InterruptedError（不像 POSIX 那样自动重试）。这里在 Linux 上照样模拟：管理进程要接住，照常关服，
+    不能让异常冒出 run()、把 worker 都强杀了
+    """
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    real_wait = multiprocessing.connection.wait
+    fired: list[int] = []
+    sup = _supervisor(tmp_path, "serve")
+
+    def interrupted_wait(objects, timeout=None):
+        # 只打断管理进程主循环的那次 wait（同时等好几个对象）；Connection.poll 内部也调 wait([self])
+        serving = len(sup.workers) == 2 and all(
+            w.ready is not None for w in sup.workers.values()
+        )
+        if not fired and len(objects) > 1 and serving:
+            fired.append(1)
+            signal.raise_signal(signal.SIGINT)
+            raise InterruptedError(4, "Interrupted system call")
+        return real_wait(objects, timeout)
+
+    monkeypatch.setattr(multiprocessing.connection, "wait", interrupted_wait)
+    try:
+        code = _run(sup)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    assert fired
+    assert code == 0
+    assert sorted(e[2] for e in _events(tmp_path, "exit-stop")) == [0, 1]
+
+
+def test_errors_after_ready_are_printed(tmp_path, logs):
+    """开好服之后 worker 出错退出（关服时 runtime.stop() 出错等）：说明由管理进程打出来，照常重启"""
+    sup = _supervisor(tmp_path, "error_after_ready", count=1, config={"CRASH_INDEX": 0})
+    code = _run(sup, until=lambda: len(_events(tmp_path, "ready")) == 2)
+    assert code == 0
+    messages = logs.messages()
+    assert any("出错退出" in m and "boom-after-ready" in m for m in messages), messages
+
+
+def test_errors_while_stopping_are_printed(tmp_path, logs):
+    sup = _supervisor(tmp_path, "error_on_stop", count=1)
+    code = _run(sup, until=lambda: len(_events(tmp_path, "ready")) == 1)
+    assert code == 0
+    messages = logs.messages()
+    assert any("出错退出" in m and "boom-on-stop" in m for m in messages), messages
+
+
+def test_restarted_worker_stuck_in_startup_is_killed_and_counted(tmp_path, logs):
+    """重启出来的 worker 没在 ack_timeout 内就绪：强制结束，算一次失败；一直卡住的话超过上限整体退出"""
+    policy = RestartPolicy(base_delay=0.05, max_delay=0.1, max_failures=2)
+    sup = _supervisor(
+        tmp_path,
+        "crash_then_hang",
+        ack_timeout=2.0,
+        policy=policy,
+        config={"CRASH_INDEX": 1},
+    )
+    code = _run(sup)
+    assert code == 1
+    messages = logs.messages()
+    stuck = [m for m in messages if "没在 2 秒内就绪" in m and "强制结束" in m]
+    assert len(stuck) == 2, messages
+    assert any("连续 3 次意外退出" in m for m in messages), messages
+    assert _events(tmp_path, "exit-stop")[0][2] == 0  # worker 0 照常关服
+
+
+def test_failure_count_resets_after_running_stably(tmp_path, logs):
+    """就绪之后稳定跑满 stable_after 秒才崩的，连续失败从头计数：不会因为偶尔崩一次累计到上限"""
+    policy = RestartPolicy(
+        base_delay=0.05, max_delay=0.1, max_failures=1, stable_after=0.3
+    )
+    sup = _supervisor(
+        tmp_path,
+        "crash_after_delay",
+        count=1,
+        policy=policy,
+        config={"CRASH_INDEX": 0, "CRASH_DELAY": 0.6},
+    )
+    code = _run(sup, until=lambda: len(_events(tmp_path, "start")) >= 4)
+    assert code == 0
+    assert not any("不再重启" in m for m in logs.messages())
 
 
 def test_worker_channel_stops_on_message_or_when_the_manager_is_gone():
@@ -311,6 +399,25 @@ def test_reload_restarts_workers_one_at_a_time(tmp_path, logs):
     assert any("文件有改动" in m for m in logs.messages())
 
 
+def test_stop_during_reload_does_not_start_new_workers(tmp_path, logs):
+    """重载途中（正在等旧 worker 停下）要求关服：停完旧的就收手，不再起新的"""
+    watched = tmp_path / "app.py"
+    watched.write_text("# app", encoding="utf-8")
+    touched = []
+
+    def until() -> bool:
+        if not touched and len(_events(tmp_path, "ready")) == 2:
+            _touch(watched)
+            touched.append(True)
+        return any("文件有改动" in m for m in logs.messages())
+
+    sup = _supervisor(
+        tmp_path, "slow_stop", reload=True, config={"MODULES": [str(watched)]}
+    )
+    assert _run(sup, until=until) == 0
+    assert sorted(e[2] for e in _events(tmp_path, "start")) == [0, 1]
+
+
 def test_reload_with_broken_code_keeps_the_other_workers(tmp_path, logs):
     """改坏了：新的 worker 0 没开起服来，停在这里，worker 1 照旧；改好之后的下一次改动再重启"""
     watched = tmp_path / "app.py"
@@ -325,6 +432,8 @@ def test_reload_with_broken_code_keeps_the_other_workers(tmp_path, logs):
             _touch(watched)
             stage.append("broken")
         elif stage == ["broken"] and any("没能开服" in m for m in logs.messages()):
+            # 过一会儿再改好：要是重载没停在 worker 0、接着去动 worker 1，这段时间里它会撞上改坏的代码
+            time.sleep(1)
             broken.unlink()
             _touch(watched)
             stage.append("fixed")
@@ -344,6 +453,7 @@ def test_reload_with_broken_code_keeps_the_other_workers(tmp_path, logs):
 # ---------------------------------------------------------------- 端到端：真起 hetu start
 
 SUP_APP = """
+import logging
 import os
 
 import numpy as np
@@ -377,9 +487,32 @@ async def login(ctx, user_id):
 
 @hetu.define_system(namespace="sup", components=(Seen,), permission=None)
 async def on_disconnect(ctx):
+    if os.environ.get("SUP_BIG_LOGS"):
+        logging.getLogger("HeTu.root").info("disconnect " + "x" * 4000)
     if ctx.caller:
         async with ctx.repo[Seen].upsert(owner=ctx.caller) as row:
             row.count += 1
+"""
+
+
+# 同配置模板：日志经进程安全队列交给管理进程输出
+QUEUE_LOGGING = """
+LOGGING:
+  version: 1
+  disable_existing_loggers: false
+  loggers:
+    root:
+      level: INFO
+      handlers: [log_queue]
+  handlers:
+    console:
+      class: logging.StreamHandler
+      stream: ext://sys.stdout
+    log_queue:
+      class: logging.handlers.QueueHandler
+      queue: hetu.safelogging.handlers.process_safe_queue
+      listener: hetu.safelogging.handlers.AutoListener
+      handlers: [console]
 """
 
 
@@ -387,6 +520,14 @@ def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _alive(pid: int) -> bool:
+    """进程还在跑：退出了但还没被收尸的（僵尸）算退出了"""
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
 
 
 class _Cluster:
@@ -397,6 +538,7 @@ class _Cluster:
         tmp_path: Path,
         workers: int = 2,
         backend: str | None = None,
+        extra: str = "",
         **env: str,
     ):
         self.tmp_path = tmp_path
@@ -420,6 +562,7 @@ PACKET_LAYERS:
 BACKENDS:
   main:
     {backend}
+{extra}
 """,
             encoding="utf-8",
         )
@@ -438,6 +581,14 @@ BACKENDS:
 
     def output(self) -> str:
         return self.log_path.read_text(encoding="utf-8", errors="replace")
+
+    def worker_pids(self) -> list[int]:
+        """管理进程的 worker 子进程（不算 multiprocessing 的 resource tracker）"""
+        return [
+            child.pid
+            for child in psutil.Process(self.proc.pid).children()
+            if "spawn_main" in " ".join(child.cmdline())
+        ]
 
     def wait_for(self, marker: str, timeout: float = 60) -> None:
         deadline = time.monotonic() + timeout
@@ -641,14 +792,45 @@ def test_workers_exit_by_themselves_when_the_manager_is_killed(tmp_path):
         deadline = time.monotonic() + 30
         alive = set(seen.values())
         while alive and time.monotonic() < deadline:
-            for pid in list(alive):
-                # 退出了但还没被收尸的（僵尸）也算退出了
-                try:
-                    if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
-                        alive.discard(pid)
-                except psutil.NoSuchProcess:
-                    alive.discard(pid)
+            alive = {pid for pid in alive if _alive(pid)}
             time.sleep(0.1)
+        assert not alive, cluster.output()
+    finally:
+        cluster.close()
+
+
+@POSIX_ONLY
+@pytest.mark.timeout(120)
+def test_workers_with_queue_logging_exit_when_the_manager_is_killed(tmp_path):
+    """
+    同上，配了进程安全队列的日志（配置模板就是这样）：管理进程没了以后队列没人读，worker 关服时打的日志
+    （每个连接的断线 System 打 4KB，共 160KB）写满管道，退出时不能卡在等队列的后台线程上
+    """
+    cluster = _Cluster(tmp_path, extra=QUEUE_LOGGING, SUP_BIG_LOGS="1")
+    try:
+        cluster.wait_for(READY)
+        pids = cluster.worker_pids()
+        assert len(pids) == 2
+
+        async def scenario() -> set[int]:
+            clients = []
+            for user_id in range(201, 241):
+                _who, ws = await _call(cluster.port, "login", user_id, keep=True)
+                clients.append(ws)
+            os.kill(cluster.proc.pid, signal.SIGKILL)
+            # 客户端照常读，收得到 close 帧，连接拆得快
+            closes = [asyncio.ensure_future(_close_code(ws, 40)) for ws in clients]
+            alive = set(pids)
+            deadline = time.monotonic() + 40
+            while alive and time.monotonic() < deadline:
+                alive = {pid for pid in alive if _alive(pid)}
+                await asyncio.sleep(0.2)
+            for close in closes:
+                close.cancel()
+            await asyncio.gather(*closes, return_exceptions=True)
+            return alive
+
+        alive = asyncio.run(scenario())
         assert not alive, cluster.output()
     finally:
         cluster.close()

@@ -132,6 +132,9 @@ class WorkerChannel:
         self._inbox = inbox
         self._outbox = outbox
         self._report_modules = report_modules
+        # 读到了 EOF：管理进程没了（之后发给它的、写进日志队列的都没人收了）
+        self.manager_gone = False
+        self.ready_sent = False
 
     def _send(self, *message: Any) -> None:
         try:
@@ -148,7 +151,7 @@ class WorkerChannel:
                     pass
             except EOFError, OSError:
                 # 管理进程没了（被 kill -9、OOM）：子进程不会跟着退出，不能变成孤儿接着监听
-                pass
+                self.manager_gone = True
             on_stop()
 
         threading.Thread(target=wait_stop, name="hetu-control", daemon=True).start()
@@ -156,6 +159,7 @@ class WorkerChannel:
     def send_ready(self) -> None:
         modules = loaded_module_files() if self._report_modules else None
         self._send(MSG_READY, modules)
+        self.ready_sent = True
 
     def send_failed(self, kind: str, detail: str) -> None:
         self._send(MSG_FAILED, kind, detail)
@@ -178,21 +182,34 @@ def worker_entry(
     Entry point of a worker process spawned by the supervisor.
     """
     if IS_WINDOWS:
-        # Ctrl+C 会发给控制台里的所有进程：worker 不理，由管理进程经控制管道通知停服
+        # Ctrl+C、Ctrl+Break 会发给控制台里的所有进程：worker 不理，由管理进程经控制管道通知停服
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
     channel = WorkerChannel(inbox, outbox, report_modules=report_modules)
-    sys.exit(_run_worker(config, sock, channel))
+    code = 1
+    try:
+        code = _run_worker(config, sock, channel)
+    finally:
+        if channel.manager_gone:
+            from ..safelogging.handlers import abandon_queues
+
+            abandon_queues()
+    sys.exit(code)
 
 
-def _report_startup_error(
+def _report_error(
     channel: WorkerChannel, error: BaseException, output: str = ""
 ) -> int:
+    """worker 出错退出：说明交给管理进程打（开服时多个 worker 一起失败只打一次）；管理进程没了就自己打"""
     from .runtime import StartupAborted
 
     if isinstance(error, StartupAborted):
         channel.send_failed(FAILED_ABORTED, str(error))
+        return 1
+    detail = output + "".join(traceback.format_exception(error))
+    if channel.manager_gone:
+        sys.stderr.write(detail)
     else:
-        detail = output + "".join(traceback.format_exception(error))
         channel.send_failed(FAILED_ERROR, detail)
     return 1
 
@@ -214,13 +231,13 @@ def _run_worker(
         with contextlib.redirect_stdout(output):
             prepare_worker(config)
     except BaseException as e:  # noqa: BLE001 什么错都要报给管理进程，包括 app 里的 sys.exit
-        return _report_startup_error(channel, e, output.getvalue())
+        return _report_error(channel, e, output.getvalue())
     sys.stdout.write(output.getvalue())
     try:
         aiohttp_app.finish_prepare(config)
         return aiohttp_app.run_worker(config, sock, channel)
-    except BaseException as e:  # noqa: BLE001 同上
-        return _report_startup_error(channel, e)
+    except BaseException as e:  # noqa: BLE001 同上，开好服之后（关服时）出的错也要报
+        return _report_error(channel, e)
 
 
 # ---------------------------------------------------------------- 管理进程这一端
@@ -314,7 +331,8 @@ class Supervisor:
         # 各序号连续失败的次数、等着重启的序号 → 什么时候重启
         self._failures: dict[int, int] = {}
         self._restart_at: dict[int, float] = {}
-        # 这一轮等就绪（_wait_ready）期间，在就绪之前就退出了的序号
+        # 这一轮在等哪些序号就绪（_wait_ready），其中在就绪之前就退出了的
+        self._waiting: set[int] = set()
         self._failed_before_ready: set[int] = set()
         self._startup_failure_reported = False
         self._gave_up = False
@@ -507,7 +525,13 @@ class Supervisor:
         if not waitables:
             time.sleep(timeout)
             return
-        for ready in multiprocessing.connection.wait(list(waitables), timeout):
+        try:
+            ready_list = multiprocessing.connection.wait(list(waitables), timeout)
+        except InterruptedError:
+            # Windows：主线程在等的时候按了 Ctrl+C，信号处理跑完之后 WaitForMultipleObjects 抛 EINTR，
+            # 不像 POSIX 那样自动重试。当作这一轮没有事件，主循环接着看要不要关服
+            ready_list = []
+        for ready in ready_list:
             w = waitables[ready]
             if ready is w.inbox:
                 self._receive(w)
@@ -528,6 +552,8 @@ class Supervisor:
                     w.failure = (message[1], message[2])
                 elif kind == MSG_LEASE_LOST:
                     w.lease_lost = True
+        except InterruptedError:
+            return  # 同 _poll（它是 OSError 的子类，不能当成 EOF），下一轮再收
         except EOFError, OSError:
             w.eof = True
 
@@ -537,10 +563,17 @@ class Supervisor:
             self._receive(w)
         w.process.join()
         self._forget(w)
+        if w.ready is not None and w.failure is not None:
+            # 开好服之后出的错（关服时 runtime.stop() 出错等）：worker 自己不打，这里打
+            logger.error(
+                _("❌ [🗂️Supervisor] worker {index} 出错退出：\n{detail}").format(
+                    index=w.index, detail=w.failure[1].rstrip()
+                )
+            )
         if self._stop_requested:
             # 要求关服了：关服信号也会发给 worker（终端里的 Ctrl+C 会发给整个前台进程组）
             return
-        if w.ready is None and self._phase != _RUNNING:
+        if w.ready is None and (self._phase == _STARTUP or w.index in self._waiting):
             if w.ack_timed_out:
                 self._failed_before_ready.add(w.index)  # 已经报过没在规定时间内就绪了
                 return
@@ -672,7 +705,14 @@ class Supervisor:
         要求关服了，返回 "stopped"
         """
         wanted = set(indexes)
+        self._waiting = wanted
         self._failed_before_ready.clear()
+        try:
+            return self._wait_ready_loop(wanted)
+        finally:
+            self._waiting = set()
+
+    def _wait_ready_loop(self, wanted: set[int]) -> str:
         deadline = (
             None if self.ack_timeout is None else time.monotonic() + self.ack_timeout
         )
@@ -724,6 +764,8 @@ class Supervisor:
                 self._failures.pop(index, None)
                 if (old := self.workers.get(index)) is not None:
                     self._stop_worker(old)
+                    if self._stop_requested:
+                        return
                 self._spawn(index)
                 status = self._wait_ready([index])
                 if status == "stopped":
