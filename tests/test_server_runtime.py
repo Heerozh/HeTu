@@ -152,6 +152,58 @@ async def test_renamed_task_releases_its_name():
     await reg.cancel(again)
 
 
+def test_logging_config_referencing_sanic_is_rejected(monkeypatch):
+    """
+    LOGGING 里还引用着 Sanic 的类：setup_logging 先报 LoggingConfigError，写明是哪几项、要改成什么，
+    不去 dictConfig（不然只报一句 "Unable to configure formatter"）。文件名、logger 名里出现 sanic
+    不算；配置模板、默认配置都能过
+    """
+    import logging.config
+    from pathlib import Path
+
+    import yaml
+
+    import hetu
+    from hetu.common import yamlloader
+    from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
+    from hetu.server.runtime import (
+        LoggingConfigError,
+        check_logging_config,
+        setup_logging,
+    )
+
+    configured = []
+    monkeypatch.setattr(logging.config, "dictConfig", configured.append)
+    old_config = {
+        "version": 1,
+        "formatters": {"colour": {"class": "sanic.logging.formatter.AutoFormatter"}},
+        "filters": {"verbosity": {"()": "sanic.logging.filter.VerbosityFilter"}},
+        "handlers": {"console": {"class": "logging.StreamHandler"}},
+    }
+    with pytest.raises(LoggingConfigError) as exc_info:
+        setup_logging({"LOGGING": old_config})
+    message = str(exc_info.value)
+    assert "formatters.colour.class: sanic.logging.formatter.AutoFormatter" in message
+    assert "filters.verbosity.(): sanic.logging.filter.VerbosityFilter" in message
+    assert "hetu.safelogging.formatter.ContextAutoFormatter" in message
+    assert "logging.StreamHandler" not in message
+    assert configured == []
+
+    check_logging_config(
+        {
+            "version": 1,
+            "handlers": {
+                "file": {"class": "logging.FileHandler", "filename": "sanic.log"}
+            },
+            "loggers": {"sanic.root": {"level": "INFO"}},
+        }
+    )
+    check_logging_config(DEFAULT_LOGGING_CONFIG)
+    template = Path(hetu.__file__).parent / "CONFIG_TEMPLATE.yml"
+    config = yaml.load(template.read_text(encoding="utf-8"), yamlloader.Loader)
+    check_logging_config(config["LOGGING"])
+
+
 def test_hetu_config_defaults_and_attribute_access():
     """HeTuConfig：只收大写键，可以按属性读，没给的键用默认值（和原来 Sanic 的默认值相同）"""
     import pickle

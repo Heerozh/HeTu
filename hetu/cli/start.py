@@ -191,6 +191,7 @@ class StartCommand(CommandInterface):
     def execute(cls, args):
         from ..common.helper import WORKER_INDEX_ENV
         from ..server.config import HeTuConfig
+        from ..server.runtime import LoggingConfigError, check_logging_config
         from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 
         # worker 序号由多进程管理进程按 worker 设置。外面环境里残留的不能留着：单进程时会被当成本进程
@@ -210,6 +211,12 @@ class StartCommand(CommandInterface):
             # 已按配置文件所在目录解析，而非进程 CWD
             config.update_config(config_dict)
             config_for_factory = config
+            # LOGGING 里还引用着 Sanic 的类：开服之前就报，说明怎么改
+            try:
+                check_logging_config(config.get("LOGGING") or {})
+            except LoggingConfigError as e:
+                print(e)
+                sys.exit(2)
         else:
             args.app_file = args.app_file or DEFAULT_APP_FILE
             args.db = args.db or DEFAULT_DB

@@ -83,6 +83,34 @@ BACKENDS:
     return str(config)
 
 
+def test_logging_config_referencing_sanic_exits_before_startup(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    配置文件的 LOGGING 还引用着 Sanic 的类：hetu start 读完配置就打出说明、以 2 退出，不开服（这里的
+    app.py 根本不存在，开服的话会抛 FileNotFoundError）
+    """
+    config = _write_config(tmp_path, workers=1)
+    with open(config, "a", encoding="utf-8") as f:
+        f.write(
+            """
+LOGGING:
+  version: 1
+  formatters:
+    colour:
+      class: sanic.logging.formatter.AutoFormatter
+"""
+        )
+    monkeypatch.chdir(tmp_path)
+    sys.argv[1:] = ["start", "--config", config]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+    out = capsys.readouterr().out
+    assert "formatters.colour.class: sanic.logging.formatter.AutoFormatter" in out
+    assert "ContextAutoFormatter" in out
+
+
 def test_multiple_workers_go_through_the_supervisor(tmp_path, monkeypatch):
     """
     WORKER_NUM > 1：本进程是管理进程，只配日志、不加载 app 文件（这里的 app.py 根本不存在），bind 好

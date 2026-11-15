@@ -132,17 +132,61 @@ def prepare_worker(config: Mapping[str, Any]) -> None:
     )
 
 
+class LoggingConfigError(ValueError):
+    """LOGGING 配置引用了 HeTu 已经不再提供的东西（Sanic 的类）。"""
+
+
+# dictConfig 里按名字 import 对象的键：formatter / handler 的 class、工厂 "()"，QueueHandler 的
+# queue、listener。别的键（filename 等）里出现 "sanic" 不算
+_LOGGING_IMPORT_KEYS = ("class", "()", "queue", "listener")
+
+
+def check_logging_config(logging_config: Mapping[str, Any]) -> None:
+    """
+    LOGGING 里引用了 Sanic 的类（比如原来 Sanic 的 AutoFormatter）时抛 `LoggingConfigError`，说明要
+    改成什么。HeTu 已经不用 Sanic 了，不先查的话 dictConfig 只报一句 "Unable to configure
+    formatter"，看不出是怎么回事（设计稿 §5.2、§5.8）。
+
+    Raise LoggingConfigError if the LOGGING config still references Sanic classes.
+    """
+    if not isinstance(logging_config, Mapping):
+        return  # 格式不对的交给 dictConfig 报
+    found = []
+    for section in ("formatters", "filters", "handlers"):
+        entries = logging_config.get(section) or {}
+        if not isinstance(entries, Mapping):
+            continue
+        for name, entry in entries.items():
+            if not isinstance(entry, Mapping):
+                continue
+            for key in _LOGGING_IMPORT_KEYS:
+                value = entry.get(key)
+                if isinstance(value, str) and (
+                    value == "sanic" or value.startswith("sanic.")
+                ):
+                    found.append(f"{section}.{name}.{key}: {value}")
+    if found:
+        raise LoggingConfigError(
+            _(
+                "LOGGING 配置引用了 Sanic 的类，HeTu 已经不用 Sanic 了：{items}。控制台的彩色格式"
+                "请改用 hetu.safelogging.formatter.ContextAutoFormatter，写法见 CONFIG_TEMPLATE.yml"
+            ).format(items="; ".join(found))
+        )
+
+
 def setup_logging(config: Mapping[str, Any]) -> None:
     """
     按配置的 LOGGING 配好日志（dictConfig），并按 DEBUG 调 HeTu 的日志级别。与 Web 框架无关，在建
-    框架的 app 之前调用；Sanic 多进程时管理进程也会跑一遍。深度 Debug（DEBUG > 1）时控制台日志附带
-    ctx 等 extra 字段。
+    框架的 app 之前调用；多进程时管理进程、各 worker 都要调。深度 Debug（DEBUG > 1）时控制台日志附带
+    ctx 等 extra 字段。LOGGING 里还引用着 Sanic 的类时抛 `LoggingConfigError`。
 
     Configure logging from the LOGGING config, independent of the web framework.
     """
+    logging_config = config.get("LOGGING", DEFAULT_LOGGING_CONFIG)
+    check_logging_config(logging_config)
     debug = int(config.get("DEBUG", 0))
     ContextAutoFormatter.LOG_EXTRA = debug > 1
-    logging.config.dictConfig(config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
+    logging.config.dictConfig(logging_config)
     if debug:
         logger.setLevel(logging.DEBUG)
     if debug > 1:
