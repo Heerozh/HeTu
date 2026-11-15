@@ -675,9 +675,13 @@ def probe_proc(args, url: str, ctrl):
 
 async def _probe_main(args, url, ctrl):
     """
-    RPC 往返探针：一个不订阅的连接，每 PROBE_MS 发一次 ping 测往返。主进程也经它调诊断 endpoint
-    （("rpc", [endpoint, *args])，结果原样回传），和 ping 串行，不打乱往返计时
+    RPC 往返探针：一个不订阅的连接，收到回复后隔 PROBE_MS 再发下一个 ping 测往返。主进程也经它调诊断
+    endpoint（("rpc", [endpoint, *args])，结果原样回传），和 ping 串行，不打乱往返计时。
+
+    固定间隔时，探针的节拍会和推送的 100ms 节拍锁相，p99 主要由两者的相位决定；--probe-random 把间隔
+    改成均值 PROBE_MS 的指数分布，采样时刻在推送周期里均匀分布
     """
+    rng = random.Random(20261115)
     setup_registry()
     ws, pipe, ctx = await ws_connect(url)
     rtts: list[tuple[float, float]] = []
@@ -704,7 +708,10 @@ async def _probe_main(args, url, ctrl):
             ts = time.time()
             await rpc(["ping"])
             rtts.append((ts, time.perf_counter() - t0))
-            await asyncio.sleep(args.probe_ms / 1000)
+            if args.probe_random:
+                await asyncio.sleep(rng.expovariate(1000 / args.probe_ms))
+            else:
+                await asyncio.sleep(args.probe_ms / 1000)
 
     task = asyncio.create_task(loop_ping())
     loop = asyncio.get_running_loop()
@@ -1108,7 +1115,8 @@ class Harness:
             if prof_until is not None and time.time() >= prof_until:
                 prof_until = None
                 call(self.probe_conn, "rpc", ["prof", "stop", prof_out])
-            if time.time() >= next_sample:  # 笔记本 P 核频率：看有没有降频
+            # 笔记本 P 核频率：看有没有降频。核空闲时读到的是低频，平均值不是运行频率
+            if time.time() >= next_sample:
                 next_sample = time.time() + 0.5
                 for c in args.server_cpus:
                     path = f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq"
@@ -1190,7 +1198,10 @@ class Harness:
             **{f"cons_{k}": v for k, v in cons.items()},
             "rpc_rtt_p50_ms": round(pct(rtts, 0.5) * 1000, 2),
             "rpc_rtt_p99_ms": round(pct(rtts, 0.99) * 1000, 2),
+            "rpc_rtt_p999_ms": round(pct(rtts, 0.999) * 1000, 2),
             "rpc_rtt_max_ms": round(max(rtts, default=float("nan")) * 1000, 2),
+            "rpc_probes": len(rtts),
+            "probe_random": args.probe_random,
         }
         for name in REDIS_CMDS:
             for label, a, b in (("rep", rep_a, rep_b), ("mas", mas_a, mas_b)):
@@ -1447,6 +1458,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--client-procs", type=int, default=8)
     ap.add_argument("--connect-concurrency", type=int, default=8, help="每个客户端进程")
     ap.add_argument("--probe-ms", type=float, default=20)
+    ap.add_argument(
+        "--probe-random",
+        action="store_true",
+        help="探针的间隔改成均值 --probe-ms 的指数分布，避免和推送节拍锁相",
+    )
     ap.add_argument(
         "--rpcs-rate",
         type=float,

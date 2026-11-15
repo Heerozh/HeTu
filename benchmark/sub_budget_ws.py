@@ -16,8 +16,8 @@ sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 wor
         --client-cpus 4,5,6,7,8,9,10,11 --writer-cpus 12,13,14,15
 
 Redis 连接数：每个 worker 每个副本 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数
-无关。服务器的 CPU 是 CPU 时间；笔记本 P 核频率随负载变，CPU 时间跨负载、跨代码比较会失真，所以计时窗口里
-另用 `perf stat` 数服务器的 user 态周期（没装 perf 时这几列为空），并记下服务器所在核的平均频率。
+无关。服务器的 CPU 是 CPU 时间；计时窗口里另用 `perf stat` 数服务器的 user 态周期（没装 perf 时这几列为空），
+并给出运行频率相对 TSC 的倍数（cycles / ref-cycles）。注意 loopback 收包的软中断不算进进程的 CPU 时间。
 """
 
 import argparse
@@ -192,7 +192,7 @@ def perf_stat(procs: list[psutil.Process], seconds: float) -> subprocess.Popen |
                 "-x",
                 ",",
                 "-e",
-                "cycles:u,instructions:u",
+                "cycles:u,instructions:u,ref-cycles:u",
                 "-p",
                 ",".join(str(p.pid) for p in procs),
                 "--",
@@ -209,45 +209,18 @@ def perf_stat(procs: list[psutil.Process], seconds: float) -> subprocess.Popen |
 
 
 def perf_counts(proc: subprocess.Popen | None) -> dict[str, float]:
-    """读 perf_stat 的结果；混合架构只取 P 核的计数，没数到的事件不出现"""
+    """读 perf_stat 的结果；混合架构的 P 核、E 核计数相加，没数到的事件不出现"""
     counts: dict[str, float] = {}
     if proc is None:
         return counts
     _out, err = proc.communicate(timeout=60)
     for line in err.splitlines():
         parts = line.split(",")
-        if len(parts) > 2 and parts[0][:1].isdigit() and "cpu_atom" not in parts[2]:
-            ev = parts[2].replace("cpu_core/", "").replace("/u", "").replace(":u", "")
+        if len(parts) > 2 and parts[0][:1].isdigit():
+            ev = parts[2].replace("cpu_core/", "").replace("cpu_atom/", "")
+            ev = ev.replace("/u", "").replace(":u", "")
             counts[ev] = counts.get(ev, 0.0) + float(parts[0])
     return counts
-
-
-def taskset_cpus(spec: str) -> list[int]:
-    """taskset -c 的写法（如 0,2-3）展开成核号"""
-    cpus: list[int] = []
-    for part in spec.split(","):
-        if "-" in part:
-            lo, hi = part.split("-")
-            cpus.extend(range(int(lo), int(hi) + 1))
-        elif part:
-            cpus.append(int(part))
-    return cpus
-
-
-def sleep_sampling_freq(cpus: list[int], seconds: float) -> list[float]:
-    """睡 seconds 秒，其间每 0.5 秒读一次这些核的当前频率（GHz）"""
-    freqs: list[float] = []
-    end = time.perf_counter() + seconds
-    while (left := end - time.perf_counter()) > 0:
-        for c in cpus:
-            path = f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq"
-            try:
-                with open(path, encoding="ascii") as fh:
-                    freqs.append(int(fh.read()) / 1e6)
-            except OSError:
-                pass
-        time.sleep(min(0.5, left))
-    return freqs
 
 
 def tree_cpu(proc: psutil.Process) -> float:
@@ -309,6 +282,7 @@ def main() -> None:
         stderr=subprocess.STDOUT,
     )
     sproc = psutil.Process(server.pid)
+    perf = None
     try:
         wait_port(args.port)
         time.sleep(3)  # 等 worker 建表、加载完
@@ -387,7 +361,7 @@ def main() -> None:
         wall_a = time.perf_counter()
         window[0] = time.time()
         window[1] = window[0] + args.duration
-        freqs = sleep_sampling_freq(taskset_cpus(args.server_cpus), args.duration)
+        time.sleep(args.duration)
         wall = time.perf_counter() - wall_a
         cpu = tree_cpu(sproc) - cpu_a
         counts = perf_counts(perf)
@@ -412,6 +386,8 @@ def main() -> None:
         for p in cprocs:
             p.join(timeout=10)
     finally:
+        if perf is not None and perf.poll() is None:
+            perf.terminate()
         try:
             children = sproc.children(recursive=True)
         except psutil.Error:
@@ -457,7 +433,9 @@ def main() -> None:
         "server_kcycles_u_per_frame": round(counts["cycles"] / frames / 1e3, 1)
         if frames and "cycles" in counts
         else None,
-        "server_cpu_ghz_avg": round(sum(freqs) / len(freqs), 2) if freqs else None,
+        "server_freq_vs_tsc": round(counts["cycles"] / counts["ref-cycles"], 3)
+        if counts.get("ref-cycles")
+        else None,
         "replica_cores": round(rep_cpu / wall, 3),
         "replica_cmds_ps": round((rep_b["cmds"] - rep_a["cmds"]) / wall),
         "lat_p50_ms": round(base.pct(lat, 0.5) * 1000, 1),

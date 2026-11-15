@@ -4,8 +4,13 @@
 Run with --help. Requires an isolated Redis database. Logs/results go to --output.
 
 --http-server 选服务器的 Web 框架（设 HETU_HTTP_SERVER，换 aiohttp 的过渡期用）。--perf 让每个窗口
-另用 perf stat 数服务器的 user 态周期和指令：笔记本 P 核的频率随负载变，CPU 时间跨代码比较会失真，
-周期数不受频率影响。每个窗口还记下服务器那个核的平均频率。
+另用 perf stat 数服务器的 user 态周期和指令，并给出运行频率相对 TSC 的倍数（cycles / ref-cycles，
+用来确认两次运行的频率一样；scaling_cur_freq 掺了空闲时的读数，不是运行频率）。
+每个窗口还记下服务器那个核在 /proc/stat 里的空闲、软中断占比（loopback 收包的软中断不算进进程的
+CPU 时间），以及每次 RPC 的读写类系统调用数。
+
+--rate 改成定速（开环）：每个连接按泊松过程排发送时刻，延迟从排定的时刻算起（含排队），每次调用都
+记延迟。默认是闭环满载，延迟每连接每 64 次抽一次，那时的延迟主要由吞吐决定。
 """
 
 import argparse
@@ -52,6 +57,12 @@ def parse_args():
         default=os.environ.get("HETU_HTTP_SERVER") or "sanic",
     )
     parser.add_argument("--perf", action="store_true")
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=0,
+        help="定速，所有连接合计每秒调用数；0 为闭环满载",
+    )
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-cpu", type=int, default=1)
     parser.add_argument("--client", type=int, default=-1, help=argparse.SUPPRESS)
@@ -91,7 +102,7 @@ def perf_stat(pid, seconds):
             "-x",
             ",",
             "-e",
-            "cycles:u,instructions:u",
+            "cycles:u,instructions:u,ref-cycles:u",
             "-p",
             str(pid),
             "--",
@@ -105,19 +116,47 @@ def perf_stat(pid, seconds):
 
 
 def perf_counts(proc):
-    """读 perf_stat 的结果；混合架构只取 P 核的计数，没数到的事件不出现。
+    """读 perf_stat 的结果；混合架构的 P 核、E 核计数相加，没数到的事件不出现。
 
-    Parse perf_stat output, keeping only P-core counts on hybrid CPUs.
+    Parse perf_stat output, summing P-core and E-core counts on hybrid CPUs.
     """
     _out, err = proc.communicate(timeout=60)
     counts = {}
     for line in err.splitlines():
         parts = line.split(",")
-        if len(parts) > 2 and parts[0][:1].isdigit() and "cpu_atom" not in parts[2]:
-            event = parts[2].replace("cpu_core/", "").replace("/u", "")
-            event = event.replace(":u", "")
+        if len(parts) > 2 and parts[0][:1].isdigit():
+            event = parts[2].replace("cpu_core/", "").replace("cpu_atom/", "")
+            event = event.replace("/u", "").replace(":u", "")
             counts[event] = counts.get(event, 0.0) + float(parts[0])
     return counts
+
+
+def core_times(cpu):
+    """/proc/stat 里这个核的累计时间：user nice system idle iowait irq softirq steal ...
+
+    Cumulative /proc/stat times of one CPU.
+    """
+    with open("/proc/stat") as f:
+        for line in f:
+            if line.startswith(f"cpu{cpu} "):
+                return [int(x) for x in line.split()[1:]]
+    raise LookupError(cpu)
+
+
+def snapshot(proc, cpu):
+    """窗口起止时记下进程的 CPU 时间、服务器核的 /proc/stat、进程的读写类系统调用数。
+
+    Snapshot process CPU time, the server core's /proc/stat and syscall counts.
+    """
+    times = proc.cpu_times()
+    with open(f"/proc/{proc.pid}/io") as f:
+        io = dict(line.split(": ") for line in f.read().splitlines())
+    return {
+        "wall": time.monotonic(),
+        "cpu": times.user + times.system,
+        "core": core_times(cpu),
+        "syscalls": int(io["syscr"]) + int(io["syscw"]),
+    }
 
 
 async def client(args):
@@ -150,7 +189,7 @@ async def client(args):
     cpu_start = None
     completed = 0
 
-    async def one():
+    async def one(k):
         nonlocal ready, cpu_start, completed
         fixture = connection()
         conn = await anext(fixture)
@@ -162,8 +201,19 @@ async def client(args):
             last_end = windows[-1][1]
             i = 0
             seen = 0
+            # 定速：泊松过程排发送时刻；上一次调用拖过了下一个时刻就马上发，延迟照样从排定的时刻算
+            per_conn = args.rate / (args.processes * args.connections)
+            rng = random.Random(20260925_000 + args.client * 1000 + k)
+            due = time.monotonic()
             while True:
-                before = time.monotonic()
+                if per_conn > 0:
+                    due += rng.expovariate(per_conn)
+                    delay = due - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    before = due
+                else:
+                    before = time.monotonic()
                 if before >= last_end:
                     break
                 result = await benchmark(conn)
@@ -179,13 +229,13 @@ async def client(args):
                     if args.workload in ("get2_update2", "range50_update2"):
                         retries[i] += result
                     seen += 1
-                    if seen % 64 == 0:
+                    if per_conn > 0 or seen % 64 == 0:
                         latencies[i].append((after - before) * 1000)
         finally:
             await fixture.aclose()
             await conn[0].close()
 
-    tasks = [asyncio.create_task(one()) for _ in range(args.connections)]
+    tasks = [asyncio.create_task(one(k)) for k in range(args.connections)]
     while ready < args.connections:
         for task in tasks:
             if task.done():
@@ -313,6 +363,10 @@ BACKENDS:
                 str(args.rounds),
                 "--workload",
                 args.workload,
+                "--rate",
+                str(args.rate),
+                "--processes",
+                str(args.processes),
             ]
             children.append(
                 subprocess.Popen(cmd, cwd=args.output, env=env, stdout=log, stderr=log)
@@ -350,22 +404,16 @@ BACKENDS:
         round_cpu_start = [None] * args.rounds
         round_cpu_end = [None] * args.rounds
         round_perf = [None] * args.rounds
-        round_freqs = [[] for _ in range(args.rounds)]
-        freq_path = Path(
-            f"/sys/devices/system/cpu/cpu{args.server_cpu}/cpufreq/scaling_cur_freq"
-        )
         while any(p.poll() is None for p in children):
             now = time.monotonic()
             for i, (begin, end) in enumerate(windows):
                 if round_cpu_start[i] is None and now >= begin:
-                    round_cpu_start[i] = (now, sum(proc.cpu_times()[:2]))
+                    round_cpu_start[i] = snapshot(proc, args.server_cpu)
                     if args.perf:
                         round_perf[i] = perf_stat(proc.pid, args.seconds)
                         perfs.append(round_perf[i])
                 if round_cpu_end[i] is None and now >= end:
-                    round_cpu_end[i] = (now, sum(proc.cpu_times()[:2]))
-                if begin <= now < end and freq_path.exists():
-                    round_freqs[i].append(int(freq_path.read_text()) / 1e6)
+                    round_cpu_end[i] = snapshot(proc, args.server_cpu)
             if cpu_before is None and now >= first:
                 cpu_before = sum(proc.cpu_times()[:2])
             if cpu_after is None and now >= windows[-1][1]:
@@ -379,7 +427,7 @@ BACKENDS:
             cpu_after = sum(proc.cpu_times()[:2])
         assert cpu_before is not None
         if round_cpu_end[-1] is None:
-            round_cpu_end[-1] = (time.monotonic(), cpu_after)
+            round_cpu_end[-1] = snapshot(proc, args.server_cpu)
         results = [
             json.loads((args.output / f"client-{i}.json").read_text())
             for i in range(args.processes)
@@ -389,11 +437,13 @@ BACKENDS:
             samples = sorted(x for r in results for x in r["latencies_ms"][i])
             qps = sum(r["counts"][i] for r in results) / args.seconds
             begin, end = round_cpu_start[i], round_cpu_end[i]
-            cpu_fraction = (end[1] - begin[1]) / (end[0] - begin[0])
+            wall = end["wall"] - begin["wall"]
+            cpu_fraction = (end["cpu"] - begin["cpu"]) / wall
+            core = [b - a for a, b in zip(begin["core"], end["core"], strict=True)]
+            core_total = sum(core[:8])  # user..steal；guest 已经算在 user 里
             counts = perf_counts(round_perf[i]) if round_perf[i] else {}
             # perf 数的时长与窗口相同（起点晚不到一个轮询间隔），按窗口的调用数折算
             rpcs = qps * args.seconds
-            freqs = round_freqs[i]
             rounds.append(
                 {
                     "qps": qps,
@@ -405,6 +455,9 @@ BACKENDS:
                     "server_cpu_us_per_rpc": cpu_fraction * 1e6 / qps,
                     "p50_ms": samples[len(samples) // 2],
                     "p99_ms": samples[int(len(samples) * 0.99)],
+                    "p999_ms": samples[int(len(samples) * 0.999)],
+                    "max_ms": samples[-1],
+                    "latency_samples": len(samples),
                     "server_kcycles_u_per_rpc": counts["cycles"] / rpcs / 1e3
                     if "cycles" in counts
                     else None,
@@ -413,7 +466,14 @@ BACKENDS:
                     / 1e3
                     if "instructions" in counts
                     else None,
-                    "server_cpu_ghz_avg": statistics.fmean(freqs) if freqs else None,
+                    "server_freq_vs_tsc": counts["cycles"] / counts["ref-cycles"]
+                    if counts.get("ref-cycles")
+                    else None,
+                    "server_core_idle_percent": 100 * (core[3] + core[4]) / core_total,
+                    "server_core_softirq_percent": 100 * core[6] / core_total,
+                    "server_syscalls_per_rpc": (end["syscalls"] - begin["syscalls"])
+                    / wall
+                    / qps,
                 }
             )
         data_check = {}
