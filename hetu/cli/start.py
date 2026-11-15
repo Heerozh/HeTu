@@ -281,25 +281,28 @@ class StartCommand(CommandInterface):
     @classmethod
     def serve_aiohttp(cls, config_for_factory, workers: int) -> None:
         """
-        aiohttp 栈：单进程，在本进程里开服（设计稿 §5.4.3）。依次：配日志、启动日志 Listener；bind
-        监听 socket（端口冲突在这里就失败，不会先跑一遍开服）；开服、等关服信号、关服
+        aiohttp 栈（设计稿 §5.4.3、§5.7）。单进程时在本进程里开服；多进程时本进程是管理进程，不加载
+        app 文件，交给 supervisor 起 worker。两种都先配日志、启动日志 Listener，再 bind 监听 socket
+        （端口冲突在这里就失败，不会先跑一遍开服）
         """
         from ..common.helper import enable_windows_console_ansi
         from ..safelogging import handlers as log_handlers
         from ..server import StartupAborted
         from ..server.adapters import aiohttp_app
 
-        if workers != 1:
-            print(
-                _(
-                    "{name}=aiohttp 目前只支持单进程，请把 WORKER_NUM（命令行参数是 --workers）"
-                    "设为 1，现在是 {workers}"
-                ).format(name=HTTP_SERVER_ENV, workers=workers)
-            )
-            sys.exit(2)
         # 原来 import sanic 时会顺带打开；这条路径不加载 sanic
         enable_windows_console_ansi()
-        config = aiohttp_app.prepare(config_for_factory)
+        if workers == 1:
+            config = aiohttp_app.prepare(config_for_factory)
+        else:
+            from ..server.config import HeTuConfig
+            from ..server.runtime import setup_logging
+
+            config = HeTuConfig(config_for_factory)
+            # 管理进程只配日志（设计稿 §14 第 3 条）；建好的进程安全队列放回配置，传给 worker
+            setup_logging(config)
+            if "LOGGING" in config:
+                log_handlers.share_queues(config.LOGGING)
         log_handlers.AutoListener.start_all()
         log_server_info(config, f"Hetu-{config.NAMESPACE}", workers, "aiohttp")
         try:
@@ -312,7 +315,12 @@ class StartCommand(CommandInterface):
             log_handlers.stop_all_logging_handlers()
             sys.exit(1)
         try:
-            exit_code = aiohttp_app.run(config, sock)
+            if workers == 1:
+                exit_code = aiohttp_app.run(config, sock)
+            else:
+                from ..server import supervisor
+
+                exit_code = supervisor.run(config, sock, workers)
         except StartupAborted as e:
             logger.error(
                 _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
