@@ -37,8 +37,8 @@ def ws_redis_url(ses_redis_service) -> str:
 def test_server(request, ws_redis_url):
     SystemClusters()._clear()
     EndpointDefines()._clear()
-    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
-    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再以 HeTuApp 之名 exec
+    # 同一个文件，同一 uri 就会登记两条（aiohttp 不报错，只是后一条永远轮不到），先清掉
     webext.clear()
 
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
@@ -87,7 +87,6 @@ def test_websocket_started(test_server):
 
 def test_custom_http_route(test_server):
     # app.py里用@hetu.define_route注册的普通HTTP端点应该能正常提供服务
-    pytest.skip("webext 的声明还是 Sanic 形状的，改成 aiohttp 的接口之后再测")
     response = test_server.get("/webext-test/abc.zip")
     assert response.status == 200
     assert response.text == "downloaded abc.zip"

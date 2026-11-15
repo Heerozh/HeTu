@@ -234,14 +234,18 @@ class ServerHarness:
             raise errors[0]
         return result
 
-    def get(self, path: str) -> HttpResult:
-        """起服，发一个 GET 请求，再停服"""
+    def request(self, method: str, path: str, **kwargs: Any) -> HttpResult:
+        """起服，发一个 HTTP 请求，再停服。kwargs 原样传给 aiohttp 客户端的 request（比如 data）"""
 
         async def body(host: str) -> HttpResult:
             async with (
                 aiohttp.ClientSession() as http,
-                http.get(f"http://{host}{path}") as response,
+                http.request(method, f"http://{host}{path}", **kwargs) as response,
             ):
                 return HttpResult(status=response.status, text=await response.text())
 
         return self._run(body)
+
+    def get(self, path: str) -> HttpResult:
+        """起服，发一个 GET 请求，再停服"""
+        return self.request("GET", path)

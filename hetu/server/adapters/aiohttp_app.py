@@ -502,14 +502,21 @@ async def _web_root(request: web.Request) -> web.Response:
 
 def build_app(server: AiohttpServer) -> web.Application:
     """
-    建 aiohttp 的 app：ws 入口 /hetu/{db_name}（带尾斜杠的也注册，和 Sanic 一样能连上）、默认欢迎页 "/"。
-    用户的 webext 路由这一步不支持（声明是 Sanic 形状的），见 `prepare`
+    建 aiohttp 的 app，路由按这个顺序注册（aiohttp 按注册顺序匹配）：
+
+    1. ws 入口 /hetu/{db_name}，带尾斜杠的也注册（和原来 Sanic 一样能连上）。排在最前，用户在
+       on_server_setup 里注册的通配路由抢不走它；
+    2. 用户的 `@hetu.define_route` 路由、`@hetu.on_server_setup` 回调（hetu/webext.py）；
+    3. 默认欢迎页 "/"：用户自己注册了 "/"（或挂在 "/" 上的静态目录）就让给用户。
     """
     app = web.Application(client_max_size=int(server.config["REQUEST_MAX_SIZE"]))
     app[SERVER_KEY] = server
     app.router.add_get("/hetu/{db_name}", _websocket_handler)
     app.router.add_get("/hetu/{db_name}/", _websocket_handler)
-    app.router.add_get("/", _web_root)
+    webext.apply_to(app)
+    # 挂在 "/" 上的静态目录，canonical 是空串
+    if not any(resource.canonical in ("", "/") for resource in app.router.resources()):
+        app.router.add_get("/", _web_root)
     return app
 
 
@@ -531,8 +538,8 @@ def prepare(config: Mapping[str, Any]) -> HeTuConfig:
 
 def finish_prepare(config: HeTuConfig) -> None:
     """
-    `prepare` 的后半段（加载完 app、配好日志之后）：aiohttp 的日志并到 HeTu.root 下面，建消息流水线，
-    提示 aiohttp 栈还不支持的 webext 声明。多进程的 worker 先配日志再加载 app，分开调用
+    `prepare` 的后半段（加载完 app、配好日志之后）：aiohttp 的日志并到 HeTu.root 下面，建消息流水线。
+    多进程的 worker 先配日志再加载 app，分开调用
 
     The second half of `prepare`, after the app is loaded and logging is configured.
     """
@@ -541,13 +548,6 @@ def finish_prepare(config: HeTuConfig) -> None:
     if int(config["DEBUG"]) > 1:
         aiohttp_logger.setLevel(logging.DEBUG)
     setup_message_pipeline(config)
-    if skipped := webext.registered():
-        logger.warning(
-            _(
-                "⚠️ [📡Server] aiohttp 栈还不支持 @hetu.define_route / @hetu.on_server_setup，"
-                "已跳过：{items}"
-            ).format(items=", ".join(skipped))
-        )
 
 
 def bind_socket(listen: str, backlog: int = 100) -> socket.socket:
