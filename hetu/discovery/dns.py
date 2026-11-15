@@ -84,6 +84,8 @@ NOERROR = 0
 FORMERR = 1
 NXDOMAIN = 3
 NOTIMP = 4
+# EDNS 版本不认识（扩展 RCODE，高 8 位放在 OPT 的 TTL 里）
+BADVERS = 16
 
 _HEADER = struct.Struct("!6H")
 _FLAG_QR = 0x8000
@@ -95,6 +97,13 @@ _A_RECORD_SIZE = _A_RECORD.size + 4
 _NAME_POINTER = 0xC000 | _HEADER.size
 # 回答里的 EDNS OPT：根名字、类型、我们的 UDP 大小、扩展 RCODE / 版本 / 标志都是 0、没有选项
 _OPT_RECORD = b"\x00" + struct.pack("!HHIH", TYPE_OPT, MAX_UDP_PAYLOAD, 0, 0)
+
+
+def _opt_record(rcode: int) -> bytes:
+    """回答里的 OPT：TTL 的最高 8 位是扩展 RCODE（RCODE 的高位），版本、标志都是 0"""
+    return b"\x00" + struct.pack(
+        "!HHIH", TYPE_OPT, MAX_UDP_PAYLOAD, (rcode >> 4) << 24, 0
+    )
 
 
 @dataclass
@@ -112,6 +121,8 @@ class Query:
     qclass: int = 0
     # 查询带了 EDNS OPT：它声明的 UDP 大小
     edns: int | None = None
+    # 查询的 EDNS 版本
+    edns_version: int = 0
     # 解析出错时要回的 RCODE（FORMERR、NOTIMP），NOERROR 为没出错
     error: int = NOERROR
 
@@ -132,7 +143,8 @@ def _read_name(
             return offset + 2, labels
         label = data[offset + 1 : offset + 1 + length]
         total += length + 1
-        if len(label) != length or total > 255:
+        # 名字连长度字节和结尾的 0 最多 255 字节
+        if len(label) != length or total + 1 > 255:
             raise ValueError("bad label")
         labels.append(label)
         offset += 1 + length
@@ -165,12 +177,15 @@ def parse_query(data: bytes) -> Query | None:
         query.name = b".".join(labels).lower()
         for _i in range(arcount):
             offset, _labels = _read_name(data, offset, allow_pointer=True)
-            rtype, rclass, _ttl, rdlength = struct.unpack_from("!HHIH", data, offset)
+            rtype, rclass, ttl, rdlength = struct.unpack_from("!HHIH", data, offset)
             offset += 10 + rdlength
             if offset > len(data):
                 raise ValueError("truncated rdata")
             if rtype == TYPE_OPT:
+                if query.edns is not None:
+                    raise ValueError("more than one OPT")  # RFC 6891 §6.1.1
                 query.edns = rclass
+                query.edns_version = (ttl >> 16) & 0xFF
     except IndexError, ValueError, struct.error:
         query.error = FORMERR
         query.question = b""
@@ -201,7 +216,7 @@ def build_response(
 
     Build a response that always fits one UDP packet; TC is never set.
     """
-    flags = _FLAG_QR | (query.opcode << 11) | _FLAG_AA | rcode
+    flags = _FLAG_QR | (query.opcode << 11) | _FLAG_AA | (rcode & 0xF)
     if query.rd:
         flags |= _FLAG_RD
     answers = addresses[: max_answers(query)] if query.question else ()
@@ -220,7 +235,7 @@ def build_response(
         parts.append(_A_RECORD.pack(_NAME_POINTER, TYPE_A, CLASS_IN, 0, 4))
         parts.append(address)
     if query.edns is not None:
-        parts.append(_OPT_RECORD)
+        parts.append(_opt_record(rcode))
     return b"".join(parts)
 
 
@@ -706,6 +721,8 @@ class DnsService:
             )
         if query.error:
             return build_response(query, query.error)
+        if query.edns is not None and query.edns_version != 0:
+            return build_response(query, BADVERS)
         if query.name != self.name:
             self._warn_unknown_name(query.name)
             return build_response(query, NXDOMAIN)

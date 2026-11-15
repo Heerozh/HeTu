@@ -212,6 +212,35 @@ def test_malformed_queries_get_formerr(wire):
     assert ancount == 0
 
 
+OPT = b"\x00" + struct.pack("!HHIH", 41, 1232, 0, 0)
+
+
+def _name(*lengths: int) -> bytes:
+    return b"".join(bytes([n]) + b"a" * n for n in lengths) + b"\x00"
+
+
+def test_rfc_details_of_edns_and_name_length():
+    """
+    RFC 6891：查询里有两条 OPT 回 FORMERR，EDNS 版本不是 0 回 BADVERS；RFC 1035：名字连长度字节和结尾的 0
+    最多 255 字节
+    """
+    service = make_service(["10.0.3.17"])
+    two_opts = service.respond(_header(arcount=2) + QUESTION + OPT + OPT)
+    assert two_opts is not None
+    assert struct.unpack_from("!6H", two_opts)[1] & 0xF == dns.rcode.FORMERR
+    response = ask(service, a_query(use_edns=1, payload=1232))
+    assert response.rcode() == dns.rcode.BADVERS
+    assert answers(response) == []
+    longest = _header() + _name(63, 63, 63, 61) + struct.pack("!HH", 1, 1)  # 255 字节
+    too_long = _header() + _name(63, 63, 63, 62) + struct.pack("!HH", 1, 1)  # 256 字节
+    assert struct.unpack_from("!6H", service.respond(longest) or b"")[1] & 0xF == (
+        dns.rcode.NXDOMAIN
+    )
+    assert struct.unpack_from("!6H", service.respond(too_long) or b"")[1] & 0xF == (
+        dns.rcode.FORMERR
+    )
+
+
 @pytest.mark.parametrize(
     "wire",
     [b"", b"\x12\x34\x01", _header(flags=0x8000) + QUESTION],  # 报头不完整、本身是回答
