@@ -271,42 +271,89 @@ def answered(selection) -> list[str]:
     return [node.addr for node in selection.addresses]
 
 
-def test_staleness_follows_changes_not_clocks():
+def test_staleness_follows_progress_not_clocks(caplog):
     """
-    第一次见到按 ts 判断；之后只看登记有没有在变：节点的时钟差多少都不影响，15 秒没变才算过期。另放一个
-    一直在写的节点，免得触发"全都过期就沿用上一次的答案"
+    过期只看 ts 有没有往前走：节点的时钟慢了 100 秒也照答，只告警一次；15 秒没往前走就过期。另放一个一直在写
+    的节点，免得触发"全都过期就沿用上一次的答案"
     """
     selector, mono, wall = make_selector()
-    tick = 0
-
-    def raw(ts: float) -> dict[bytes, bytes]:
-        nonlocal tick
-        tick += 1
-        return {b"0": entry(ts=ts), b"1": entry(addr="10.0.3.99", ts=wall.now + tick)}
 
     def update(ts: float):
-        return selector.update(raw(ts), always)
-
-    # 节点的时钟慢了 10 秒：第一次见到时还在 15 秒以内
-    assert "10.0.3.17" in answered(update(WALL - 10))
-    mono.now += 6
-    wall.now += 6
-    # 第一次见到时按 ts 算它已经 10 秒没写了，6 秒后（16 秒）没变就过期
-    selection = update(WALL - 10)
-    assert answered(selection) == ["10.0.3.99"]
-    assert "没变" in selection.excluded["10.0.3.17"]
-    # 又写了一次（值变了）：重新算活着
-    assert "10.0.3.17" in answered(update(WALL - 4))
-    # 之后每 5 秒变一次，ts 离本机时钟多远都没关系
-    for step in range(1, 6):
         mono.now += 5
-        assert "10.0.3.17" in answered(update(WALL - 1000 + step))
+        wall.now += 5
+        live = entry(addr="10.0.3.99", ts=wall.now)
+        return selector.update({b"0": entry(ts=ts), b"9": live}, always)
+
+    with hetu_logs(caplog):
+        # 第一次见到：按 ts 算它 100 秒没写了
+        selection = update(WALL - 95)
+        assert "10.0.3.17" not in answered(selection)
+        assert "100 秒" in selection.excluded["10.0.3.17"]
+        # 之后每 5 秒写一次，ts 往前走：照答，时钟差多少都没关系
+        for step in range(1, 5):
+            assert "10.0.3.17" in answered(update(WALL - 95 + 5 * step))
+        # 不写了：15 秒没往前走就过期
+        for _i in range(4):
+            selection = update(WALL - 75)
+        assert "10.0.3.17" not in answered(selection)
+        assert "没更新" in selection.excluded["10.0.3.17"]
+    skews = [r.getMessage() for r in caplog.records if "时钟" in r.getMessage()]
+    assert len(skews) == 1, skews
+    assert "10.0.3.17" in skews[0]
+
+
+def test_dead_node_flipping_between_two_replicas_still_goes_stale():
+    """
+    经代理轮询两台副本，其中一台和 master 断开了还在给旧数据：死节点的值在新旧两份之间来回变。只看值变没变的话
+    它永远"活着"；按 ts 有没有往前走判断，照样过期
+    """
+    selector, mono, wall = make_selector()
+    old, last = entry(ts=WALL - 4), entry(ts=WALL)
+    selection = None
+    for step in range(20):
+        mono.now += 1
+        wall.now += 1
+        live = entry(addr="10.0.3.99", ts=wall.now)
+        selection = selector.update(
+            {b"0": old if step % 2 else last, b"9": live}, always
+        )
+    assert selection is not None
+    assert answered(selection) == ["10.0.3.99"]
+
+
+def test_new_process_counts_as_a_write_even_with_an_older_ts():
+    """同一个 worker id 换了一个进程（重启、被接手）：算一次新的写入，哪怕它的时钟慢、ts 比原来的小"""
+    selector, mono, wall = make_selector()
+    selector.update({b"0": entry(ts=WALL)}, always)
+    mono.now += 20
+    wall.now += 20
+    restarted = entry(ts=WALL - 10, up=WALL - 12, node="m1:0123456789abcdef:w0:2")
+    assert answered(selector.update({b"0": restarted}, always)) == ["10.0.3.17"]
+
+
+def test_old_entries_are_not_mistaken_for_clock_skew(caplog):
+    """
+    死掉的 worker 的登记会一直留着：第一次见到时按 ts 算出它多久没写了，不当成时钟差告警。别的 namespace 的、
+    5 秒多以前刚写过的也不报
+    """
+    selector, _mono, _wall = make_selector()
+    raw = {
+        b"0": entry(ts=WALL - 600),
+        b"1": entry(addr="10.0.9.9", ns="other", ts=WALL - 3600),
+        b"2": entry(addr="10.0.3.18", ts=WALL - 5.2),
+    }
+    with hetu_logs(caplog):
+        selection = selector.update(raw, always)
+    assert "600 秒" in selection.excluded["10.0.3.17"]
+    assert answered(selection) == ["10.0.3.18"]
+    assert not [r for r in caplog.records if "时钟" in r.getMessage()]
 
 
 def test_entries_seen_first_long_after_their_last_write_are_stale():
     selector, _mono, _wall = make_selector()
     selection = selector.update({b"0": entry(ts=WALL - 60)}, always)
     assert answered(selection) == []
+    assert "60 秒没更新" in selection.excluded["10.0.3.17"]
     assert selection.kept_previous  # 本 namespace 的全过期了：沿用上一次（空的）
 
 

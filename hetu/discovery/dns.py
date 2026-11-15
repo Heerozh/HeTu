@@ -56,6 +56,8 @@ PROBE_TIMEOUT = 1.0
 PROBE_RETRY = 10.0
 # 节点的时钟和本机差多少秒就告警（雪花 ID 本来就要求 NTP 同步）
 CLOCK_SKEW_WARN = 5.0
+# 一个 field 最多记几个进程见过的最大 ts（同一个 worker id 被先后几个进程用过）
+MAX_INSTANCES_PER_FIELD = 4
 # 连 Redis、每条命令的超时（秒）
 REDIS_TIMEOUT = 2.0
 # 只告警一次的名字最多记多少个（别人拿各种名字来扫时不至于无限增长）
@@ -261,11 +263,15 @@ class Selection:
 
 class Selector:
     """
-    把每次读到的注册表变成要答的地址（§6.3、§6.4）。按登记有没有在变判断过期，不比较时钟：记住每个 field
-    上一次的值和它变化的时刻（本机单调时钟），STALE_SEC 秒没变就算过期。节点每 5 秒写一次、ts 每次都不一样。
-    第一次见到的 field 没有历史，按 |本机时钟 - ts| ≤ STALE_SEC 判断。
+    把每次读到的注册表变成要答的地址（§6.3、§6.4）。
 
-    Turns registry snapshots into the addresses to answer, judging staleness by change.
+    过期按登记有没有往前走判断，不比较时钟：记住每个 field 上见过的最大 ts 和它前进的时刻（本机单调时钟），
+    STALE_SEC 秒没前进就算过期。节点每 5 秒写一次，ts 一次比一次大。只看值变没变不够：经代理按请求轮询几台
+    副本、其中一台和 master 断开了还在给旧数据时，死节点的值会在新旧两份之间来回变。换了一个进程（持有者
+    标识或就绪时刻变了：重启、worker id 被接手）算一次新的写入，ts 不用比原来的大。第一次见到的 field 没有
+    历史，按本机时钟和 ts 的差判断：在 STALE_SEC 以内的算活着，更早的按 ts 算出它多久没写了。
+
+    Turns registry snapshots into the addresses to answer, judging staleness by progress.
     """
 
     def __init__(
@@ -280,37 +286,59 @@ class Selector:
         self.port = port
         self._clock = clock
         self._wall = wall
-        # field → (上一次的值, 它变化的时刻)
-        self._history: dict[str, tuple[bytes, float]] = {}
+        # field → ({进程（持有者标识, 就绪时刻）: 见过的最大 ts}, 最近一次前进的时刻)
+        self._history: dict[str, tuple[dict[tuple[str, float], float], float]] = {}
         self.previous: list[NodeAddress] = []
+        # 已经报过时钟差的 field
         self._warned_skew: set[str] = set()
         self._warned_port: set[tuple[str, int]] = set()
         self._warned_invalid: set[str] = set()
 
-    def _changed_at(
-        self, field: str, raw: bytes, entry: NodeEntry, now: float
-    ) -> float:
-        previous = self._history.get(field)
-        if previous is not None and previous[0] == raw:
-            return previous[1]
-        wall_now = self._wall()
-        age = wall_now - entry.ts
-        if abs(age) > CLOCK_SKEW_WARN and entry.addr not in self._warned_skew:
-            self._warned_skew.add(entry.addr)
-            logger.warning(
-                _(
-                    "⚠️ [📣DNS] 节点 {addr} 的时钟和本机差 {skew:.1f} 秒，请检查两边的 NTP（雪花 ID "
-                    "本来就要求时钟同步）"
-                ).format(addr=entry.addr, skew=age)
-            )
-        if previous is not None:
-            changed = now
-        elif abs(age) <= STALE_SEC:
-            changed = now - max(0.0, age)
+    def _progress(self, field: str, entry: NodeEntry, now: float) -> tuple[float, bool]:
+        """这条登记最近一次往前走的时刻（本机单调时钟），以及这一次是不是看到了一次新的写入"""
+        instance = (entry.node, entry.up)
+        history = self._history.get(field)
+        if history is not None:
+            seen, progressed = history
+            last = seen.pop(instance, None)
+            if last is not None and entry.ts <= last:
+                seen[instance] = last
+                return progressed, False
+            if last is None:
+                self._warned_skew.discard(field)  # 换了一个进程，时钟也可能不一样了
+            seen[instance] = entry.ts
+            while len(seen) > MAX_INSTANCES_PER_FIELD:
+                del seen[next(iter(seen))]
+            self._history[field] = (seen, now)
+            return now, True
+        age = self._wall() - entry.ts
+        if age > STALE_SEC:
+            progressed = now - age
+        elif age < -STALE_SEC:
+            # ts 在未来太远：先当它过期，等它再写一次
+            progressed = now - STALE_SEC - 1
         else:
-            changed = now - STALE_SEC - 1
-        self._history[field] = (raw, changed)
-        return changed
+            progressed = now - max(0.0, age)
+        self._history[field] = ({instance: entry.ts}, progressed)
+        return progressed, False
+
+    def _check_skew(self, field: str, entry: NodeEntry, wrote: bool) -> None:
+        """
+        节点的时钟和本机差得太多就告警，每个 field 一次。只在看到一次新的写入时判断：那时 ts 刚写下不久（最多
+        一次重算的间隔加上副本延迟）。第一次见到的只认 ts 在未来的：ts 在过去可能只是它很久没写了，死掉的
+        worker 的登记会一直留着
+        """
+        age = self._wall() - entry.ts
+        skewed = abs(age) > CLOCK_SKEW_WARN if wrote else age < -CLOCK_SKEW_WARN
+        if not skewed or field in self._warned_skew:
+            return
+        self._warned_skew.add(field)
+        logger.warning(
+            _(
+                "⚠️ [📣DNS] 节点 {addr}（worker {field}）的时钟和本机差 {skew:.1f} 秒，请检查两边的 NTP"
+                "（雪花 ID 本来就要求时钟同步）"
+            ).format(addr=entry.addr, field=field, skew=age)
+        )
 
     def update(
         self, raw: Mapping[Any, Any], probed: Callable[[str], bool]
@@ -328,7 +356,8 @@ class Selector:
         答案。
         """
         now = self._clock()
-        seen: set[str] = set()
+        # 本 namespace 的、解析得了的 field：只记它们的历史
+        tracked: set[str] = set()
         namespaces: dict[str, int] = {}
         invalid: dict[str, str] = {}
         candidates: dict[str, NodeAddress] = {}
@@ -339,13 +368,11 @@ class Selector:
                 key.decode("utf-8", "replace") if isinstance(key, bytes) else str(key)
             )
             value = value if isinstance(value, bytes) else str(value).encode()
-            seen.add(field)
             try:
                 entry = decode_entry(value)
                 ipaddress.IPv4Address(entry.addr)
             except (EntryError, ValueError) as e:
                 invalid[field] = str(e)
-                self._history.pop(field, None)
                 if field not in self._warned_invalid:
                     self._warned_invalid.add(field)
                     logger.warning(
@@ -356,15 +383,17 @@ class Selector:
                 continue
             self._warned_invalid.discard(field)
             namespaces[entry.ns] = namespaces.get(entry.ns, 0) + 1
-            changed_at = self._changed_at(field, value, entry, now)
             if entry.ns != self.namespace:
                 continue
+            tracked.add(field)
+            progressed_at, wrote = self._progress(field, entry, now)
+            self._check_skew(field, entry, wrote)
             ours += 1
-            idle = now - changed_at
+            idle = now - progressed_at
             if idle > STALE_SEC:
                 excluded.setdefault(
                     entry.addr,
-                    _("登记 {idle:.0f} 秒没变，节点多半已经没了").format(idle=idle),
+                    _("登记 {idle:.0f} 秒没更新，节点多半已经没了").format(idle=idle),
                 )
                 continue
             fresh += 1
@@ -394,8 +423,9 @@ class Selector:
             node.workers += 1
             node.conns += entry.conns
         for field in list(self._history):
-            if field not in seen:
+            if field not in tracked:
                 del self._history[field]
+        self._warned_skew &= tracked
         for addr in candidates:
             excluded.pop(addr, None)
         pending = [addr for addr in candidates if not probed(addr)]
