@@ -3,7 +3,8 @@
 - 日期：2026-11-14
 - 状态：第 0~6 步都已合并（PR #226~#234），设计做过一轮独立审查（§15）。§3.4 的现存问题已由 PR #225 修复；
   第 4c 步的实测见 §12.2，多 worker 见 §12.3。迁移后又测了 SO_REUSEPORT 和监听队列（§12.4，不做 SO_REUSEPORT，
-  监听队列改成可配）、前置 Caddy 时的建连风暴（§12.5，参考配置怎么改待讨论）。已定事项见 §13，待定问题见 §14。
+  监听队列改成可配）、前置 Caddy 时的建连风暴（§12.5，SDK 的重连加了随机抖动，运维文档改成开好服之后再把节点
+  加进内网 DNS）。已定事项见 §13，待定问题见 §14。
 - 基线：dev `71bde8c5`
 - 影响范围：`hetu/server/`（main、websocket、receiver、web、threaded_accept；新增 runtime、config、conn、
   adapters、supervisor）、`hetu/cli/start.py`、`hetu/webext.py`、`hetu/system/future.py`、
@@ -1575,6 +1576,8 @@ abort。所以：
 | `define_route` 的路由严格区分尾斜杠（Sanic 默认 `/ping/` 也能命中 `/ping`）；处理函数没有总时长上限（Sanic 的 `RESPONSE_TIMEOUT` 是 60 秒，超时回 503） | 6 | 无，文档写明 |
 | 多进程时管理进程只认第一个关服信号：关服途中再按 Ctrl+C 不再强杀所有进程（Sanic 第二次就强杀）；关服时每个 worker 最多等 `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` 秒（默认 60 秒）才强制结束 | 5（aiohttp 栈）、6 | 无 |
 | 新配置 `LISTEN_BACKLOG`（默认 2048）：监听队列长度原来写死，实际是 aiohttp 的 128（`bind_socket` 的 100 被覆盖，Sanic 是 100）；不是正整数时 `hetu start` 以 2 退出；Linux 上被 `net.core.somaxconn` 截短时开服打一条提示 | 迁移后（§12.4） | 无 |
+| Unity / C# SDK：重连等待加随机抖动，每次等退避延迟的 0.5~1 倍（`HeTuSessionClient.Connect` 新参数 `reconnectJitter`，默认 0.5，传 0 关闭）；默认 20 次重连覆盖的时间从约 8 分钟变成 4~8 分钟 | 迁移后（§12.5） | 无 |
+| 运维文档的参考部署：HeTu 开好服之后再把 IP 加进内网 DNS（原来是开机时加，Caddy 连过去被拒一次就把这台摘掉 30 秒）；停服前删掉记录、等 Caddy 刷新之后再停 | 迁移后（§12.5） | 无 |
 
 ## 7. 测试计划汇总
 
@@ -2010,15 +2013,18 @@ worker 要用 CPU 1），几种配置都在 CPU 12。每种配置跑聊天 10 �
   多台滚动重启时，摘掉的那台由别的节点顶上，影响不大。
 - SDK 的退避不加抖动，重试被 Caddy 的 5 秒等待对齐成一波一波，每一波又是一次风暴，可能再触发一次摘除。
 
-**可以考虑的改法（还没定，待讨论）**
+**可以考虑的改法**（2026-11-16 定下：做 3、4，1、2 先不做）
 
 1. 参考配置：调大 `max_fails`，风暴里失败几次不至于摘掉；调短 `fail_duration`；或者不开被动健康检查，只靠
    `lb_try_duration` 每 250ms 重试，单台重启时 HeTu 一开好服就能连上。代价是坏掉的节点每个请求都要先失败一次：
-   被拒是马上返回，黑洞要等满 `dial_timeout`。
-2. `dial_timeout` 调到 5 秒以上，扛得过两次 SYN 重传（第 1、3 秒）。
-3. SDK 的重连退避加随机抖动，打散重试波。
-4. 运维文档改成 HeTu 开好服之后再把 IP 加进内网 DNS（现在写的是开机时加）；停服前先删，等 Caddy 刷新（`refresh 2s`）
-   之后再停。
+   被拒是马上返回，黑洞要等满 `dial_timeout`。不做：被动健康检查要留着摘掉崩了的节点；按运维文档的流程重启、
+   扩缩容（开好服才加进 DNS、停服前先删）就碰不到它，跳过这个流程直接重启的还是会被摘掉 30 秒。
+2. `dial_timeout` 调到 5 秒以上，扛得过两次 SYN 重传（第 1、3 秒）。不做：监听队列 2048 之后突发里已经没有
+   dial 超时，剩下的同步重试波由 3 打散。
+3. SDK 的重连退避加随机抖动，打散重试波。**已做**：每次实际等待在 [0.5, 1] × 退避延迟里随机取
+   （`HeTuSessionClient.Connect` 的 `reconnectJitter`，默认 0.5，传 0 关闭），退避序列本身不变。
+4. 运维文档改成 HeTu 开好服之后再把 IP 加进内网 DNS（原来写的是开机时加）；停服前先删，等 Caddy 刷新（`refresh 2s`）
+   之后再停。**已做**，"要点"里还加了一条大批玩家同时重连时的监听队列和 `somaxconn`。
 
 ## 13. 已定事项（2026-11-14）
 
