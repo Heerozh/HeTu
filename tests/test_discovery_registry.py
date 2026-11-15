@@ -75,6 +75,8 @@ def test_entry_round_trip():
         (b"not json", None),
         (b'{"v": 1, "addr": "10.0.3.17"}', None),  # 少了字段
         (b'{"node": "x"}', None),  # 没有版本
+        # 嵌套很深（哪怕在不认识的字段里）：msgspec 抛的是 RecursionError
+        (b'{"v": 1, "x": ' + b"[" * 100_000 + b"]" * 100_000 + b"}", None),
     ],
 )
 def test_bad_entries_are_rejected(raw, words):

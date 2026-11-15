@@ -102,10 +102,11 @@ def decode_entry(raw: bytes | str) -> NodeEntry:
 
     Decode one entry; raises EntryError for garbage or an unknown format version.
     """
+    # 嵌套很深的 JSON（哪怕在不认识的字段里）msgspec 抛的是 RecursionError，不是 DecodeError
     try:
         version = _version_decoder.decode(raw).v
-    except msgspec.DecodeError as e:
-        raise EntryError(str(e)) from e
+    except (msgspec.DecodeError, RecursionError) as e:
+        raise EntryError(str(e) or type(e).__name__) from e
     if version != ENTRY_VERSION:
         raise EntryError(
             _("不认识的登记格式版本 {version}（这个版本的 HeTu 认识 {known}）").format(
@@ -114,8 +115,8 @@ def decode_entry(raw: bytes | str) -> NodeEntry:
         )
     try:
         return _entry_decoder.decode(raw)
-    except msgspec.DecodeError as e:
-        raise EntryError(str(e)) from e
+    except (msgspec.DecodeError, RecursionError) as e:
+        raise EntryError(str(e) or type(e).__name__) from e
 
 
 def decode_registry(

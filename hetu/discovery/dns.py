@@ -645,10 +645,20 @@ class DnsService:
         self.addresses = tuple(socket.inet_aton(addr) for addr in answered)
 
     async def run_refresh_loop(self) -> None:
-        """每 REFRESH_INTERVAL 秒重算一次，直到被取消"""
+        """
+        每 REFRESH_INTERVAL 秒重算一次，直到被取消。出了意料之外的错也接着转：循环要是停了，进程照样活着、
+        一直答最后一次的答案，`restart: always` 也救不回来
+        """
         while True:
             await asyncio.sleep(REFRESH_INTERVAL)
-            await self.refresh()
+            try:
+                await self.refresh()
+            except Exception:  # 记下来，下一次接着算
+                logger.exception(
+                    _(
+                        "❌ [📣DNS] 重算答案出错，接着答上一次的结果，{interval:g} 秒后再算"
+                    ).format(interval=REFRESH_INTERVAL)
+                )
 
     # ------------------------------------------------------------ 回答
 

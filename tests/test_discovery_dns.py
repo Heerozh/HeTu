@@ -5,6 +5,7 @@
 报文、选地址、探测的用例不需要 Docker；启动检查和真跑的用例要 Redis 一主一从（原生集群那条要集群）。
 """
 
+import asyncio
 import contextlib
 import os
 import socket
@@ -589,6 +590,51 @@ async def test_read_errors_at_run_time_say_why(caplog, error, words, not_words):
     ]
     assert words in message
     assert not_words not in message
+
+
+DEEP = b'{"v": 1, "x": ' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+
+
+async def test_deeply_nested_entry_is_just_invalid():
+    """解析器对嵌套很深的 JSON 抛 RecursionError：当成解析不了的登记跳过，别的照答"""
+    client = FakeClient({b"0": entry(ts=time.time()), b"1": DEEP})
+    service = DnsService(
+        client, namespace="game", prober=Prober(2466, connect=ok_probe)
+    )
+    selection = await service.refresh(wait_probes=True)
+    assert selection is not None
+    assert set(selection.invalid) == {"1"}
+    assert answers(ask(service, a_query())) == ["10.0.3.17"]
+
+
+async def test_refresh_loop_survives_unexpected_errors(monkeypatch, caplog):
+    """重算出了意料之外的错：记下来接着转。循环要是停了，进程还活着、一直答旧的答案，谁也发现不了"""
+    monkeypatch.setattr(hdns, "REFRESH_INTERVAL", 0.01)
+    client = FakeClient({b"0": entry(ts=time.time())})
+    service = DnsService(
+        client, namespace="game", prober=Prober(2466, connect=ok_probe)
+    )
+    real_update = service.selector.update
+    calls = 0
+
+    def flaky_update(raw, probed):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        return real_update(raw, probed)
+
+    monkeypatch.setattr(service.selector, "update", flaky_update)
+    with hetu_logs(caplog, "ERROR"):
+        loop = asyncio.create_task(service.run_refresh_loop())
+        try:
+            async with asyncio.timeout(5):
+                while calls < 3:
+                    await asyncio.sleep(0.01)
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+    assert any("重算答案出错" in r.getMessage() for r in caplog.records)
 
 
 def test_listen_outside_loopback_is_warned():
