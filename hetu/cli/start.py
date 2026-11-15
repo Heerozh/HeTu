@@ -6,7 +6,6 @@
 """
 
 import logging
-import logging.handlers
 import os
 import socket
 import sys
@@ -343,11 +342,7 @@ class StartCommand(CommandInterface):
         # 配置log，上面 loader.load() 跑 worker_main 时会 dictConfig(config.LOGGING)
         # 把dictConfig生成的queue实例存到config里，好传递到子进程
         if "LOGGING" in config:
-            for hdl_name, handler_dict in config.LOGGING["handlers"].items():
-                if isinstance(handler_dict.get("queue"), (str, dict, list)):
-                    handler = logging.getHandlerByName(hdl_name)
-                    if isinstance(handler, logging.handlers.QueueHandler):
-                        handler_dict["queue"] = handler.queue
+            log_handlers.share_queues(config.LOGGING)
 
         # 启动日志Listener
         log_handlers.AutoListener.start_all()

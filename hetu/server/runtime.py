@@ -41,6 +41,11 @@ logger = logging.getLogger("HeTu.root")
 # worker启动流程（连后端、建表、跑启动System）的总超时秒数配置键，0为不限制。
 STARTUP_TIMEOUT_CONFIG_KEY = "STARTUP_TIMEOUT"
 DEFAULT_STARTUP_TIMEOUT = 60.0
+# 管理进程等 worker 就绪的超时 = STARTUP_TIMEOUT + 这个余量（见 resolve_ack_timeout）。
+# 两级超时不是冗余：我们自己的 asyncio 超时挡不住阻塞式代码（启动System里写了
+# time.sleep/requests 之类把事件循环卡死），那时只有管理进程（另一个进程在数数）能兜底。
+# 余量只需盖住我们量不到的部分：进程spawn、import app文件、开始监听。
+ACK_TIMEOUT_MARGIN = 10.0
 # 关服时等连接拆完、等后台任务停下各自的上限（秒），配置键 GRACEFUL_SHUTDOWN_TIMEOUT
 DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = 15.0
 # 单进程模式丢租约后 hetu start 的退出码（见适配层的 on_lease_lost）。框架正常停服的退出码是 0，
@@ -65,6 +70,24 @@ class StartupAborted(Exception):
     server aborts immediately and the process exits with a non-zero code in both single-
     and multi-process mode.
     """
+
+
+def resolve_ack_timeout(config: Mapping[str, Any]) -> float | None:
+    """
+    管理进程等 worker 就绪的超时（秒），由 STARTUP_TIMEOUT 加上 `ACK_TIMEOUT_MARGIN` 推算；
+    STARTUP_TIMEOUT 为 0（不限制）时也不限制，返回 None。
+
+    它必须晚于我们自己的启动超时，否则卡住时先被管理进程杀掉，用户只能看到"没有就绪"，
+    不知道卡在哪。所以它不单独配置。
+
+    The manager's timeout (seconds) for a worker to become ready, derived from
+    STARTUP_TIMEOUT so that HeTu's own, more specific timeout always fires first.
+    None means no limit.
+    """
+    startup_timeout = config.get(STARTUP_TIMEOUT_CONFIG_KEY, DEFAULT_STARTUP_TIMEOUT)
+    if not startup_timeout:
+        return None
+    return float(startup_timeout) + ACK_TIMEOUT_MARGIN
 
 
 def prepare_worker(config: Mapping[str, Any]) -> None:

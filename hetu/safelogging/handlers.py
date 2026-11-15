@@ -6,6 +6,7 @@
 """
 
 import logging
+import logging.handlers
 import multiprocessing
 from logging.handlers import QueueListener
 
@@ -48,6 +49,22 @@ def process_safe_queue(maxsize=-1):
     q = ctx.Queue(maxsize)
     CREATED_QUEUES.append(q)
     return q
+
+
+def share_queues(logging_config):
+    """
+    dictConfig 之后调用：把它建好的进程安全队列放回 LOGGING 配置（替换掉 `process_safe_queue`
+    这样的工厂），这份配置传给 spawn 出来的 worker 之后，worker 的 QueueHandler 写进同一个队列，
+    由本进程的 AutoListener 统一输出。
+
+    After dictConfig: put the created process-safe queues back into the LOGGING config, so
+    spawned workers log into the same queues, drained by this process's listeners.
+    """
+    for name, handler_dict in logging_config.get("handlers", {}).items():
+        if isinstance(handler_dict.get("queue"), (str, dict, list)):
+            handler = logging.getHandlerByName(name)
+            if isinstance(handler, logging.handlers.QueueHandler):
+                handler_dict["queue"] = handler.queue
 
 
 def stop_all_logging_handlers():

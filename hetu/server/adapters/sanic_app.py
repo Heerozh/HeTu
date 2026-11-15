@@ -27,11 +27,10 @@ from ...i18n import _
 from ..config import HeTuConfig
 from ..conn import ConnectionClosed, next_conn_id
 from ..runtime import (
-    DEFAULT_STARTUP_TIMEOUT,
     LEASE_LOST_EXIT_CODE,
-    STARTUP_TIMEOUT_CONFIG_KEY,
     WorkerRuntime,
     prepare_worker,
+    resolve_ack_timeout,
     setup_logging,
     setup_message_pipeline,
 )
@@ -41,30 +40,23 @@ from ..websocket import serve_connection
 
 logger = logging.getLogger("HeTu.root")
 
-# 管理进程等worker ack的超时 = STARTUP_TIMEOUT + 这个余量。
-# 两级超时不是冗余：我们自己的 asyncio 超时挡不住阻塞式代码（启动System里写了
-# time.sleep/requests 之类把事件循环卡死），那时只有管理进程（另一个进程在数数）能兜底。
-# 余量只需盖住我们量不到的部分：进程spawn、import app文件、bind端口。
-ACK_TIMEOUT_MARGIN = 10.0
 # "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
 # 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
 UNLIMITED_ACK_THRESHOLD = 10**9
 
 
 def resolve_ack_threshold(config: Mapping[str, Any]) -> int:
-    """按 STARTUP_TIMEOUT 算出管理进程等worker ack的阈值（sanic单位为0.1秒）。
+    """Sanic 管理进程等 worker ack 的阈值（sanic 的单位是 0.1 秒），由 `resolve_ack_timeout` 换算。
 
-    ack超时必须晚于我们自己的启动超时，否则卡住时先被管理进程SIGKILL掉整个进程组，
-    用户只能看到sanic那句没头没脑的"Not all workers acknowledged"，不知道卡在哪。
-    所以它不单独配置，由 STARTUP_TIMEOUT 推算；STARTUP_TIMEOUT 为0(不限制)时它也不限制。
+    ack 超时必须晚于我们自己的启动超时，否则卡住时先被管理进程 SIGKILL 掉整个进程组，用户只能
+    看到 sanic 那句没头没脑的"Not all workers acknowledged"，不知道卡在哪。
 
-    Derive the manager's worker-ack threshold (in units of 0.1s) from STARTUP_TIMEOUT,
-    so HeTu's own, more specific timeout always fires first.
+    Sanic's worker-ack threshold (in units of 0.1s), converted from resolve_ack_timeout.
     """
-    startup_timeout = config.get(STARTUP_TIMEOUT_CONFIG_KEY, DEFAULT_STARTUP_TIMEOUT)
-    if not startup_timeout:
+    timeout = resolve_ack_timeout(config)
+    if timeout is None:
         return UNLIMITED_ACK_THRESHOLD
-    return max(1, int((float(startup_timeout) + ACK_TIMEOUT_MARGIN) * 10))
+    return max(1, int(timeout * 10))
 
 
 def on_lease_lost(app: Sanic, runtime: WorkerRuntime) -> None:
