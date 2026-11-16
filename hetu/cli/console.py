@@ -28,7 +28,6 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, TextIO
-from urllib.parse import urlparse
 
 import numpy as np
 
@@ -260,7 +259,7 @@ def error_fields(exc: BaseException, *, with_traceback: bool = True) -> dict:
 
 
 def mask_url(url: str) -> str:
-    """数据库地址打码口令；SQLite 给库文件绝对路径"""
+    """数据库地址打码口令（用户信息里的、查询串里的 password）；SQLite 给库文件绝对路径"""
     if url.startswith("sqlite:///"):
         from ..data.backend.sqlite.client import SQLiteBackendClient
 
@@ -270,13 +269,9 @@ def mask_url(url: str) -> str:
             return url
         # 与 HeTu 的写法一致：POSIX 绝对路径是 sqlite:////abs，Windows 是 sqlite:///C:/…
         return "sqlite:///" + os.path.abspath(path).replace(os.sep, "/")
-    parsed = urlparse(url)
-    if parsed.password is None:
-        return url
-    user = parsed.username or ""
-    host = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port else ""
-    return parsed._replace(netloc=f"{user}:***@{host}{port}").geturl()
+    from ..common.helper import mask_url_password
+
+    return mask_url_password(url)
 
 
 def describe_target(

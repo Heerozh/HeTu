@@ -286,11 +286,12 @@ Aliyun Tair. Redis Proxy and Redis Cluster are also supported.
 
 In production, put a Caddy gateway in front of HeTu (automatic HTTPS, load balancing).
 The reference deployment is multiple machines in the cloud: one fixed gateway machine,
-HeTu in an autoscaling group (spot instances are fine), and the gateway discovering
-HeTu nodes from your private DNS with Caddy's built-in dynamic upstreams
-(`dynamic a`), so scaling never touches the gateway's config. Game clients need to
-reconnect automatically (`HeTuSessionClient` in the official SDK does). See the
-[operations guide](docs/en/operations.md).
+HeTu in an autoscaling group (spot instances are fine) on the host network with
+`DISCOVERY` on. Each node registers itself in Redis once it is serving and withdraws
+before it stops; `hetu dns` on the gateway serves the registry to Caddy's built-in
+dynamic upstreams (`dynamic a`), so scaling needs no config changes, no scripts and no
+cloud credentials. Game clients need to reconnect automatically (`HeTuSessionClient`
+in the official SDK does). See the [operations guide](docs/en/operations.md).
 
 ## ⚙️ Client SDK Installation
 

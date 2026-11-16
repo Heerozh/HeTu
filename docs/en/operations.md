@@ -43,7 +43,9 @@ docker run -it --rm -p 2466:2466 --name game-srv my-game
 
 The Docker workflow exists primarily so you can run on cheap Spot
 instances behind a gateway: machines come and go, and the gateway discovers
-them automatically (see Load balancing below).
+them automatically (see Load balancing below). For a multi-machine
+deployment, turn node discovery (`DISCOVERY`) on and run on the host network
+(`docker run --network host`, without `-p`).
 
 ### `pip` native (no container)
 
@@ -185,28 +187,100 @@ cloud):
 
 - **Gateway**: one fixed machine (not a spot instance) with a public IP,
   running the official Caddy image. It obtains certificates, terminates TLS,
-  writes access logs and forwards the websockets to HeTu.
+  writes access logs and forwards the websockets to HeTu. Next to it runs
+  `hetu dns`, which tells Caddy which HeTu nodes are up.
 - **HeTu**: runs in an autoscaling group, cheap spot instances included, one
-  container per machine (`WORKER_NUM` set to the CPU count). The group's health
-  check can probe HeTu's root path `/`.
-- **Backend discovery**: keep one name, say `hetu.internal`, in your cloud's
-  private DNS (Alibaba Cloud PrivateZone, an AWS Route 53 private hosted zone,
-  and so on). Each HeTu machine adds its private IP once the server is up (its
-  root path `/` answers) and removes it before shutting down. Don't add it on
-  boot: until the server is up Caddy's connections to it are refused, and one
-  refusal makes Caddy skip the node for 30 seconds (`fail_duration` below).
-  Caddy's built-in dynamic upstreams (`dynamic a`) poll that name, so scaling
-  never touches Caddy's config: Caddy doesn't reload, and connections on the
-  other machines are left alone.
+  container per machine (`WORKER_NUM` set to the CPU count), on the host
+  network, with `DISCOVERY` turned on in the config. The group's health check
+  can probe HeTu's root path `/`.
+- **Node discovery**: once a node is serving, it registers its private address
+  in Redis (the default backend, key `hetu:nodes`), refreshes the entry every
+  5 seconds and withdraws it first when it shuts down. `hetu dns` reads the
+  registry every second and answers it as the A records of `hetu.internal`,
+  which Caddy's built-in dynamic upstreams (`dynamic a`) look up every 2
+  seconds. Scaling never touches Caddy's config, needs no scripts, and the
+  nodes need no cloud API credentials; Caddy doesn't reload, and connections on
+  the other machines are left alone.
+
+### Nodes
+
+Turn node discovery on in the config:
+
+```yaml
+DISCOVERY: true
+PROXIES_COUNT: 1        # nodes sit behind the gateway: take the player's address from X-Forwarded-For
+LISTEN: 0.0.0.0:2466    # every node uses the same port
+```
+
+Run on the host network (no `-p`). With node discovery on, shutdown takes 4
+more seconds for the deregistration wait; set the stop grace period as described
+in "Shutting down" below:
+
+```bash
+docker run -d --restart always --network host --stop-timeout 70 --name game-srv my-game
+```
+
+**Only the host network is supported.** On a bridge network a node only sees
+the address the Docker bridge gave it, which the gateway on another machine
+can't reach; the host network also skips the port-mapping hop, so it is the
+fastest. In compose that's `network_mode: host`, in k8s `hostNetwork: true`.
+
+The address a node registers: the IP in `LISTEN` if you wrote one; with
+`0.0.0.0`, the local address the node uses to reach the Redis master (the
+gateway and Redis normally share a private network, so the gateway can reach
+it). If the machine has several NICs and Redis and the gateway are reached
+through different ones, write the IP in `LISTEN`, e.g.
+`LISTEN: ${HOST_IP}:2466`.
+
+Before serving, `hetu start` checks the deployment. If a check fails it prints
+the cause and the fix and exits with code 2, before anything is started:
+
+- not on the host network (the address is on a container's virtual NIC), or
+  the address is on a local container bridge (docker0 and the like);
+- `LISTEN` is bound to a loopback address, is a host name, or names an IP this
+  machine doesn't have;
+- `PROXIES_COUNT` is 0: every player would appear to come from the gateway, and
+  the per-IP limit on anonymous connections would lock players out;
+- the default backend isn't Redis, or the address can't be worked out (Redis
+  on the same machine, or over a unix socket); write the IP in `LISTEN` then.
+
+### Gateway
+
+compose:
+
+```yaml
+services:
+  caddy:
+    image: caddy:2
+    network_mode: host
+    restart: always
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+  hetu-dns:
+    image: heerozh/hetu:latest
+    network_mode: host
+    restart: always
+    command: ["dns", "--namespace", "my_game"]
+    environment:
+      # point it at a Redis replica, using the read-only user created below
+      HETU_DNS_REDIS: redis://hetu-dns:${DNS_REDIS_PASSWORD}@10.0.1.20:6379/0
+volumes:
+  caddy_data:
+```
+
+Caddyfile:
 
 ```
 game.example.com {
 	reverse_proxy {
-		# look up the private DNS name every 2 seconds for the current HeTu nodes
+		# ask hetu dns every 2 seconds for the current HeTu nodes
 		dynamic a {
 			name hetu.internal
 			port 2466
 			refresh 2s
+			resolvers 127.0.0.1:1053
+			versions ipv4
 		}
 		# websockets are long-lived: send new ones to the least busy node
 		lb_policy least_conn
@@ -222,7 +296,61 @@ game.example.com {
 }
 ```
 
-Things to know:
+- `--namespace` is the `NAMESPACE` in the nodes' config. `port` must match the
+  nodes' `LISTEN` port; if it isn't 2466, pass `--port` to `hetu dns` as well.
+  If `name` isn't `hetu.internal`, pass `--name`.
+- Keep `refresh` at 2s: a node keeps serving for 4 seconds after withdrawing
+  its entry before it stops listening, and that is sized for it.
+- `versions ipv4`: without it Caddy looks up both A and AAAA every time.
+
+The Redis user for `hetu dns` only needs to read `hetu:nodes`. The gateway
+faces the internet, so don't give it a user that can read or write anything
+else. Create it on the replica `hetu dns` connects to (ACLs are not
+replicated; on a managed Redis, create the account in the console), and add
+`+select` if you don't use database 0:
+
+```
+ACL SETUSER hetu-dns on >password resetkeys ~hetu:nodes resetchannels -@all +hgetall +ping
+```
+
+`ACL SETUSER` only changes memory, so persist the user: run `ACL SAVE` if you use
+an `aclfile`, or `CONFIG REWRITE` if your users live in redis.conf. Otherwise the
+user is gone once the replica restarts: a running `hetu dns` can no longer read
+the registry and keeps answering its last result, so new nodes can't get in and
+dead ones aren't dropped, and a restarted `hetu dns` exits with code 3. Accounts
+created in a managed Redis's console need nothing.
+
+Give the replica's default user a password too, or disable it. The gateway has to
+reach the replica's Redis port, and if the default user needs no password, an
+attacker who gets into the gateway simply uses it: they can read all the data and
+even change the replica's replication setup, and the read-only user protects
+nothing. With a password set, put it in the nodes' `BACKENDS` URLs; with the
+default user disabled, the nodes use another user. To protect the master as
+well, first set `masterauth` (and `masteruser` if you disable the default user)
+on every replica, or replication breaks.
+
+`hetu dns` checks its deployment at startup too. It exits with code 2 when it
+isn't on the host network (Caddy queries the host's 127.0.0.1, which a bridge
+network never sees) or when Redis is a native cluster (not supported in the
+first version; go through a proxy); with code 3 when it can't connect to
+Redis, the password is wrong, or the ACL refuses it (it prints the user to
+create); and it warns when the user is too powerful, when Redis accepts a
+connection without a password (the default user has none), when it is
+connected to the master, or when `--listen` isn't a loopback address. At run time, a node
+that shows up for the first time is probed with one TCP connection from the
+gateway; until that succeeds the node isn't answered, and the log says to
+check the security group.
+
+Troubleshooting:
+
+- On the gateway: `hetu dns --namespace my_game --once` (with the same
+  environment) prints which addresses would be answered, which wouldn't, and
+  why.
+- On a node or an ops machine: `hetu nodes --config config.yml` prints a
+  summary of the registry: workers, connections and state per address, plus
+  stale entries.
+
+### Things to know
 
 - **The client's real IP.** Caddy adds `X-Forwarded-For`, and with
   `PROXIES_COUNT: 1` (the config template's default) HeTu reads the client
@@ -232,14 +360,17 @@ Things to know:
   If you put a CDN or load balancer in front of the gateway, add its addresses
   to Caddy's `trusted_proxies` and set `PROXIES_COUNT` to the total number of
   proxies.
-- **Stopping a HeTu machine** (scaling in, or a spot instance getting its
-  reclaim notice): remove it from DNS first, wait until Caddy has picked that
-  up (the `refresh` interval plus the record's TTL, so keep the TTL short),
-  then stop the server (see "Shutting down" below). Its players get a 1001 and
-  reconnect to another machine automatically.
-- **A machine that vanished without removing its record**: Caddy fails to
-  reach it and moves on, so players just wait a moment. Clean up stale records
-  with a periodic reconcile or the autoscaling group's scale-in hook.
+- **Stopping a HeTu machine** (scaling in, a spot instance getting its reclaim
+  notice, an upgrade): just stop the server (see "Shutting down" below). The
+  node withdraws its registry entry first and keeps serving for 4 seconds
+  until Caddy has picked that up and stops sending it new connections; only
+  then does it stop listening. Its players get a 1001 and reconnect to another
+  machine automatically. A node restarted in place gets new connections as
+  soon as it is serving again.
+- **A machine that vanished without shutting down** (a crash, a kill, a
+  reclaimed spot instance): once its entry hasn't been refreshed for 15
+  seconds, `hetu dns` stops answering it. Until then Caddy fails to reach it
+  and moves on, so players just wait a moment.
 - **Many players reconnecting at once** (the gateway restarts, or every node
   restarts together): connections that don't fit in HeTu's listen queue are
   dropped by the kernel, and a node Caddy can't reach within 2 seconds is
@@ -247,18 +378,29 @@ Things to know:
   (`LISTEN_BACKLOG`); on Linux it is also capped by `net.core.somaxconn`
   (4096 by default since kernel 5.4). Raise both if one machine takes more
   connections at once. The SDK adds random jitter to its reconnect delay,
-  which spreads out players who dropped at the same moment.
+  which spreads out players who dropped at the same moment. Also, since a node
+  registers only once it is serving and stops listening only after Caddy has
+  dropped it, planned shutdowns and restarts never get a node skipped for
+  refusing a connection; connection timeouts from an overflowing listen queue
+  still can.
 - **The gateway is a single point of failure.** Use a stable machine; if it
   goes down, players reconnect automatically. At larger scale, add gateways
-  behind your cloud's load balancer.
+  behind your cloud's load balancer. If `hetu dns` dies, new connections can't
+  get in (open ones are unaffected), so give it `restart: always`.
+- **Running on a single cloud?** You can also attach the autoscaling group to
+  the cloud's load balancer, which needs no scripts either; the price is the
+  load balancer's monthly fee and being tied to that cloud.
 
 ## Shutting down
 
 On SIGTERM (what `docker stop`, systemd and k8s send) or Ctrl+C, `hetu start`
 shuts down in this order:
 
-1. Stop accepting new connections.
-2. **Drain**: every connection stops reading new messages; RPCs already
+1. With node discovery (`DISCOVERY`) on, withdraw from the registry first
+   and keep serving for 4 seconds until the gateway has picked that up (see
+   Load balancing above).
+2. Stop accepting new connections.
+3. **Drain**: every connection stops reading new messages; RPCs already
    received run to completion and their replies are sent, then the connection
    is closed with close code 1001 (the SDK reconnects automatically). Messages
    queued behind them are not executed, so resending them after reconnecting
@@ -271,17 +413,18 @@ shuts down in this order:
    order id and call a `call_lock=True` System from an Endpoint with
    `ctx.systems.call(..., uuid=order_id)` to deduplicate (see
    [Advanced](advanced.md)).
-3. Run the disconnect System and delete the Connection rows, waiting at most
+4. Run the disconnect System and delete the Connection rows, waiting at most
    `GRACEFUL_SHUTDOWN_TIMEOUT` (15 seconds by default).
-4. Stop FutureCalls, release the Worker ID lease and disconnect from the
-   backends.
+5. Stop FutureCalls, delete the registry entry, release the Worker ID lease
+   and disconnect from the backends.
 
 Further SIGTERMs or Ctrl+Cs during shutdown do not interrupt it (the exception
 is a single-process server on Windows, where a second Ctrl+C forces an exit).
 
 With several workers, the manager process tells each worker to stop and waits
 up to `SHUTDOWN_DRAIN_TIMEOUT + 3 × GRACEFUL_SHUTDOWN_TIMEOUT + 10` seconds
-(60 by default) for it, then kills any worker still running. A normal shutdown
+(60 by default; 5 more with node discovery on, so 65) for it, then kills
+any worker still running. A normal shutdown
 takes nowhere near that long; it is the worst case, because after draining,
 cancelling the connections, waiting for them to be torn down and stopping
 FutureCalls each get their own `GRACEFUL_SHUTDOWN_TIMEOUT`.
@@ -357,7 +500,9 @@ Downgrading is currently not supported, may adding this feature in the future.
 The `hetu` command (run by `uv run hetu`) is your operations
 entry point: `start`, `upgrade` (migrations), `build` (client codegen), plus
 `call` / `get` / `range` / `shell` for debugging (see
-[Debugging from the command line](#debugging-from-the-command-line)).
+[Debugging from the command line](#debugging-from-the-command-line)), and
+`dns` (the gateway's DNS bridge, which reads no config file) / `nodes` (shows
+the registry) for node discovery (see [Load balancing](#load-balancing)).
 
 Subcommands that need a config look for it in this order: `--config` > CLI-flag
 mode (any of `--app-file` / `--namespace` / `--db` given) > the `HETU_CONFIG`

@@ -408,6 +408,8 @@ class AiohttpServer:
             await self.stop()
             raise
         self.runtime.start_background()
+        # 节点发现：开好服才登记（设计稿 docs/superpowers/specs/2026-11-15-node-discovery-design.md §4.3）
+        self.runtime.start_registration()
 
     async def _drain(self) -> None:
         """
@@ -442,6 +444,9 @@ class AiohttpServer:
         """
         关服，可以重复调用、并发调用，只关一次；关到一半被打断后再调，接着关。顺序：
 
+        0. 节点发现打开时先注销（`runtime.withdraw()`）：登记改成 draining，照常服务几秒、等网关刷新过再往下
+           关，免得网关在这之前连过来被拒、把这台摘掉（设计稿
+           docs/superpowers/specs/2026-11-15-node-discovery-design.md §4.3）；
         1. 停止监听；
         2. 排空（`_drain`，最多 SHUTDOWN_DRAIN_TIMEOUT）：各连接不再收新消息，已经收到的处理完、回复发
            出去之后以 1001 断开。没读的消息不执行，客户端重连后重发不会重复执行；
@@ -454,6 +459,9 @@ class AiohttpServer:
         async with self._stop_lock:
             if self._stopped:
                 return
+            # 注销等待期间 stopping 还是假，新连接照常接、照常服务：Caddy 只在连不上时换节点重试，HTTP 层的
+            # 拒绝会原样回给客户端
+            await self.runtime.withdraw()
             self.stopping = True
             if self._site is not None:
                 site, self._site = self._site, None

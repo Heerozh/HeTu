@@ -23,6 +23,7 @@ import redis.cluster
 import redis.exceptions
 from redis.cluster import LoadBalancingStrategy
 
+from ....common.helper import mask_url_password
 from ....i18n import _
 from ..base import BackendClient, RowFormat
 from ..redis_model import RedisModelClient
@@ -219,7 +220,9 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
                 io.ping()
             except redis.exceptions.ConnectionError as e:
                 raise ConnectionError(
-                    _("无法连接到Redis数据库：{url}").format(url=self.urls[i])
+                    _("无法连接到Redis数据库：{url}").format(
+                        url=mask_url_password(self.urls[i])
+                    )
                 ) from e
             except redis.exceptions.ResponseError as e:
                 # redis-py 8 默认 RESP3，每条连接建立后先发 HELLO 握手，所以 PING 还没
@@ -231,11 +234,11 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
                             "Redis数据库 {url} 不支持 HELLO 命令（RESP3 握手）。通常是前面"
                             "挂了不支持 RESP3 的代理层，请在 url 后追加 ?protocol=2 降级到 "
                             "RESP2，master 和 servants 都要加。"
-                        ).format(url=self.urls[i])
+                        ).format(url=mask_url_password(self.urls[i]))
                     ) from e
                 raise ConnectionError(
                     _("连接Redis数据库 {url} 时服务端返回错误：{error}").format(
-                        url=self.urls[i], error=e
+                        url=mask_url_password(self.urls[i]), error=e
                     )
                 ) from e
 
@@ -311,11 +314,14 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
             # 订在从节点上），否则落在别的分片上的行 / 索引永远收不到通知
             if isinstance(io, redis.cluster.RedisCluster):
                 node_ios = [
-                    (f"{self.urls[i]} ({node.name})", io.get_redis_connection(node))
+                    (
+                        f"{mask_url_password(self.urls[i])} ({node.name})",
+                        io.get_redis_connection(node),
+                    )
                     for node in io.get_nodes()
                 ]
             else:
-                node_ios = [(self.urls[i], io)]
+                node_ios = [(mask_url_password(self.urls[i]), io)]
             for url, node_io in node_ios:
                 try:
                     # 设置keyspace通知，先cast防止Awaitable类型检查报错

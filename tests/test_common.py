@@ -1081,3 +1081,29 @@ def test_version_comes_from_the_distribution():
     import hetu
 
     assert hetu.__version__ == version("hetudb")
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("redis://hetu:secret@127.0.0.1:6379/0", "redis://hetu:***@127.0.0.1:6379/0"),
+        ("redis://:secret@10.0.1.20/0", "redis://:***@10.0.1.20/0"),
+        ("redis://u:secret@[::1]:6379/0", "redis://u:***@[::1]:6379/0"),
+        # redis-py 也认查询串里的 password
+        (
+            "redis://10.0.1.20:6379/0?password=secret&protocol=2",
+            "redis://10.0.1.20:6379/0?password=***&protocol=2",
+        ),
+        (
+            "unix:///run/redis.sock?password=secret",
+            "unix:///run/redis.sock?password=***",
+        ),
+        ("redis://10.0.1.20:6379/0", "redis://10.0.1.20:6379/0"),
+        ("redis://hetu@10.0.1.20/0", "redis://hetu@10.0.1.20/0"),
+        ("not a url", "not a url"),
+    ],
+)
+def test_mask_url_password(url, expected):
+    from hetu.common.helper import mask_url_password
+
+    assert mask_url_password(url) == expected

@@ -18,7 +18,8 @@ from ..i18n import _
 
 # 原来由 Sanic 读取、迁移后仍保留的键，HeTu 自己给默认值（和 Sanic 25.12 的默认值等价，只有
 # PROXIES_COUNT 用 0 代替 None，都表示不解析），免得换框架时默认值悄悄变掉。DEBUG 也给个默认值：
-# 配日志、建事件循环时要按它。LISTEN_BACKLOG 是新加的，原来写死在代码里（Sanic 100，aiohttp 128）
+# 配日志、建事件循环时要按它。LISTEN_BACKLOG 是新加的，原来写死在代码里（Sanic 100，aiohttp 128）；
+# DISCOVERY 也是新加的
 DEFAULTS: dict[str, Any] = {
     "DEBUG": False,
     # 关服时等连接拆完、等后台任务停下各自的上限（秒）
@@ -40,6 +41,10 @@ DEFAULTS: dict[str, Any] = {
     # 大批客户端同时重连时，排不下的握手被内核丢掉，客户端要退避重传。内核会截到
     # net.core.somaxconn（设计稿 docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md §12.4）
     "LISTEN_BACKLOG": 2048,
+    # 节点发现：开好服后把本节点的地址登记进默认后端 Redis 的 hetu:nodes，网关上的 hetu dns 据此答
+    # Caddy 的 DNS 查询（设计稿 docs/superpowers/specs/2026-11-15-node-discovery-design.md）。默认关闭：
+    # 只支持 host 网络，现有的 bridge 网络部署照常能开
+    "DISCOVERY": False,
 }
 
 

@@ -225,6 +225,54 @@ def test_worker_that_ignores_stop_is_killed_after_the_timeout(tmp_path, logs):
     assert any("没在 0.5 秒内退出，强制结束" in m for m in logs.messages())
 
 
+def test_listen_socket_closes_once_every_worker_stops_listening(tmp_path, logs):
+    """
+    关服时 worker 各自先停止监听（关掉自己那份 socket），再排空、跑断线 System，要好几秒才退出。都停止
+    监听之后新连接要马上被拒，网关好换一台；不能因为管理进程手里还有一份，socket 接着监听：新连接在内核里
+    握完手、进了监听队列却没人接，一直挂到管理进程退出
+    """
+    sock = socket.create_server(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    config = {"DIR": str(tmp_path), "BEHAVIOR": "close_sock_on_stop", "LINGER": 3.0}
+    sup = Supervisor(
+        config,
+        sock,
+        2,
+        target=fake_workers.worker,
+        ack_timeout=20.0,
+        stop_timeout=10.0,
+        reload=False,
+        poll_interval=0.05,
+    )
+    probe: list[str] = []
+
+    def connect_after_workers_stop_listening() -> None:
+        deadline = time.monotonic() + 30
+        while len(_events(tmp_path, "sock-closed")) < 2:
+            if time.monotonic() > deadline:
+                probe.append("worker 没有停止监听")
+                return
+            time.sleep(0.02)
+        try:
+            # Windows 上连一个没人监听的端口，要重试两次 SYN、约 2 秒才报被拒
+            with socket.create_connection(("127.0.0.1", port), timeout=5):
+                probe.append("连上了")
+        except ConnectionRefusedError:
+            probe.append("被拒")
+        except OSError as e:
+            probe.append(repr(e))
+
+    prober = threading.Thread(target=connect_after_workers_stop_listening, daemon=True)
+    prober.start()
+    try:
+        code = _run(sup, until=lambda: len(_events(tmp_path, "ready")) == 2)
+    finally:
+        sock.close()
+    prober.join(10)
+    assert code == 0
+    assert probe == ["被拒"]
+
+
 def test_only_the_first_shutdown_signal_counts(tmp_path, logs):
     """
     关服信号只认第一个：关服途中再来的不打断它（不会像原来 Sanic 那样第二个信号就强杀），worker 照常关完服
