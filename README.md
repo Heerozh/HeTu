@@ -150,12 +150,11 @@ Run with `-n 1 -p 1`: single-threaded, synchronous and blocking, so it mainly me
 
 ### About Python performance
 
-Python's speed is not a problem. CPUs now cost far less than developers, and Python
-does better on fast iteration, data analysis and the AI ecosystem.
+Python's speed is not a problem. With an async, distributed architecture, throughput
+and RTT depend on the Redis backend, not on the language.
 
-The Python community is very active, almost like a human-powered JIT. With an async,
-distributed architecture, throughput and RTT depend on the Redis backend, not on the
-language.
+In the AI era, Python's strengths count for even more: fast iteration, data analysis
+and a native AI ecosystem.
 
 ### Native computation
 
