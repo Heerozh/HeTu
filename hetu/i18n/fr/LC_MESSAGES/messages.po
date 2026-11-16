@@ -7,15 +7,15 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-16 05:50+0000\n"
+"POT-Creation-Date: 2026-11-16 05:57+0000\n"
 "PO-Revision-Date: 2026-03-20 21:43+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: fr <LL@li.org>\n"
 "Language: fr\n"
+"Language-Team: fr <LL@li.org>\n"
+"Plural-Forms: nplurals=2; plural=(n > 1);\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=2; plural=(n > 1);\n"
 "Generated-By: Babel 2.18.0\n"
 
 #: hetu/headless.py:83
@@ -26,8 +26,8 @@ msgid ""
 msgstr ""
 "La table Component {comp_name} n'existe pas dans l'instance {instance} : "
 "démarrez d'abord le serveur HeTu pour créer les tables (ou vérifiez que "
-"l'instance / le nom du Component / la configuration Backend pointent vers la"
-" même base de données)."
+"l'instance / le nom du Component / la configuration Backend pointent vers"
+" la même base de données)."
 
 #: hetu/headless.py:102
 #, python-brace-format
@@ -38,11 +38,10 @@ msgstr ""
 
 #: hetu/headless.py:119
 #, python-brace-format
-msgid ""
-"组件 {comp_name} 的 cluster_id 已由 {old_id} 变为 {new_id}（服务器已迁簇），请重新 connect"
+msgid "组件 {comp_name} 的 cluster_id 已由 {old_id} 变为 {new_id}（服务器已迁簇），请重新 connect"
 msgstr ""
-"Le cluster_id du Component {comp_name} est passé de {old_id} à {new_id} (le "
-"serveur a migré le cluster) ; veuillez relancer connect."
+"Le cluster_id du Component {comp_name} est passé de {old_id} à {new_id} "
+"(le serveur a migré le cluster) ; veuillez relancer connect."
 
 #: hetu/headless.py:248
 #, python-brace-format
@@ -50,8 +49,8 @@ msgid ""
 "组件 {name} 未在本事务声明（或不是 connect 时认下的那个类），请在 client.session(...) "
 "里加上；已声明：{declared}"
 msgstr ""
-"Le Component {name} n'est pas déclaré dans cette transaction (ou n'est pas "
-"la classe reconnue au moment du connect) ; ajoutez-le dans "
+"Le Component {name} n'est pas déclaré dans cette transaction (ou n'est "
+"pas la classe reconnue au moment du connect) ; ajoutez-le dans "
 "client.session(...). Déclarés : {declared}"
 
 #: hetu/headless.py:295 hetu/headless.py:316
@@ -67,15 +66,14 @@ msgstr "components ne peut pas être vide : déclarez au moins un Component."
 #, python-brace-format
 msgid "⚠️ [🧩Headless] 组件 {name} 的默认值与服务器不同（只影响本进程 new_row 的填充值）：{diff}"
 msgstr ""
-"⚠️ [🧩Headless] La valeur par défaut du Component {name} diffère de celle du "
-"serveur (cela n'affecte que la valeur de remplissage de new_row dans ce "
-"processus) : {diff}"
+"⚠️ [🧩Headless] La valeur par défaut du Component {name} diffère de celle "
+"du serveur (cela n'affecte que la valeur de remplissage de new_row dans "
+"ce processus) : {diff}"
 
 #: hetu/headless.py:337
 #, python-brace-format
 msgid "[🧩Headless] 实例 {instance} 组件表 {name} → cluster {cid}"
-msgstr ""
-"[🧩Headless] Instance {instance}, table Component {name} → cluster {cid}"
+msgstr "[🧩Headless] Instance {instance}, table Component {name} → cluster {cid}"
 
 #: hetu/headless.py:370
 #, python-brace-format
@@ -86,12 +84,11 @@ msgstr ""
 
 #: hetu/headless.py:376
 #, python-brace-format
-msgid ""
-"组件 {name} 是按名字声明的，其类来自服务器 meta，请用 client.table('{name}').comp_cls 而不是本地类"
+msgid "组件 {name} 是按名字声明的，其类来自服务器 meta，请用 client.table('{name}').comp_cls 而不是本地类"
 msgstr ""
-"Le Component {name} est déclaré par nom ; sa classe provient des métadonnées"
-" du serveur. Utilisez client.table('{name}').comp_cls au lieu de la classe "
-"locale."
+"Le Component {name} est déclaré par nom ; sa classe provient des "
+"métadonnées du serveur. Utilisez client.table('{name}').comp_cls au lieu "
+"de la classe locale."
 
 #: hetu/headless.py:394
 msgid "session() 至少要声明一个组件"
@@ -101,16 +98,16 @@ msgstr "session() doit déclarer au moins un Component."
 #, python-brace-format
 msgid "同一事务的组件必须同簇（簇由服务器 System 的引用关系决定，跨簇请拆成两个事务）：{detail}"
 msgstr ""
-"Les Components d'une même transaction doivent appartenir au même cluster (le"
-" cluster est déterminé par les relations de référence entre les System côté "
-"serveur ; en cas de clusters différents, scindez en deux transactions) : "
-"{detail}"
+"Les Components d'une même transaction doivent appartenir au même cluster "
+"(le cluster est déterminé par les relations de référence entre les System"
+" côté serveur ; en cas de clusters différents, scindez en deux "
+"transactions) : {detail}"
 
 #: hetu/local.py:86
 msgid "库里没有这张表：先用当前代码启动一次服务器（会建新表）"
 msgstr ""
-"Cette table n'existe pas dans la base : démarrez d'abord le serveur une fois"
-" avec le code actuel (une nouvelle table sera créée)"
+"Cette table n'existe pas dans la base : démarrez d'abord le serveur une "
+"fois avec le code actuel (une nouvelle table sera créée)"
 
 #: hetu/local.py:89
 msgid "本地代码与库里的表结构 / 簇不一致：先 hetu upgrade，或用与线上一致的代码版本运行"
@@ -127,12 +124,13 @@ msgstr "L'état de la table du Component {comp_name} est {status}, {hint}"
 #: hetu/local.py:117
 #, python-brace-format
 msgid ""
-"System {system} 是 USER 权限：生产里只有已登录连接能调，请指定玩家 id（hetu call 用 --as <uid>，代码里传 "
-"caller=）"
+"System {system} 是 USER 权限：生产里只有已登录连接能调，请指定玩家 id（hetu call 用 --as "
+"<uid>，代码里传 caller=）"
 msgstr ""
-"Le System {system} possède la permission USER : en production, seules les "
-"connexions authentifiées peuvent l'appeler, veuillez spécifier l'id du "
-"joueur (avec hetu call, utilisez --as <uid> ; dans le code, passez caller=)"
+"Le System {system} possède la permission USER : en production, seules les"
+" connexions authentifiées peuvent l'appeler, veuillez spécifier l'id du "
+"joueur (avec hetu call, utilisez --as <uid> ; dans le code, passez "
+"caller=)"
 
 #: hetu/cli/build.py:46 hetu/local.py:128
 #, python-brace-format
@@ -142,8 +140,7 @@ msgstr "Impossible de charger le fichier d'application {app_file}"
 #: hetu/local.py:376
 #, python-brace-format
 msgid "找不到 Component：{comp}（是否在 components 中引用过？）"
-msgstr ""
-"Component introuvable : {comp} (a-t-il été référencé dans components ?)"
+msgstr "Component introuvable : {comp} (a-t-il été référencé dans components ?)"
 
 #: hetu/local.py:397
 #, python-brace-format
@@ -158,14 +155,16 @@ msgstr "Le Component {comp} n'a pas de champ nommé {name}"
 #: hetu/local.py:448
 msgid "_version 由引擎管理，insert 时不能设置"
 msgstr ""
-"_version est géré par le moteur et ne peut pas être défini lors de l'insert"
+"_version est géré par le moteur et ne peut pas être défini lors de "
+"l'insert"
 
 #: hetu/local.py:509
 #, python-brace-format
 msgid "库文件不存在：{path}（服务器还没在这个库上启动过，或配置路径不对）"
 msgstr ""
-"Le fichier de base de données n'existe pas : {path} (le serveur n'a jamais "
-"démarré sur cette base, ou le chemin de configuration est incorrect)"
+"Le fichier de base de données n'existe pas : {path} (le serveur n'a "
+"jamais démarré sur cette base, ou le chemin de configuration est "
+"incorrect)"
 
 #: hetu/cli/base.py:238 hetu/local.py:562
 #, python-brace-format
@@ -183,7 +182,8 @@ msgstr "Backend {backend} introuvable"
 #, python-brace-format
 msgid "⚠️  组件 {comp_name} 的表结构需要迁移Schema。"
 msgstr ""
-"⚠️  Le schéma de la table du composant {comp_name} nécessite une migration."
+"⚠️  Le schéma de la table du composant {comp_name} nécessite une "
+"migration."
 
 #: hetu/manager.py:111
 #, python-brace-format
@@ -201,14 +201,13 @@ msgstr "L'uri de define_route doit commencer par '/', le vôtre : {uri}"
 #, python-brace-format
 msgid "define_route的uri不能占用HeTu保留的'{prefix}'路径（客户端SDK的WebSocket入口），你的：{uri}"
 msgstr ""
-"L'uri de define_route ne peut pas utiliser le chemin '{prefix}' réservé par "
-"HeTu (point d'entrée WebSocket du SDK client), le vôtre : {uri}"
+"L'uri de define_route ne peut pas utiliser le chemin '{prefix}' réservé "
+"par HeTu (point d'entrée WebSocket du SDK client), le vôtre : {uri}"
 
 #: hetu/webext.py:112
 #, python-brace-format
 msgid "define_route的methods不能为空，你的uri：{uri}"
-msgstr ""
-"Les methods de define_route ne peuvent pas être vides, votre uri : {uri}"
+msgstr "Les methods de define_route ne peuvent pas être vides, votre uri : {uri}"
 
 #: hetu/cli/__init__.py:74
 msgid "河图数据库"
@@ -234,8 +233,8 @@ msgid ""
 "Redis"
 msgstr ""
 "Le Backend SQL a été supprimé, PostgreSQL / MariaDB ne sont plus pris en "
-"charge : '{scheme}'. Pour le développement, utilisez sqlite:///<chemin du "
-"fichier de base de données> ; en production, utilisez Redis"
+"charge : '{scheme}'. Pour le développement, utilisez sqlite:///<chemin du"
+" fichier de base de données> ; en production, utilisez Redis"
 
 #: hetu/cli/base.py:77
 #, python-brace-format
@@ -248,9 +247,9 @@ msgstr ""
 #, python-brace-format
 msgid "⚠️ SQLite 库文件的相对路径现在按配置文件所在目录解析：{new}。旧位置（相对当前目录）{old} 有库文件，如需沿用请把它挪过去"
 msgstr ""
-"⚠️ Les chemins relatifs du fichier de base SQLite sont désormais résolus par"
-" rapport au répertoire du fichier de configuration : {new}. Un fichier de "
-"base de données existe à l'ancien emplacement (relatif au répertoire "
+"⚠️ Les chemins relatifs du fichier de base SQLite sont désormais résolus "
+"par rapport au répertoire du fichier de configuration : {new}. Un fichier"
+" de base de données existe à l'ancien emplacement (relatif au répertoire "
 "courant) {old} ; pour le conserver, déplacez-le"
 
 #: hetu/cli/base.py:125
@@ -267,12 +266,13 @@ msgstr "Le fichier de configuration {path} n'est pas un mapping"
 #, python-brace-format
 msgid "命令行参数模式缺少：{missing}（或改用 --config）"
 msgstr ""
-"Arguments de ligne de commande manquants : {missing} (ou utilisez --config)"
+"Arguments de ligne de commande manquants : {missing} (ou utilisez "
+"--config)"
 
 #: hetu/cli/base.py:223
 msgid ""
-"找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；也可以用 --app-file / "
-"--namespace / --instance / --db 直接给出"
+"找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；也可以用 --app-file"
+" / --namespace / --instance / --db 直接给出"
 msgstr ""
 "Configuration introuvable : indiquez-la avec --config, définissez la "
 "variable d'environnement HETU_CONFIG, ou placez config.yml dans le "
@@ -290,9 +290,9 @@ msgstr "configuration"
 #: hetu/cli/base.py:251 hetu/cli/nodes.py:101
 msgid "配置文件；不给时依次找环境变量 HETU_CONFIG、当前目录的 config.yml"
 msgstr ""
-"Fichier de configuration ; s'il n'est pas fourni, recherche successive de la"
-" variable d'environnement HETU_CONFIG, puis de config.yml dans le répertoire"
-" courant"
+"Fichier de configuration ; s'il n'est pas fourni, recherche successive de"
+" la variable d'environnement HETU_CONFIG, puis de config.yml dans le "
+"répertoire courant"
 
 #: hetu/cli/base.py:256
 msgid "实例名，默认取配置里 INSTANCES 的第一个"
@@ -335,12 +335,11 @@ msgstr "✅ Code C# généré vers {output}"
 
 #: hetu/cli/call.py:85
 #, python-brace-format
-msgid ""
-"第 {n} 个参数看起来是 JSON 但解析失败（PowerShell 可能吃掉了引号），改用 --args-file 或 stdin：{raw}"
+msgid "第 {n} 个参数看起来是 JSON 但解析失败（PowerShell 可能吃掉了引号），改用 --args-file 或 stdin：{raw}"
 msgstr ""
-"Le paramètre n° {n} semble être du JSON mais l'analyse a échoué (PowerShell "
-"a peut-être avalé les guillemets) ; utilisez plutôt --args-file ou stdin : "
-"{raw}"
+"Le paramètre n° {n} semble être du JSON mais l'analyse a échoué "
+"(PowerShell a peut-être avalé les guillemets) ; utilisez plutôt --args-"
+"file ou stdin : {raw}"
 
 #: hetu/cli/call.py:104
 #, python-brace-format
@@ -380,20 +379,20 @@ msgstr ""
 #: hetu/cli/call.py:293
 #, python-brace-format
 msgid ""
-"System {name} 超过 {timeout} 秒没结束，已中止。若超时发生在提交途中，提交可能已经生效：writes 里 committed 为"
-" unknown 的那次，请直接查数据确认"
+"System {name} 超过 {timeout} 秒没结束，已中止。若超时发生在提交途中，提交可能已经生效：writes 里 "
+"committed 为 unknown 的那次，请直接查数据确认"
 msgstr ""
 "Le System {name} n'a pas terminé après {timeout} secondes ; il a été "
-"interrompu. Si le délai a expiré pendant la soumission, celle-ci a peut-être"
-" déjà pris effet : pour l'entrée de writes dont committed vaut unknown, "
-"vérifiez directement les données"
+"interrompu. Si le délai a expiré pendant la soumission, celle-ci a peut-"
+"être déjà pris effet : pour l'entrée de writes dont committed vaut "
+"unknown, vérifiez directement les données"
 
 #: hetu/cli/call.py:303
 #, python-brace-format
 msgid "System 留下 {n} 个后台任务，CLI 退出时已取消（在服务器里它们会继续跑）"
 msgstr ""
-"Le System a laissé {n} tâches en arrière-plan, annulées à la sortie du CLI "
-"(sur le serveur, elles continueraient de tourner)"
+"Le System a laissé {n} tâches en arrière-plan, annulées à la sortie du "
+"CLI (sur le serveur, elles continueraient de tourner)"
 
 #: hetu/cli/call.py:333
 msgid "--args-file 与位置参数不能同时给"
@@ -413,8 +412,8 @@ msgstr ""
 #, python-brace-format
 msgid "System {name} 读了 ctx.caller，而当前 caller 是推断出来的 0；要以玩家身份跑请用 --as <uid>"
 msgstr ""
-"Le System {name} a lu ctx.caller, mais le caller actuel est 0, une valeur "
-"déduite ; pour l'exécuter en tant que joueur, utilisez --as <uid>"
+"Le System {name} a lu ctx.caller, mais le caller actuel est 0, une valeur"
+" déduite ; pour l'exécuter en tant que joueur, utilisez --as <uid>"
 
 #: hetu/cli/call.py:441
 msgid ""
@@ -422,16 +421,17 @@ msgid ""
 "走同一条提交路径，在线客户端照常收到推送"
 msgstr ""
 "Appeler un System depuis ce processus en se connectant directement au "
-"Backend (sans passer par le serveur) ; affiche une ligne de JSON sur stdout."
-" Pour le débogage : les écritures empruntent le même chemin de soumission "
-"que le System, et les clients en ligne reçoivent les notifications "
-"normalement"
+"Backend (sans passer par le serveur) ; affiche une ligne de JSON sur "
+"stdout. Pour le débogage : les écritures empruntent le même chemin de "
+"soumission que le System, et les clients en ligne reçoivent les "
+"notifications normalement"
 
 #: hetu/cli/call.py:449
 msgid "列出全部 System（参数、权限、引用的组件、文档第一行），不连数据库"
 msgstr ""
 "Lister tous les System (paramètres, permissions, Component référencés, "
-"première ligne de la documentation), sans se connecter à la base de données"
+"première ligne de la documentation), sans se connecter à la base de "
+"données"
 
 #: hetu/cli/call.py:451
 msgid "身份"
@@ -439,12 +439,12 @@ msgstr "Identité"
 
 #: hetu/cli/call.py:458
 msgid ""
-"以这个玩家 id 调用（ctx.caller）。USER 权限的 System 必须给；不给时按权限推断：ADMIN/GM/内部 System 用 "
-"admin，EVERYBODY 用 guest"
+"以这个玩家 id 调用（ctx.caller）。USER 权限的 System 必须给；不给时按权限推断：ADMIN/GM/内部 System 用"
+" admin，EVERYBODY 用 guest"
 msgstr ""
-"Appeler avec cet id de joueur (ctx.caller). Obligatoire pour les System de "
-"permission USER ; si omis, déduit selon la permission : admin pour les "
-"System ADMIN/GM/interne, guest pour EVERYBODY"
+"Appeler avec cet id de joueur (ctx.caller). Obligatoire pour les System "
+"de permission USER ; si omis, déduit selon la permission : admin pour les"
+" System ADMIN/GM/interne, guest pour EVERYBODY"
 
 #: hetu/cli/call.py:465
 msgid "ctx.group，如 gm / admin；给了 --as 时默认 guest"
@@ -455,20 +455,20 @@ msgstr ""
 #: hetu/cli/call.py:470
 msgid "ctx.user_data（登录时写进去的数据 CLI 不知道，需要时手动给）"
 msgstr ""
-"ctx.user_data (les données écrites à la connexion, que le CLI ne connaît pas"
-" ; à fournir manuellement si nécessaire)"
+"ctx.user_data (les données écrites à la connexion, que le CLI ne connaît "
+"pas ; à fournir manuellement si nécessaire)"
 
 #: hetu/cli/call.py:476
 msgid "从文件读参数（一个 JSON 数组），- 为 stdin；避开 PowerShell 的引号问题"
 msgstr ""
-"Lire les arguments depuis un fichier (un tableau JSON), - pour stdin ; évite"
-" les problèmes de guillemets de PowerShell"
+"Lire les arguments depuis un fichier (un tableau JSON), - pour stdin ; "
+"évite les problèmes de guillemets de PowerShell"
 
 #: hetu/cli/call.py:482
 msgid "调用锁 uuid（call_lock 的 System），同一 uuid 只执行一次"
 msgstr ""
-"uuid de verrou d'appel (System avec call_lock) ; un même uuid ne s'exécute "
-"qu'une fois"
+"uuid de verrou d'appel (System avec call_lock) ; un même uuid ne "
+"s'exécute qu'une fois"
 
 #: hetu/cli/call.py:487
 msgid "照常执行但不提交，输出它会写什么（写集）"
@@ -479,14 +479,13 @@ msgstr ""
 #: hetu/cli/call.py:494
 msgid "System 调用的超时秒数，默认 30，0 为不限"
 msgstr ""
-"Délai d'expiration en secondes pour l'appel du System, 30 par défaut, 0 pour"
-" illimité"
+"Délai d'expiration en secondes pour l'appel du System, 30 par défaut, 0 "
+"pour illimité"
 
 #: hetu/cli/call.py:501 hetu/cli/data.py:398 hetu/cli/nodes.py:118
 #: hetu/cli/shell.py:364
 msgid "stderr 上多打日志：-v 为 INFO，-vv 为 DEBUG"
-msgstr ""
-"Journalisation supplémentaire sur stderr : -v pour INFO, -vv pour DEBUG"
+msgstr "Journalisation supplémentaire sur stderr : -v pour INFO, -vv pour DEBUG"
 
 #: hetu/cli/call.py:503
 msgid "System 名"
@@ -504,12 +503,12 @@ msgstr "Le nom du System est requis (hetu call --list pour tout voir)"
 
 #: hetu/cli/console.py:66
 msgid ""
-"本配置禁止 hetu call / shell 写入（CLI_ALLOW_WRITE: false）：加 --dry-run 看它会写什么，或在配置里设"
-" CLI_ALLOW_WRITE: true"
+"本配置禁止 hetu call / shell 写入（CLI_ALLOW_WRITE: false）：加 --dry-run "
+"看它会写什么，或在配置里设 CLI_ALLOW_WRITE: true"
 msgstr ""
 "Cette configuration interdit l'écriture par hetu call / shell "
-"(CLI_ALLOW_WRITE: false) : ajoutez --dry-run pour voir ce qui serait écrit, "
-"ou définissez CLI_ALLOW_WRITE: true dans la configuration"
+"(CLI_ALLOW_WRITE: false) : ajoutez --dry-run pour voir ce qui serait "
+"écrit, ou définissez CLI_ALLOW_WRITE: true dans la configuration"
 
 #: hetu/cli/console.py:361
 #, python-brace-format
@@ -533,21 +532,20 @@ msgstr ""
 #: hetu/cli/console.py:625
 msgid "Worker ID 租约丢失（本进程卡住太久被别人接手），命令已中止"
 msgstr ""
-"Lease de Worker ID perdu (ce processus est resté bloqué trop longtemps et a "
-"été repris par un autre), commande interrompue"
+"Lease de Worker ID perdu (ce processus est resté bloqué trop longtemps et"
+" a été repris par un autre), commande interrompue"
 
 #: hetu/cli/console.py:648
 #, python-brace-format
 msgid "⚠️ 后台任务 {task} 退出时出错：{err}"
-msgstr ""
-"⚠️ Erreur lors de la sortie de la tâche en arrière-plan {task} : {err}"
+msgstr "⚠️ Erreur lors de la sortie de la tâche en arrière-plan {task} : {err}"
 
 #: hetu/cli/console.py:654
 #, python-brace-format
 msgid "⚠️ {n} 个后台任务 {timeout} 秒内没有响应取消，不再等待"
 msgstr ""
-"⚠️ {n} tâches en arrière-plan n'ont pas répondu à l'annulation en {timeout} "
-"secondes, arrêt de l'attente"
+"⚠️ {n} tâches en arrière-plan n'ont pas répondu à l'annulation en "
+"{timeout} secondes, arrêt de l'attente"
 
 #: hetu/cli/console.py:667
 #, python-brace-format
@@ -583,17 +581,17 @@ msgid ""
 "组件 {comp} 的 {field} 不是 id 或带索引的字段，不能查；可查的有：{fields}（括号里是复合索引的分组列，查询时要一并用 "
 "FIELD=VALUE 给出）"
 msgstr ""
-"Le champ {field} du Component {comp} n'est ni id ni un champ indexé, il ne "
-"peut pas être interrogé ; champs interrogeables : {fields} (entre "
-"parenthèses figurent les colonnes de regroupement des index composites, à "
-"fournir également avec FIELD=VALUE lors de la requête)"
+"Le champ {field} du Component {comp} n'est ni id ni un champ indexé, il "
+"ne peut pas être interrogé ; champs interrogeables : {fields} (entre "
+"parenthèses figurent les colonnes de regroupement des index composites, à"
+" fournir également avec FIELD=VALUE lors de la requête)"
 
 #: hetu/cli/data.py:140
 #, python-brace-format
 msgid "--index {index} 要同时用 {index}=VALUE 给出查询值"
 msgstr ""
-"--index {index} doit être accompagné de {index}=VALUE pour fournir la valeur"
-" de requête"
+"--index {index} doit être accompagné de {index}=VALUE pour fournir la "
+"valeur de requête"
 
 #: hetu/cli/data.py:157
 #, python-brace-format
@@ -601,10 +599,10 @@ msgid ""
 "查询条件 {keys} 对不上组件 {comp} "
 "的任何索引：要么只给一个带索引的字段，要么正好给出复合索引的本字段和全部分组列；可查的有：{fields}"
 msgstr ""
-"Les conditions de requête {keys} ne correspondent à aucun index du Component"
-" {comp} : fournissez soit un seul champ indexé, soit exactement le champ de "
-"l'index composite et toutes ses colonnes de regroupement ; champs "
-"interrogeables : {fields}"
+"Les conditions de requête {keys} ne correspondent à aucun index du "
+"Component {comp} : fournissez soit un seul champ indexé, soit exactement "
+"le champ de l'index composite et toutes ses colonnes de regroupement ; "
+"champs interrogeables : {fields}"
 
 #: hetu/cli/data.py:166
 #, python-brace-format
@@ -623,46 +621,44 @@ msgstr ""
 #: hetu/cli/data.py:186
 #, python-brace-format
 msgid "{index} 不是复合索引，多给了 {keys}"
-msgstr ""
-"{index} n'est pas un index composite ; valeurs en trop fournies : {keys}"
+msgstr "{index} n'est pas un index composite ; valeurs en trop fournies : {keys}"
 
 #: hetu/cli/data.py:390
 msgid "读 master（刚写完马上读时用）；默认读 servant"
 msgstr ""
-"Lire sur master (à utiliser lorsqu'on relit juste après une écriture) ; par "
-"défaut, lire sur servant"
+"Lire sur master (à utiliser lorsqu'on relit juste après une écriture) ; "
+"par défaut, lire sur servant"
 
 #: hetu/cli/data.py:392
 msgid "只输出这些列，逗号分隔"
 msgstr "N'afficher que ces colonnes, séparées par des virgules"
 
 #: hetu/cli/data.py:414
-msgid ""
-"按 id 或带索引的字段读一行组件数据（不做 RLS），stdout 输出一行 JSON；不加载 app，schema 取自库里的表 meta"
+msgid "按 id 或带索引的字段读一行组件数据（不做 RLS），stdout 输出一行 JSON；不加载 app，schema 取自库里的表 meta"
 msgstr ""
-"Lire une ligne de données de Component par id ou via un champ indexé (sans "
-"appliquer les RLS), afficher une ligne JSON sur stdout ; ne charge pas "
-"l'app, le schema provient de la table meta de la base"
+"Lire une ligne de données de Component par id ou via un champ indexé "
+"(sans appliquer les RLS), afficher une ligne JSON sur stdout ; ne charge "
+"pas l'app, le schema provient de la table meta de la base"
 
 #: hetu/cli/data.py:422
 msgid "列出组件、字段与索引（加载 app，不连数据库）"
 msgstr ""
-"Lister les Components, les champs et les index (charge l'app, sans connexion"
-" à la base de données)"
+"Lister les Components, les champs et les index (charge l'app, sans "
+"connexion à la base de données)"
 
 #: hetu/cli/data.py:427
 msgid "FIELD=VALUE 同时匹配了几个复合索引时，指定按哪个索引查（其余 FIELD=VALUE 是它的分组值）"
 msgstr ""
-"Lorsque FIELD=VALUE correspond simultanément à plusieurs index composites, "
-"indiquez selon quel index interroger (les autres FIELD=VALUE sont ses "
-"valeurs de regroupement)"
+"Lorsque FIELD=VALUE correspond simultanément à plusieurs index "
+"composites, indiquez selon quel index interroger (les autres FIELD=VALUE "
+"sont ses valeurs de regroupement)"
 
 #: hetu/cli/data.py:437
 msgid "一个带索引的字段，如 owner=1001；复合索引要同时给出全部分组列，如 name=abc zone=3"
 msgstr ""
 "Un champ indexé, par exemple owner=1001 ; pour un index composite, "
-"fournissez en même temps toutes les colonnes de regroupement, par exemple "
-"name=abc zone=3"
+"fournissez en même temps toutes les colonnes de regroupement, par exemple"
+" name=abc zone=3"
 
 #: hetu/cli/data.py:450
 msgid "要给组件名和 FIELD=VALUE（hetu get --list 查看组件）"
@@ -672,8 +668,8 @@ msgstr ""
 
 #: hetu/cli/data.py:469
 msgid ""
-"按带索引的字段读一个区间的组件数据（不做 RLS），stdout 输出一行 JSON；省略 RIGHT 即精确匹配 LEFT，( / [ 前缀表示开 /"
-" 闭区间"
+"按带索引的字段读一个区间的组件数据（不做 RLS），stdout 输出一行 JSON；省略 RIGHT 即精确匹配 LEFT，( / [ "
+"前缀表示开 / 闭区间"
 msgstr ""
 "Lire les données de Component sur une plage via un champ indexé (sans "
 "appliquer les RLS), afficher une ligne JSON sur stdout ; omettre RIGHT "
@@ -691,8 +687,8 @@ msgstr "Ordre décroissant"
 #: hetu/cli/data.py:486
 msgid "复合索引的分组值，每个分组列给一次，如 --group zone=3"
 msgstr ""
-"Valeur de regroupement d'un index composite, à fournir une fois par colonne "
-"de regroupement, par exemple --group zone=3"
+"Valeur de regroupement d'un index composite, à fournir une fois par "
+"colonne de regroupement, par exemple --group zone=3"
 
 #: hetu/cli/dns.py:37
 msgid ""
@@ -700,29 +696,30 @@ msgid ""
 "指向它）。只支持 host 网络"
 msgstr ""
 "Pont DNS sur la passerelle : répond aux enregistrements A à partir du "
-"registre de découverte des nœuds (hetu:nodes), pour le dynamic a de Caddy "
-"(resolvers pointant vers lui). Ne prend en charge que le réseau host"
+"registre de découverte des nœuds (hetu:nodes), pour le dynamic a de Caddy"
+" (resolvers pointant vers lui). Ne prend en charge que le réseau host"
 
 #: hetu/cli/dns.py:44
 msgid "只答这个项目（节点配置里的 NAMESPACE）的节点"
 msgstr ""
-"Ne répond que pour les nœuds de ce projet (NAMESPACE dans la configuration "
-"des nœuds)"
+"Ne répond que pour les nœuds de ce projet (NAMESPACE dans la "
+"configuration des nœuds)"
 
 #: hetu/cli/dns.py:50
 #, python-brace-format
 msgid "答哪个名字，和 Caddyfile 里 dynamic a 的 name 一致（默认 {default}）"
 msgstr ""
-"Nom auquel répondre, identique au name du dynamic a dans le Caddyfile (par "
-"défaut {default})"
+"Nom auquel répondre, identique au name du dynamic a dans le Caddyfile "
+"(par défaut {default})"
 
 #: hetu/cli/dns.py:58
 #, python-brace-format
 msgid ""
-"节点的端口，和节点的 LISTEN 端口、Caddyfile 里 dynamic a 的 port 一致（默认 {default}）：A 记录不带端口"
+"节点的端口，和节点的 LISTEN 端口、Caddyfile 里 dynamic a 的 port 一致（默认 {default}）：A "
+"记录不带端口"
 msgstr ""
-"Port des nœuds, identique au port LISTEN des nœuds et au port du dynamic a "
-"dans le Caddyfile (par défaut {default}) : les enregistrements A ne "
+"Port des nœuds, identique au port LISTEN des nœuds et au port du dynamic "
+"a dans le Caddyfile (par défaut {default}) : les enregistrements A ne "
 "comportent pas de port"
 
 #: hetu/cli/dns.py:65
@@ -734,16 +731,17 @@ msgstr "Où répondre aux requêtes DNS (UDP, par défaut {default})"
 #, python-brace-format
 msgid "Redis 地址，指向副本、用只读 ACL 用户；不给时读环境变量 {env}（推荐，口令不会出现在进程列表里）"
 msgstr ""
-"Adresse Redis, pointant vers un réplica, avec un utilisateur ACL en lecture "
-"seule ; si elle n'est pas fournie, lit la variable d'environnement {env} "
-"(recommandé, le mot de passe n'apparaît pas dans la liste des processus)"
+"Adresse Redis, pointant vers un réplica, avec un utilisateur ACL en "
+"lecture seule ; si elle n'est pas fournie, lit la variable "
+"d'environnement {env} (recommandé, le mot de passe n'apparaît pas dans la"
+" liste des processus)"
 
 #: hetu/cli/dns.py:81
 msgid "排查用：跑一遍启动检查，读一次注册表并探测，打印会答哪些地址、哪些不答、为什么，然后退出"
 msgstr ""
-"Pour le diagnostic : exécute les vérifications de démarrage, lit une fois le"
-" registre et effectue les sondes, affiche quelles adresses seront résolues, "
-"lesquelles ne le seront pas et pourquoi, puis quitte"
+"Pour le diagnostic : exécute les vérifications de démarrage, lit une fois"
+" le registre et effectue les sondes, affiche quelles adresses seront "
+"résolues, lesquelles ne le seront pas et pourquoi, puis quitte"
 
 #: hetu/cli/dns.py:89
 msgid "多打日志（DEBUG）"
@@ -773,8 +771,8 @@ msgstr "✅  {path} créé"
 #: hetu/cli/init.py:374
 msgid "ℹ️  pyproject.toml 已注册 build/dev 命令，跳过"
 msgstr ""
-"ℹ️  Les commandes build/dev sont déjà enregistrées dans pyproject.toml, on "
-"saute."
+"ℹ️  Les commandes build/dev sont déjà enregistrées dans pyproject.toml, "
+"on saute."
 
 #: hetu/cli/init.py:377
 msgid "⚠️  pyproject.toml 已有 build/dev 命令定义，跳过注册，请手动检查"
@@ -842,43 +840,41 @@ msgstr "# Démarrer uniquement le service"
 #: hetu/cli/init.py:536
 msgid "提示：默认使用 SQLite 调试数据库，文件会自动创建，无需额外服务。"
 msgstr ""
-"Astuce : la base de données SQLite par défaut est utilisée pour le débogage,"
-" le fichier sera créé automatiquement, aucun service supplémentaire "
-"nécessaire."
+"Astuce : la base de données SQLite par défaut est utilisée pour le "
+"débogage, le fichier sera créé automatiquement, aucun service "
+"supplémentaire nécessaire."
 
 #: hetu/cli/init.py:537
 msgid "      生产环境请在 config.yml 的 BACKENDS 中改用 Redis。"
 msgstr ""
-"      Pour la production, veuillez utiliser Redis à la place dans la section"
-" BACKENDS de config.yml."
+"      Pour la production, veuillez utiliser Redis à la place dans la "
+"section BACKENDS de config.yml."
 
 #: hetu/cli/init.py:540
 #, python-brace-format
 msgid "      uv run build 需在 .env.test 设置 {env} 指向客户端工程输出路径。"
 msgstr ""
-"      uv run build nécessite de définir {env} dans .env.test afin de pointer"
-" vers le chemin de sortie du projet client."
+"      uv run build nécessite de définir {env} dans .env.test afin de "
+"pointer vers le chemin de sortie du projet client."
 
 #: hetu/cli/init.py:544
 #, python-brace-format
 msgid "      已写入 .claude/skills/{name}/，供编码 AI 了解 HeTu 用法。"
 msgstr ""
-"      Écrit dans .claude/skills/{name}/, pour permettre à l'IA de codage de "
-"comprendre l'utilisation de HeTu."
+"      Écrit dans .claude/skills/{name}/, pour permettre à l'IA de codage "
+"de comprendre l'utilisation de HeTu."
 
 #: hetu/cli/migrate.py:37
-msgid ""
-"在数据库执行Schema升级脚本,如果没有则创建，如果无变更则跳过。同时还会进行临时表的清空。应该在CI/CD流程中，每次启动服务器前执行一次。"
+msgid "在数据库执行Schema升级脚本,如果没有则创建，如果无变更则跳过。同时还会进行临时表的清空。应该在CI/CD流程中，每次启动服务器前执行一次。"
 msgstr ""
-"Exécute les scripts de mise à niveau du schéma dans la base de données. Les "
-"crée s'ils n'existent pas, les ignore s'il n'y a aucun changement. Nettoie "
-"également les tables temporaires. Doit être exécuté une fois avant chaque "
-"démarrage du serveur dans le pipeline CI/CD."
+"Exécute les scripts de mise à niveau du schéma dans la base de données. "
+"Les crée s'ils n'existent pas, les ignore s'il n'y a aucun changement. "
+"Nettoie également les tables temporaires. Doit être exécuté une fois "
+"avant chaque démarrage du serveur dans le pipeline CI/CD."
 
 #: hetu/cli/migrate.py:44 hetu/cli/start.py:153
 msgid "后端数据库地址，默认 redis://127.0.0.1:6379/0"
-msgstr ""
-"Adresse de la base de données Backend, par défaut redis://127.0.0.1:6379/0"
+msgstr "Adresse de la base de données Backend, par défaut redis://127.0.0.1:6379/0"
 
 #: hetu/cli/migrate.py:48
 msgid "河图app的py文件，默认 app.py"
@@ -896,8 +892,8 @@ msgstr "Nom de l'instance, chaque instance est une réplique"
 msgid "通过yml配置文件读取后端数据库地址。不给且没用命令行参数时，依次找环境变量 HETU_CONFIG、当前目录的 config.yml"
 msgstr ""
 "Lit l'adresse de la base de données Backend depuis un fichier de "
-"configuration yml. Si elle n'est pas fournie et qu'aucun paramètre de ligne "
-"de commande n'est utilisé, recherche successivement la variable "
+"configuration yml. Si elle n'est pas fournie et qu'aucun paramètre de "
+"ligne de commande n'est utilisé, recherche successivement la variable "
 "d'environnement HETU_CONFIG, puis config.yml dans le répertoire courant"
 
 #: hetu/cli/migrate.py:72
@@ -914,9 +910,9 @@ msgstr ""
 msgid "跳过重建索引。默认每次升级都按行数据重建持久组件的索引、修掉索引残留，数据量大时较慢"
 msgstr ""
 "Ignore la reconstruction des index. Par défaut, chaque mise à niveau "
-"reconstruit ligne par ligne les index des Component persistants et corrige "
-"les résidus d'index ; cela est plus lent lorsque le volume de données est "
-"important"
+"reconstruit ligne par ligne les index des Component persistants et "
+"corrige les résidus d'index ; cela est plus lent lorsque le volume de "
+"données est important"
 
 #: hetu/cli/migrate.py:121
 #, python-brace-format
@@ -926,27 +922,27 @@ msgid ""
 "秒）后再试。"
 msgstr ""
 "❌ Des serveurs sont encore en cours d'exécution (détenteurs d'un bail de "
-"Worker ID : {ids}). Veuillez d'abord arrêter le serveur avant de mettre à "
-"niveau : exécuter la migration, le nettoyage des tables volatiles ou la "
-"reconstruction des index pendant que le serveur tourne corrompt les données."
-" Si le serveur s'est arrêté anormalement, attendez l'expiration du bail (au "
-"plus {ttl} secondes) puis réessayez."
+"Worker ID : {ids}). Veuillez d'abord arrêter le serveur avant de mettre à"
+" niveau : exécuter la migration, le nettoyage des tables volatiles ou la "
+"reconstruction des index pendant que le serveur tourne corrompt les "
+"données. Si le serveur s'est arrêté anormalement, attendez l'expiration "
+"du bail (au plus {ttl} secondes) puis réessayez."
 
 #: hetu/cli/migrate.py:129
 #, python-brace-format
 msgid "   其中 {ids} 是 hetu call / shell 进程，等它们结束即可（异常退出的最多 {ttl} 秒过期）。"
 msgstr ""
 "   Parmi eux, {ids} sont des processus hetu call / shell ; il suffit "
-"d'attendre qu'ils se terminent (en cas d'arrêt anormal, expiration au plus "
-"{ttl} secondes)."
+"d'attendre qu'ils se terminent (en cas d'arrêt anormal, expiration au "
+"plus {ttl} secondes)."
 
 #: hetu/cli/migrate.py:147
 msgid "⚠️  升级数据库表结构可能会导致数据丢失，请确保已备份数据。确认继续请输 y ，取消请输其他键然后回车："
 msgstr ""
-"⚠️  La mise à niveau de la structure des tables de la base de données peut "
-"entraîner une perte de données. Assurez-vous d'avoir sauvegardé vos données."
-" Pour confirmer et continuer, tapez y, pour annuler, tapez toute autre "
-"touche puis Entrée :"
+"⚠️  La mise à niveau de la structure des tables de la base de données "
+"peut entraîner une perte de données. Assurez-vous d'avoir sauvegardé vos "
+"données. Pour confirmer et continuer, tapez y, pour annuler, tapez toute "
+"autre touche puis Entrée :"
 
 #: hetu/cli/migrate.py:152 hetu/cli/migrate.py:179
 msgid "❌  升级迁移已取消。"
@@ -956,15 +952,15 @@ msgstr "❌  La migration de mise à niveau a été annulée."
 msgid "❗ Component有数据删除或类型变更，请修改自动生成的迁移脚本，手动处理这些属性。或使用--drop-data参数直接丢弃这些属性。"
 msgstr ""
 "❗ Des données de Component ont été supprimées ou leur type a changé. "
-"Veuillez modifier le script de migration généré automatiquement pour traiter"
-" manuellement ces attributs. Ou utilisez le paramètre --drop-data pour "
-"supprimer directement ces attributs."
+"Veuillez modifier le script de migration généré automatiquement pour "
+"traiter manuellement ces attributs. Ou utilisez le paramètre --drop-data "
+"pour supprimer directement ces attributs."
 
 #: hetu/cli/migrate.py:176
 msgid "⚠️  确认强制迁移请输 y ，取消请输其他键然后回车："
 msgstr ""
-"⚠️  Pour confirmer la migration forcée, tapez y, pour annuler, tapez toute "
-"autre touche puis Entrée :"
+"⚠️  Pour confirmer la migration forcée, tapez y, pour annuler, tapez "
+"toute autre touche puis Entrée :"
 
 #: hetu/cli/migrate.py:183
 #, python-brace-format
@@ -986,18 +982,16 @@ msgstr "🔧 Reconstruction des index du serveur {instance_name} en cours..."
 #: hetu/cli/migrate.py:206
 #, python-brace-format
 msgid "✅  {instance_name} 服升级迁移完成！"
-msgstr ""
-"✅  Migration de mise à niveau terminée pour le serveur {instance_name} !"
+msgstr "✅  Migration de mise à niveau terminée pour le serveur {instance_name} !"
 
 #: hetu/cli/migrate.py:210
 msgid "🎉  恭喜！所有数据库表结构均已升级完成！"
 msgstr ""
-"🎉  Félicitations ! Toutes les structures de table de la base de données ont "
-"été mises à niveau !"
+"🎉  Félicitations ! Toutes les structures de table de la base de données "
+"ont été mises à niveau !"
 
 #: hetu/cli/nodes.py:41
-msgid ""
-"找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；也可以用 --db 直接给出地址"
+msgid "找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；也可以用 --db 直接给出地址"
 msgstr ""
 "Configuration introuvable : spécifiez-la avec --config, ou définissez la "
 "variable d'environnement HETU_CONFIG, ou placez un config.yml dans le "
@@ -1007,22 +1001,23 @@ msgstr ""
 #: hetu/cli/nodes.py:50
 msgid "配置里没有 BACKENDS：用 --config 指定配置文件，或者用 --db 给出地址"
 msgstr ""
-"Aucun BACKENDS dans la configuration : spécifiez le fichier de configuration"
-" avec --config, ou donnez l'adresse avec --db"
+"Aucun BACKENDS dans la configuration : spécifiez le fichier de "
+"configuration avec --config, ou donnez l'adresse avec --db"
 
 #: hetu/cli/nodes.py:57
 #, python-brace-format
 msgid "节点发现的注册表在 Redis 后端里：默认后端（配置里的第一个）{name} 的 type 是 {kind}"
 msgstr ""
-"Le registre de découverte de nœuds se trouve dans le Backend Redis : le type"
-" du Backend par défaut (le premier de la configuration) {name} est {kind}"
+"Le registre de découverte de nœuds se trouve dans le Backend Redis : le "
+"type du Backend par défaut (le premier de la configuration) {name} est "
+"{kind}"
 
 #: hetu/cli/nodes.py:93
 msgid "看节点发现的注册表（hetu:nodes）：各节点的 worker 数、连接数、状态，过期的登记，stdout 输出一行 JSON"
 msgstr ""
-"Affiche le registre de découverte de nœuds (hetu:nodes) : nombre de workers,"
-" nombre de connexions et état de chaque nœud, enregistrements expirés, et "
-"écrit une ligne de JSON sur stdout"
+"Affiche le registre de découverte de nœuds (hetu:nodes) : nombre de "
+"workers, nombre de connexions et état de chaque nœud, enregistrements "
+"expirés, et écrit une ligne de JSON sur stdout"
 
 #: hetu/cli/nodes.py:111
 msgid "读 master；默认读 servant"
@@ -1031,8 +1026,8 @@ msgstr "Lit master ; lit servant par défaut"
 #: hetu/cli/shell.py:70
 msgid "call 留给以后的 Endpoint 路径（与 Sandbox.call 同义），跑 System 请用 call_system"
 msgstr ""
-"call est réservé aux futurs chemins d'Endpoint (synonyme de Sandbox.call) ; "
-"pour exécuter un System, utilisez call_system"
+"call est réservé aux futurs chemins d'Endpoint (synonyme de Sandbox.call)"
+" ; pour exécuter un System, utilisez call_system"
 
 #: hetu/cli/shell.py:189
 msgid "KeyboardInterrupt（Ctrl+D 退出 shell）"
@@ -1040,31 +1035,31 @@ msgstr "KeyboardInterrupt (Ctrl+D pour quitter le shell)"
 
 #: hetu/cli/shell.py:229
 msgid ""
-"HeTu shell：预置 app / client / call_system / get / must_get / insert / upsert "
-"/ show，range 用 app.range；支持顶层 await，Ctrl+D 退出"
+"HeTu shell：预置 app / client / call_system / get / must_get / insert / "
+"upsert / show，range 用 app.range；支持顶层 await，Ctrl+D 退出"
 msgstr ""
-"Shell hetu : app / client / call_system / get / must_get / insert / upsert /"
-" show sont préchargés, range s'utilise via app.range ; await au niveau "
-"supérieur pris en charge, Ctrl+D pour quitter"
+"Shell hetu : app / client / call_system / get / must_get / insert / "
+"upsert / show sont préchargés, range s'utilise via app.range ; await au "
+"niveau supérieur pris en charge, Ctrl+D pour quitter"
 
 #: hetu/cli/shell.py:270
 msgid "没有要执行的代码：用 -c CODE、脚本文件，或从 stdin 传入；在终端里直接运行 hetu shell 进交互模式"
 msgstr ""
-"Aucun code à exécuter : utilisez -c CODE, un fichier de script, ou passez-le"
-" via stdin ; dans un terminal, lancez directement hetu shell pour passer en "
-"mode interactif"
+"Aucun code à exécuter : utilisez -c CODE, un fichier de script, ou "
+"passez-le via stdin ; dans un terminal, lancez directement hetu shell "
+"pour passer en mode interactif"
 
 #: hetu/cli/shell.py:318
 #, python-brace-format
 msgid "⚠️ shell 退出时取消了 {n} 个还在跑的后台任务"
 msgstr ""
-"⚠️ {n} tâches d'arrière-plan encore en cours ont été annulées à la fermeture"
-" du shell"
+"⚠️ {n} tâches d'arrière-plan encore en cours ont été annulées à la "
+"fermeture du shell"
 
 #: hetu/cli/shell.py:348
 msgid ""
-"进程内连上后端的 Python shell：预置 call_system / get / must_get / insert / upsert / "
-"show 与 app.range，支持顶层 await"
+"进程内连上后端的 Python shell：预置 call_system / get / must_get / insert / upsert /"
+" show 与 app.range，支持顶层 await"
 msgstr ""
 "Shell Python connecté au Backend dans le processus : call_system / get / "
 "must_get / insert / upsert / show et app.range sont préchargés, await au "
@@ -1081,8 +1076,8 @@ msgstr "Exécuter sans effectuer aucun commit d'écriture"
 #: hetu/cli/shell.py:370
 msgid "要执行的脚本，- 为 stdin；都不给且 stdin 是终端时进交互模式"
 msgstr ""
-"Script à exécuter, - pour stdin ; si rien n'est fourni et que stdin est un "
-"terminal, passe en mode interactif"
+"Script à exécuter, - pour stdin ; si rien n'est fourni et que stdin est "
+"un terminal, passe en mode interactif"
 
 #: hetu/cli/start.py:58
 #, python-brace-format
@@ -1118,15 +1113,15 @@ msgstr "🔑 auth_key n'est pas défini ⚠️ n'importe quelle clé peut se con
 #: hetu/cli/start.py:96
 msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
 msgstr ""
-"⚠️⚠️⚠️ Mode Debug profond activé  ⚠️⚠️⚠️   Les coroutines Python sont 90% "
-"plus lentes dans ce mode"
+"⚠️⚠️⚠️ Mode Debug profond activé  ⚠️⚠️⚠️   Les coroutines Python sont 90%"
+" plus lentes dans ce mode"
 
 #: hetu/cli/start.py:105
 msgid "端口可能被系统 excludedportrange 禁用了，请用管理员执行：net stop winnatnet start winnat"
 msgstr ""
-"Le port peut être désactivé par la plage de ports exclus (excludedportrange)"
-" du système, veuillez exécuter en tant qu'administrateur : net stop "
-"winnatnet start winnat"
+"Le port peut être désactivé par la plage de ports exclus "
+"(excludedportrange) du système, veuillez exécuter en tant "
+"qu'administrateur : net stop winnatnet start winnat"
 
 #: hetu/cli/start.py:131
 msgid "启动河图服务"
@@ -1147,33 +1142,34 @@ msgstr "Port Websocket à écouter"
 #: hetu/cli/start.py:158
 msgid "工作进程数，可设为 CPU * 1.2，-1为按CPU核心数自动"
 msgstr ""
-"Nombre de processus de travail, peut être défini sur CPU * 1,2, -1 pour un "
-"réglage automatique selon le nombre de cœurs CPU."
+"Nombre de processus de travail, peut être défini sur CPU * 1,2, -1 pour "
+"un réglage automatique selon le nombre de cœurs CPU."
 
 #: hetu/cli/start.py:167
 #, python-format
-msgid ""
-"开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90%%。"
+msgid "开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90%%。"
 msgstr ""
 "Activer le mode debug, ce qui lance le rechargement à chaud du code et "
 "affiche plus d'informations de log. Si défini à 2, le mode debug est "
-"également activé pour le noyau du framework, ce qui active le mode Debug des"
-" coroutines Python, ralentissant de 90 %%."
+"également activé pour le noyau du framework, ce qui active le mode Debug "
+"des coroutines Python, ralentissant de 90 %%."
 
 #: hetu/cli/start.py:176
 msgid "默认crypto层的auth_key，用于握手签名校验。留空则不启用。"
 msgstr ""
 "Clé d'authentification par défaut de la couche crypto, utilisée pour la "
-"vérification de signature lors du handshake. Laisser vide pour désactiver."
+"vérification de signature lors du handshake. Laisser vide pour "
+"désactiver."
 
 #: hetu/cli/start.py:184
 msgid ""
-"配置文件模板见CONFIG_TEMPLATE.yml。不给且没用命令行参数时，依次找环境变量 HETU_CONFIG、当前目录的 config.yml"
+"配置文件模板见CONFIG_TEMPLATE.yml。不给且没用命令行参数时，依次找环境变量 HETU_CONFIG、当前目录的 "
+"config.yml"
 msgstr ""
-"Voir CONFIG_TEMPLATE.yml pour le modèle de fichier de configuration. S'il "
-"n'est pas fourni et qu'aucun paramètre de ligne de commande n'est utilisé, "
-"rechercher successivement la variable d'environnement HETU_CONFIG, puis le "
-"fichier config.yml du répertoire courant"
+"Voir CONFIG_TEMPLATE.yml pour le modèle de fichier de configuration. S'il"
+" n'est pas fourni et qu'aucun paramètre de ligne de commande n'est "
+"utilisé, rechercher successivement la variable d'environnement "
+"HETU_CONFIG, puis le fichier config.yml du répertoire courant"
 
 #: hetu/cli/start.py:246
 msgid "--app_file是必须参数，或者用--config"
@@ -1196,15 +1192,15 @@ msgstr "❌ Échec de l'écoute sur {listen} : {err}"
 #, python-brace-format
 msgid "❌ 服务器启动失败，已中止，未对外提供服务：{err}"
 msgstr ""
-"❌ Le démarrage du serveur a échoué, il a été interrompu, aucun service n'a "
-"été fourni à l'extérieur : {err}"
+"❌ Le démarrage du serveur a échoué, il a été interrompu, aucun service "
+"n'a été fourni à l'extérieur : {err}"
 
 #: hetu/common/helper.py:102
 #, python-brace-format
 msgid "环境变量 {name} 必须是非负整数，现在是 {value!r}"
 msgstr ""
-"La variable d'environnement {name} doit être un entier non négatif, or elle "
-"vaut actuellement {value!r}"
+"La variable d'environnement {name} doit être un entier non négatif, or "
+"elle vaut actuellement {value!r}"
 
 #: hetu/common/helper.py:158
 #, python-brace-format
@@ -1223,8 +1219,8 @@ msgid ""
 "ID。删掉这个文件、或者让它所在的目录可写，下次启动就会重新生成"
 msgstr ""
 "[❄️ID] Le fichier de token de nœud {path} est inutilisable ({err}) ; "
-"utilisation d'un token valable uniquement dans ce processus, impossible de "
-"se reconnecter au Worker ID d'origine après redémarrage. Supprimez ce "
+"utilisation d'un token valable uniquement dans ce processus, impossible "
+"de se reconnecter au Worker ID d'origine après redémarrage. Supprimez ce "
 "fichier, ou rendez son répertoire accessible en écriture, et il sera "
 "régénéré au prochain démarrage"
 
@@ -1234,7 +1230,9 @@ msgid ""
 "⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed}秒，事务冲突次数 {retry}，平均时间 {avg_time}秒\n"
 "{table}"
 msgstr ""
-"⚠️ [📞 Journal des opérations lentes] Le système {name} a mis {elapsed} secondes, conflits de transaction {retry}, temps moyen {avg_time} secondes\n"
+"⚠️ [📞 Journal des opérations lentes] Le système {name} a mis {elapsed} "
+"secondes, conflits de transaction {retry}, temps moyen {avg_time} "
+"secondes\n"
 "{table}"
 
 #: hetu/common/slowlog.py:99
@@ -1267,11 +1265,11 @@ msgid ""
 "[❄️ID] Worker ID {worker_id} 的租约已超出安全期 {overdue:.1f} "
 "秒，拒绝发号以防产生重复ID。通常意味着本进程长时间卡住或后端连不上，Worker 会在下一次续约时重启"
 msgstr ""
-"[❄️ID] Le bail du Worker ID {worker_id} a dépassé la période de sécurité de "
-"{overdue:.1f} secondes ; émission d'ID refusée afin d'éviter des doublons "
-"d'ID. Cela signifie généralement que ce processus est bloqué depuis "
-"longtemps ou que le Backend est injoignable, et le Worker redémarrera lors "
-"du prochain renouvellement."
+"[❄️ID] Le bail du Worker ID {worker_id} a dépassé la période de sécurité "
+"de {overdue:.1f} secondes ; émission d'ID refusée afin d'éviter des "
+"doublons d'ID. Cela signifie généralement que ce processus est bloqué "
+"depuis longtemps ou que le Backend est injoignable, et le Worker "
+"redémarrera lors du prochain renouvellement."
 
 #: hetu/common/snowflake_id.py:192
 msgid "SnowflakeID 未初始化，请先调用 init() 方法。"
@@ -1294,8 +1292,8 @@ msgstr ""
 #, python-brace-format, python-format
 msgid "环境变量 ${%s} 未设置且无默认值，如需空值请用 ${%s:-}"
 msgstr ""
-"La variable d'environnement ${%s} n'est pas définie et n'a pas de valeur par"
-" défaut ; pour une valeur vide, utilisez ${%s:-}"
+"La variable d'environnement ${%s} n'est pas définie et n'a pas de valeur "
+"par défaut ; pour une valeur vide, utilisez ${%s:-}"
 
 #: hetu/data/component.py:417
 #, python-brace-format
@@ -1312,45 +1310,45 @@ msgstr "Définition en double du composant"
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，属性名不能是Python关键字。"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut ne"
-" peut pas être un mot-clé Python."
+"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut"
+" ne peut pas être un mot-clé Python."
 
 #: hetu/data/component.py:640
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，属性名不能是C#关键字。"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut ne"
-" peut pas être un mot-clé C#."
+"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut"
+" ne peut pas être un mot-clé C#."
 
 #: hetu/data/component.py:648
 #, python-brace-format
-msgid ""
-"{cname}.{fname}属性定义出错，属性名不能和numpy行数据的属性同名，否则row.{fname}读到的是numpy的属性而不是字段值，请换个名字。"
+msgid "{cname}.{fname}属性定义出错，属性名不能和numpy行数据的属性同名，否则row.{fname}读到的是numpy的属性而不是字段值，请换个名字。"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut ne"
-" peut pas être identique à un attribut des données de ligne numpy, sinon "
-"row.{fname} lirait l'attribut numpy au lieu de la valeur du champ ; veuillez"
-" choisir un autre nom."
+"Erreur de définition de l'attribut {cname}.{fname} : le nom de l'attribut"
+" ne peut pas être identique à un attribut des données de ligne numpy, "
+"sinon row.{fname} lirait l'attribut numpy au lieu de la valeur du champ ;"
+" veuillez choisir un autre nom."
 
 #: hetu/data/component.py:654
 #, python-brace-format
 msgid "{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
 msgstr ""
-"Le dtype de l'attribut {cname}.{fname} ne peut pas avoir une longueur de 0. "
-"Pour le type str, veuillez utiliser la définition '<U8'."
+"Le dtype de l'attribut {cname}.{fname} ne peut pas avoir une longueur de "
+"0. Pour le type str, veuillez utiliser la définition '<U8'."
 
 #: hetu/data/component.py:657
 #, python-brace-format
 msgid "{cname}.{fname}属性的dtype不支持void类型"
 msgstr ""
-"Le dtype de l'attribut {cname}.{fname} ne prend pas en charge le type void."
+"Le dtype de l'attribut {cname}.{fname} ne prend pas en charge le type "
+"void."
 
 #: hetu/data/component.py:668
 #, python-brace-format
 msgid "⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，index不能设置为False。"
 msgstr ""
-"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} est défini comme unique, "
-"index ne peut pas être défini sur False."
+"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} est défini comme unique,"
+" index ne peut pas être défini sur False."
 
 #: hetu/data/component.py:678
 #, python-brace-format
@@ -1358,9 +1356,10 @@ msgid ""
 "⚠️ [🛠️Define] "
 "{cname}.{fname}属性设置了groupby（复合索引），point_sub用不上已忽略：按组订阅本来就只被本组的写入叫醒。"
 msgstr ""
-"⚠️ [🛠️Define] L'attribut {cname}.{fname} définit groupby (index composite) ;"
-" point_sub ne l'utilise pas et l'ignore : un abonnement par groupe n'est de "
-"toute façon réveillé que par les écritures de son propre groupe."
+"⚠️ [🛠️Define] L'attribut {cname}.{fname} définit groupby (index "
+"composite) ; point_sub ne l'utilise pas et l'ignore : un abonnement par "
+"groupe n'est de toute façon réveillé que par les écritures de son propre "
+"groupe."
 
 #: hetu/data/component.py:690
 #, python-brace-format
@@ -1368,38 +1367,38 @@ msgid ""
 "⚠️ [🛠️Define] "
 "{cname}.{fname}属性设置了commit_seq，point_sub用不上已忽略：号要到提交时才有，发不出值频道。"
 msgstr ""
-"⚠️ [🛠️Define] L'attribut {cname}.{fname} définit commit_seq ; point_sub ne "
-"l'utilise pas et l'ignore : le numéro n'existe qu'au moment du commit, "
-"impossible d'émettre le canal de valeur."
+"⚠️ [🛠️Define] L'attribut {cname}.{fname} définit commit_seq ; point_sub "
+"ne l'utilise pas et l'ignore : le numéro n'existe qu'au moment du commit,"
+" impossible d'émettre le canal de valeur."
 
 #: hetu/data/component.py:698
 #, python-brace-format
 msgid "⚠️ [🛠️Define] {cname}.{fname}属性设置了commit_seq时，index不能设置为False。"
 msgstr ""
-"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} définit commit_seq, index "
-"ne peut pas être défini sur False."
+"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} définit commit_seq, "
+"index ne peut pas être défini sur False."
 
 #: hetu/data/component.py:707
 #, python-brace-format
 msgid "⚠️ [🛠️Define] {cname}.{fname}属性设置为point_sub时，index不能设置为False。"
 msgstr ""
-"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} est défini comme point_sub,"
-" index ne peut pas être défini sur False."
+"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} est défini comme "
+"point_sub, index ne peut pas être défini sur False."
 
 #: hetu/data/component.py:716
 #, python-brace-format
 msgid "⚠️ [🛠️Define] {cname}.{fname}属性设置了groupby时，index不能设置为False。"
 msgstr ""
-"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} définit groupby, index ne "
-"peut pas être défini sur False."
+"⚠️ [🛠️Define] Lorsque l'attribut {cname}.{fname} définit groupby, index "
+"ne peut pas être défini sur False."
 
 #: hetu/data/component.py:725
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，hidden属性不能同时设置point_sub：客户端不能按hidden属性订阅。"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : l'attribut hidden ne "
-"peut pas être combiné avec point_sub : le client ne peut pas s'abonner sur "
-"un attribut hidden."
+"Erreur de définition de l'attribut {cname}.{fname} : l'attribut hidden ne"
+" peut pas être combiné avec point_sub : le client ne peut pas s'abonner "
+"sur un attribut hidden."
 
 #: hetu/data/component.py:731
 #, python-brace-format
@@ -1408,24 +1407,23 @@ msgid ""
 "struct实现，强类型struct不接受NULL/None值。"
 msgstr ""
 "La valeur par défaut de {cname}.{fname} ne peut pas être None. Tous les "
-"attributs doivent avoir une valeur par défaut, car l'interface de données "
-"est implémentée de manière unifiée avec des struct de type C ; un struct "
-"fortement typé n'accepte pas les valeurs NULL/None."
+"attributs doivent avoir une valeur par défaut, car l'interface de données"
+" est implémentée de manière unifiée avec des struct de type C ; un struct"
+" fortement typé n'accepte pas les valeurs NULL/None."
 
 #: hetu/data/component.py:742
 #, python-brace-format
-msgid ""
-"{cname}.{fname}的default值：{default_type}({default_value})和属性dtype({dtype})不匹配"
+msgid "{cname}.{fname}的default值：{default_type}({default_value})和属性dtype({dtype})不匹配"
 msgstr ""
-"La valeur par défaut de {cname}.{fname} : {default_type}({default_value}) ne"
-" correspond pas au dtype de l'attribut ({dtype})."
+"La valeur par défaut de {cname}.{fname} : {default_type}({default_value})"
+" ne correspond pas au dtype de l'attribut ({dtype})."
 
 #: hetu/data/component.py:756
 #, python-brace-format
 msgid "{cname}权限为OWNER时，不能设置rls_compare参数"
 msgstr ""
-"Lorsque la permission de {cname} est OWNER, le paramètre rls_compare ne peut"
-" pas être défini."
+"Lorsque la permission de {cname} est OWNER, le paramètre rls_compare ne "
+"peut pas être défini."
 
 #: hetu/data/component.py:759
 #, python-brace-format
@@ -1445,15 +1443,15 @@ msgstr ""
 #, python-brace-format
 msgid "{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
 msgstr ""
-"Lorsque la permission de {cname} est RLS, la logique de permission au niveau"
-" des lignes doit être définie via le paramètre rls_compare."
+"Lorsque la permission de {cname} est RLS, la logique de permission au "
+"niveau des lignes doit être définie via le paramètre rls_compare."
 
 #: hetu/data/component.py:775
 #, python-brace-format
 msgid "{cname}.rls_compare参数必须全部是字符串类型"
 msgstr ""
-"Le paramètre rls_compare de {cname} doit être entièrement de type chaîne de "
-"caractères."
+"Le paramètre rls_compare de {cname} doit être entièrement de type chaîne "
+"de caractères."
 
 #: hetu/data/component.py:778
 #, python-brace-format
@@ -1464,37 +1462,37 @@ msgstr "Le paramètre rls_compare de {cname} doit avoir exactement 3 éléments.
 #, python-brace-format
 msgid "{cname}权限为RLS: {rls_compare}，但operator模块没有{method}方法"
 msgstr ""
-"Permission de {cname} est RLS : {rls_compare}, mais le module operator n'a "
-"pas de méthode {method}."
+"Permission de {cname} est RLS : {rls_compare}, mais le module operator "
+"n'a pas de méthode {method}."
 
 #: hetu/data/component.py:786
 #, python-brace-format
 msgid "{cname}权限为RLS: {rls_compare}，但表没有定义{prop}属性"
 msgstr ""
-"Permission de {cname} est RLS : {rls_compare}, mais la table n'a pas défini "
-"l'attribut {prop}."
+"Permission de {cname} est RLS : {rls_compare}, mais la table n'a pas "
+"défini l'attribut {prop}."
 
 #: hetu/data/component.py:803
 #, python-brace-format
 msgid "{cname}.{fname}的groupby定义出错，分组列必须是本组件的字段名，不能是id、_version：{col!r}"
 msgstr ""
 "Erreur de définition de groupby pour {cname}.{fname} : les colonnes de "
-"regroupement doivent être des noms de champs de ce composant et ne peuvent "
-"pas être id ou _version : {col!r}"
+"regroupement doivent être des noms de champs de ce composant et ne "
+"peuvent pas être id ou _version : {col!r}"
 
 #: hetu/data/component.py:809
 #, python-brace-format
 msgid "{cname}.{fname}的groupby定义出错，不能按自己分组"
 msgstr ""
-"Erreur de définition de groupby pour {cname}.{fname} : le regroupement ne "
-"peut pas se faire sur l'attribut lui-même"
+"Erreur de définition de groupby pour {cname}.{fname} : le regroupement ne"
+" peut pas se faire sur l'attribut lui-même"
 
 #: hetu/data/component.py:816
 #, python-brace-format
 msgid "{cname}.{fname}的groupby定义出错，组件没有字段`{col}`"
 msgstr ""
-"Erreur de définition de groupby pour {cname}.{fname} : le composant n'a pas "
-"de champ `{col}`"
+"Erreur de définition de groupby pour {cname}.{fname} : le composant n'a "
+"pas de champ `{col}`"
 
 #: hetu/data/component.py:822
 #, python-brace-format
@@ -1511,15 +1509,15 @@ msgid ""
 msgstr ""
 "Erreur de définition de groupby pour {cname}.{fname} : la colonne de "
 "regroupement `{col}` ne peut être que de type entier, str ou bytes, pas "
-"{dtype} : un regroupement par égalité sur des flottants n'a pas de sens, et "
-"l'égalité de NaN ou de -0.0 n'est pas non plus définissable"
+"{dtype} : un regroupement par égalité sur des flottants n'a pas de sens, "
+"et l'égalité de NaN ou de -0.0 n'est pas non plus définissable"
 
 #: hetu/data/component.py:842
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，{dtype}类型不能建索引"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : le type {dtype} ne peut"
-" pas être indexé"
+"Erreur de définition de l'attribut {cname}.{fname} : le type {dtype} ne "
+"peut pas être indexé"
 
 #: hetu/data/component.py:855
 #, python-brace-format
@@ -1532,46 +1530,45 @@ msgstr ""
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，commit_seq的类型只能是np.int64，不能是{dtype}"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : le type de commit_seq "
-"ne peut être que np.int64, pas {dtype}"
+"Erreur de définition de l'attribut {cname}.{fname} : le type de "
+"commit_seq ne peut être que np.int64, pas {dtype}"
 
 #: hetu/data/component.py:875
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，commit_seq的default必须是0：0表示还没发号，号从1开始"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : la valeur default de "
-"commit_seq doit être 0 : 0 signifie qu'aucun numéro n'a encore été attribué,"
-" les numéros commencent à 1"
+"Erreur de définition de l'attribut {cname}.{fname} : la valeur default de"
+" commit_seq doit être 0 : 0 signifie qu'aucun numéro n'a encore été "
+"attribué, les numéros commencent à 1"
 
 #: hetu/data/component.py:884
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，commit_seq不能同时设置unique：组内唯一由发号保证"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : commit_seq ne peut pas "
-"être combiné avec unique : l'unicité au sein du groupe est garantie par "
-"l'attribution des numéros"
+"Erreur de définition de l'attribut {cname}.{fname} : commit_seq ne peut "
+"pas être combiné avec unique : l'unicité au sein du groupe est garantie "
+"par l'attribution des numéros"
 
 #: hetu/data/component.py:894
 #, python-brace-format
 msgid "{cname}.{other}的groupby定义出错，commit_seq字段`{fname}`不能当分组列：它的号要到提交时才有"
 msgstr ""
-"Erreur de définition de groupby pour {cname}.{other} : le champ commit_seq "
-"`{fname}` ne peut pas servir de colonne de regroupement : son numéro "
-"n'existe qu'au moment du commit"
+"Erreur de définition de groupby pour {cname}.{other} : le champ "
+"commit_seq `{fname}` ne peut pas servir de colonne de regroupement : son "
+"numéro n'existe qu'au moment du commit"
 
 #: hetu/data/component.py:912
 #, python-brace-format
 msgid "{cname}.{fname}属性定义出错，commit_seq字段不能用作行级权限的判定列"
 msgstr ""
-"Erreur de définition de l'attribut {cname}.{fname} : un champ commit_seq ne "
-"peut pas servir de colonne de décision pour les permissions au niveau des "
-"lignes"
+"Erreur de définition de l'attribut {cname}.{fname} : un champ commit_seq "
+"ne peut pas servir de colonne de décision pour les permissions au niveau "
+"des lignes"
 
 #: hetu/data/component.py:921
 #, python-brace-format
 msgid "组件名({name})是C#关键字，请refactor。"
-msgstr ""
-"Le nom du composant ({name}) est un mot-clé C#, veuillez le refactoriser."
+msgstr "Le nom du composant ({name}) est un mot-clé C#, veuillez le refactoriser."
 
 #: hetu/data/component.py:934
 #, python-brace-format
@@ -1580,11 +1577,10 @@ msgstr "{cls_name}.{name} n'est pas de type Property."
 
 #: hetu/data/component.py:944
 #, python-brace-format
-msgid ""
-"{cls_name}.{name}属性未定义type hint。请使用以下形式，{name}: type = property_field(...)"
+msgid "{cls_name}.{name}属性未定义type hint。请使用以下形式，{name}: type = property_field(...)"
 msgstr ""
-"L'attribut {cls_name}.{name} n'a pas de type hint défini. Veuillez utiliser "
-"la forme suivante : {name}: type = property_field(...)"
+"L'attribut {cls_name}.{name} n'a pas de type hint défini. Veuillez "
+"utiliser la forme suivante : {name}: type = property_field(...)"
 
 #: hetu/data/component.py:949
 #, python-brace-format
@@ -1602,8 +1598,8 @@ msgstr ""
 #, python-brace-format
 msgid "{cls_name}._version是保留的内置主键，外部不能重定义"
 msgstr ""
-"{cls_name}._version est une clé primaire intégrée réservée et ne peut pas "
-"être redéfinie en externe."
+"{cls_name}._version est une clé primaire intégrée réservée et ne peut pas"
+" être redéfinie en externe."
 
 #: hetu/data/component.py:969
 #, python-brace-format
@@ -1614,9 +1610,9 @@ msgstr "{cls_name} doit hériter de BaseComponent."
 #, python-brace-format
 msgid "{cls_name}权限定义出错，Component不能用GM权限：GM只用于System/Endpoint的调用权限"
 msgstr ""
-"Erreur de définition des permissions de {cls_name} : Component ne peut pas "
-"utiliser la permission GM : GM ne sert qu'aux permissions d'appel des "
-"System/Endpoint"
+"Erreur de définition des permissions de {cls_name} : Component ne peut "
+"pas utiliser la permission GM : GM ne sert qu'aux permissions d'appel des"
+" System/Endpoint"
 
 #: hetu/data/migration.py:39
 #, python-brace-format
@@ -1631,16 +1627,16 @@ msgid ""
 "  ➖ [💾MIGRATION][{comp_name}组件] 缺少迁移脚本，生成默认迁移脚本 "
 "{script_path}，请根据需要修改脚本内容后再执行迁移操作..."
 msgstr ""
-"  ➖ [💾MIGRATION][{comp_name} Component] Script de migration manquant, génère"
-" le script de migration par défaut {script_path}, veuillez modifier le "
-"contenu du script selon vos besoins avant d’exécuter la migration..."
+"  ➖ [💾MIGRATION][{comp_name} Component] Script de migration manquant, "
+"génère le script de migration par défaut {script_path}, veuillez modifier"
+" le contenu du script selon vos besoins avant d’exécuter la migration..."
 
 #: hetu/data/migration.py:212
 #, python-brace-format
 msgid "  ➖ [💾MIGRATION][{comp_name}组件] 执行upgrade迁移：{module}"
 msgstr ""
-"  ➖ [💾MIGRATION][{comp_name} Component] Exécution de la migration de mise à "
-"niveau : {module}"
+"  ➖ [💾MIGRATION][{comp_name} Component] Exécution de la migration de mise"
+" à niveau : {module}"
 
 #: hetu/data/migration.py:218
 #, python-brace-format
@@ -1653,16 +1649,16 @@ msgstr ""
 #, python-brace-format
 msgid ""
 "[💾MIGRATION][{comp_name}组件] "
-"数据已经按新定义搬完，但重建索引失败：{error}。在修好之前服务器会拒绝启动：请直接修改表里的数据（比如用 TableMaintenance 的 "
-"upsert_row 给重复的号重新编号），再跑一次 hetu upgrade，它会按当前定义直接重建索引"
+"数据已经按新定义搬完，但重建索引失败：{error}。在修好之前服务器会拒绝启动：请直接修改表里的数据（比如用 TableMaintenance "
+"的 upsert_row 给重复的号重新编号），再跑一次 hetu upgrade，它会按当前定义直接重建索引"
 msgstr ""
-"[💾MIGRATION][{comp_name} Component] Les données ont déjà été migrées selon "
-"la nouvelle définition, mais la reconstruction de l'index a échoué : "
-"{error}. Tant que ce n'est pas corrigé, le serveur refusera de démarrer : "
-"veuillez modifier directement les données de la table (par exemple avec "
-"upsert_row de TableMaintenance pour renuméroter les numéros en double), puis"
-" relancer hetu upgrade, qui reconstruira directement l'index selon la "
-"définition actuelle"
+"[💾MIGRATION][{comp_name} Component] Les données ont déjà été migrées "
+"selon la nouvelle définition, mais la reconstruction de l'index a échoué "
+": {error}. Tant que ce n'est pas corrigé, le serveur refusera de démarrer"
+" : veuillez modifier directement les données de la table (par exemple "
+"avec upsert_row de TableMaintenance pour renuméroter les numéros en "
+"double), puis relancer hetu upgrade, qui reconstruira directement l'index"
+" selon la définition actuelle"
 
 #: hetu/data/migration.py:237
 #, python-brace-format
@@ -1676,10 +1672,10 @@ msgid ""
 "索引的频道：这张表每次插入、删除都会叫醒它重跑比对。按 id 订单行请用行订阅（服务端 subscribe_get，客户端 WatchRow）"
 msgstr ""
 "⚠️ [📡Subscription] L'abonnement de plage de {comp_name} pour une requête "
-"ponctuelle par id souscrit au canal de tout l'index id : chaque insertion ou"
-" suppression dans cette table le réveille pour relancer la comparaison. Pour"
-" une ligne unique par id, utilisez un abonnement de ligne (côté serveur "
-"subscribe_get, côté client WatchRow)"
+"ponctuelle par id souscrit au canal de tout l'index id : chaque insertion"
+" ou suppression dans cette table le réveille pour relancer la "
+"comparaison. Pour une ligne unique par id, utilisez un abonnement de "
+"ligne (côté serveur subscribe_get, côté client WatchRow)"
 
 #: hetu/data/sub.py:63
 #, python-brace-format
@@ -1689,9 +1685,10 @@ msgid ""
 "point_sub=True"
 msgstr ""
 "⚠️ [📡Subscription] {comp_name}.{index_name} ne déclare pas point_sub, "
-"l'abonnement par requête ponctuelle dégénère en abonnement de plage : toute "
-"écriture sur cet index le réveille pour relancer la comparaison. Pour un "
-"abonnement ponctuel efficace, ajoutez point_sub=True dans property_field"
+"l'abonnement par requête ponctuelle dégénère en abonnement de plage : "
+"toute écriture sur cet index le réveille pour relancer la comparaison. "
+"Pour un abonnement ponctuel efficace, ajoutez point_sub=True dans "
+"property_field"
 
 #: hetu/data/sub.py:405
 #, python-brace-format
@@ -1738,15 +1735,15 @@ msgstr "L'initialisation de l'abonnement a été interrompue"
 #: hetu/data/sub.py:1272
 msgid "后端调用意外抛出 CancelledError（订阅的初始化并没有被取消）"
 msgstr ""
-"Un appel Backend a levé CancelledError de façon inattendue (l'initialisation"
-" de l'abonnement n'a pas été annulée)"
+"Un appel Backend a levé CancelledError de façon inattendue "
+"(l'initialisation de l'abonnement n'a pas été annulée)"
 
 #: hetu/data/sub.py:1280
 #, python-brace-format
 msgid "初始化订阅 {sub_id} 出错，换副本稍后重试"
 msgstr ""
-"Erreur lors de l'initialisation de l'abonnement {sub_id}, nouvelle tentative"
-" plus tard sur une autre réplique"
+"Erreur lors de l'initialisation de l'abonnement {sub_id}, nouvelle "
+"tentative plus tard sur une autre réplique"
 
 #: hetu/data/sub.py:1322
 #, python-brace-format
@@ -1758,8 +1755,8 @@ msgstr ""
 #: hetu/data/sub.py:1358
 msgid "⚠️ [📡Subscription] 订阅处理循环被取消，下次订阅时重新拉起"
 msgstr ""
-"⚠️ [📡Subscription] la boucle de traitement des abonnements a été annulée, "
-"elle sera relancée au prochain abonnement"
+"⚠️ [📡Subscription] la boucle de traitement des abonnements a été annulée,"
+" elle sera relancée au prochain abonnement"
 
 #: hetu/data/sub.py:1365
 #, python-brace-format
@@ -1771,16 +1768,16 @@ msgstr ""
 #: hetu/data/sub.py:1389
 msgid "处理订阅通知异常（bug），这批通知可能没处理完"
 msgstr ""
-"Exception lors du traitement des notifications d'abonnement (bug), ce lot de"
-" notifications n'a peut-être pas été entièrement traité"
+"Exception lors du traitement des notifications d'abonnement (bug), ce lot"
+" de notifications n'a peut-être pas été entièrement traité"
 
 #: hetu/data/sub.py:1435
 #, python-brace-format
 msgid "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试（上次记录以来另有 {muted} 次出错未记）"
 msgstr ""
-"❌ [📡Subscription] {what} : {err}, remis en file pour une nouvelle tentative "
-"plus tard ({muted} autres erreurs non consignées depuis le dernier "
-"enregistrement)"
+"❌ [📡Subscription] {what} : {err}, remis en file pour une nouvelle "
+"tentative plus tard ({muted} autres erreurs non consignées depuis le "
+"dernier enregistrement)"
 
 #: hetu/data/sub.py:1440
 #, python-brace-format
@@ -1804,8 +1801,8 @@ msgstr "Erreur lors du réabonnement aux canaux"
 #, python-brace-format
 msgid "预读 {comp_name} 的行出错，这批改为逐行读"
 msgstr ""
-"Erreur lors de la prélecture des lignes de {comp_name}, ce lot sera lu ligne"
-" par ligne"
+"Erreur lors de la prélecture des lignes de {comp_name}, ce lot sera lu "
+"ligne par ligne"
 
 #: hetu/data/sub.py:1747 hetu/data/sub.py:1756
 msgid "处理订阅通知异常（bug）"
@@ -1814,19 +1811,16 @@ msgstr "Exception lors du traitement des notifications d'abonnement (bug)"
 #: hetu/data/sub.py:1781
 #, python-brace-format
 msgid "订阅处理通知出错，频道 {channel}"
-msgstr ""
-"Erreur lors du traitement des notifications d'abonnement, canal {channel}"
+msgstr "Erreur lors du traitement des notifications d'abonnement, canal {channel}"
 
 #: hetu/data/sub.py:1922
 msgid "订阅新进入范围的行频道出错"
-msgstr ""
-"Erreur lors de l'abonnement aux canaux des lignes entrant dans la plage"
+msgstr "Erreur lors de l'abonnement aux canaux des lignes entrant dans la plage"
 
 #: hetu/data/sub.py:1954
 #, python-brace-format
 msgid "⚠️ [📡Subscription] 订阅 / 退订频道失败：{err}"
-msgstr ""
-"⚠️ [📡Subscription] échec de l'abonnement / désabonnement au canal : {err}"
+msgstr "⚠️ [📡Subscription] échec de l'abonnement / désabonnement au canal : {err}"
 
 #: hetu/data/sub.py:2121
 #, python-brace-format
@@ -1842,8 +1836,8 @@ msgid ""
 "属性，不允许按它订阅，检查是否非法调用，caller：{caller}"
 msgstr ""
 "⚠️ [📡Subscription] {comp_name}.{index_name} est un attribut hidden, "
-"l'abonnement par cet attribut n'est pas autorisé, vérifiez si l'appel est "
-"illégal, appelant : {caller}"
+"l'abonnement par cet attribut n'est pas autorisé, vérifiez si l'appel est"
+" illégal, appelant : {caller}"
 
 #: hetu/data/sub.py:2311
 #, python-brace-format
@@ -1860,8 +1854,8 @@ msgstr "L'abonnement par id ne peut pas recevoir de valeur de groupe"
 #, python-brace-format
 msgid "⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码"
 msgstr ""
-"⚠️ [📡Subscription] {sub_id} double abonnement aux données, vérifiez le code "
-"client"
+"⚠️ [📡Subscription] {sub_id} double abonnement aux données, vérifiez le "
+"code client"
 
 #: hetu/data/sub.py:2440
 #, python-brace-format
@@ -1886,9 +1880,9 @@ msgid ""
 "⚠️ [📡Subscription] {comp_name} 没有声明 table_sub，不允许整表订阅；需要的话请在 "
 "define_component 里加 table_sub=True，caller：{caller}"
 msgstr ""
-"⚠️ [📡Subscription] {comp_name} ne déclare pas table_sub, l'abonnement à la "
-"table complète n'est pas autorisé ; si nécessaire, ajoutez table_sub=True "
-"dans define_component, appelant : {caller}"
+"⚠️ [📡Subscription] {comp_name} ne déclare pas table_sub, l'abonnement à "
+"la table complète n'est pas autorisé ; si nécessaire, ajoutez "
+"table_sub=True dans define_component, appelant : {caller}"
 
 #: hetu/data/sub.py:2920
 #, python-brace-format
@@ -1901,15 +1895,15 @@ msgid ""
 "⚠️ [📡Subscription] "
 "{comp_name}整表订阅行数超过限制MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}，拒绝订阅，caller：{caller}"
 msgstr ""
-"⚠️ [📡Subscription] {comp_name} le nombre de lignes d'abonnement à la table "
-"complète dépasse la limite MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}, "
+"⚠️ [📡Subscription] {comp_name} le nombre de lignes d'abonnement à la "
+"table complète dépasse la limite MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}, "
 "abonnement refusé, appelant : {caller}"
 
 #: hetu/data/sub.py:3067
 msgid "❌ [📡Subscription] 叫醒发送循环出错，本连接的推送要等下次交来更新或有回复要发时才发出"
 msgstr ""
-"❌ [📡Subscription] erreur en réveillant la boucle d'envoi, les push de cette "
-"connexion ne partiront qu'à la prochaine remise de mises à jour ou "
+"❌ [📡Subscription] erreur en réveillant la boucle d'envoi, les push de "
+"cette connexion ne partiront qu'à la prochaine remise de mises à jour ou "
 "lorsqu'une réponse devra être envoyée"
 
 #: hetu/data/backend/base.py:254 hetu/data/backend/base.py:285
@@ -1934,7 +1928,8 @@ msgstr "n'est pas un entier"
 #: hetu/data/backend/base.py:476
 msgid "整数列只收数字或数字字符串"
 msgstr ""
-"les colonnes d'entiers n'acceptent que des nombres ou des chaînes numériques"
+"les colonnes d'entiers n'acceptent que des nombres ou des chaînes "
+"numériques"
 
 #: hetu/data/backend/base.py:481
 #, python-brace-format
@@ -1972,37 +1967,37 @@ msgstr "Le composant {comp_name} n'a pas d'index nommé {index_name}"
 #, python-brace-format
 msgid "分组值必须是 {{分组列: 值}} 的 dict，收到：{group}"
 msgstr ""
-"la valeur de groupe doit être un dict {{colonne_de_groupe: valeur}}, reçu : "
-"{group}"
+"la valeur de groupe doit être un dict {{colonne_de_groupe: valeur}}, reçu"
+" : {group}"
 
 #: hetu/data/backend/base.py:535
 #, python-brace-format
 msgid "{comp_name}.{index_name} 是按 {columns} 分组的索引，查询要同时给出这些分组列的值"
 msgstr ""
-"{comp_name}.{index_name} est un index groupé par {columns}, la requête doit "
-"fournir simultanément les valeurs de ces colonnes de groupe"
+"{comp_name}.{index_name} est un index groupé par {columns}, la requête "
+"doit fournir simultanément les valeurs de ces colonnes de groupe"
 
 #: hetu/data/backend/base.py:546
 #, python-brace-format
 msgid "{comp_name}.{index_name} 不是复合索引，不能给分组值"
 msgstr ""
-"{comp_name}.{index_name} n'est pas un index composite, impossible de fournir"
-" une valeur de groupe"
+"{comp_name}.{index_name} n'est pas un index composite, impossible de "
+"fournir une valeur de groupe"
 
 #: hetu/data/backend/base.py:554
 #, python-brace-format
 msgid "{comp_name}.{index_name} 的分组列是 {columns}，分组值要正好给出这些列，收到：{keys}"
 msgstr ""
-"les colonnes de groupe de {comp_name}.{index_name} sont {columns}, la valeur"
-" de groupe doit fournir exactement ces colonnes, reçu : {keys}"
+"les colonnes de groupe de {comp_name}.{index_name} sont {columns}, la "
+"valeur de groupe doit fournir exactement ces colonnes, reçu : {keys}"
 
 #: hetu/data/backend/base.py:672
 #, python-brace-format
 msgid "区间的下界大于上界：下界={lower}，上界={upper}（desc=True 时也按 (下界, 上界) 传）"
 msgstr ""
-"la borne inférieure de l'intervalle est supérieure à la borne supérieure : "
-"borne inférieure={lower}, borne supérieure={upper} (avec desc=True, on passe"
-" aussi (borne inférieure, borne supérieure))"
+"la borne inférieure de l'intervalle est supérieure à la borne supérieure "
+": borne inférieure={lower}, borne supérieure={upper} (avec desc=True, on "
+"passe aussi (borne inférieure, borne supérieure))"
 
 #: hetu/data/backend/base.py:721
 msgid "整数索引的区间边界不能是 NaN"
@@ -2011,11 +2006,12 @@ msgstr "les bornes d'intervalle d'un index d'entiers ne peuvent pas être NaN"
 #: hetu/data/backend/base.py:806
 #, python-brace-format
 msgid ""
-"{comp_name}.{index_name} 没有声明 point_sub，commit 不会发它的值频道；请在 property_field 里加"
-" point_sub=True"
+"{comp_name}.{index_name} 没有声明 point_sub，commit 不会发它的值频道；请在 property_field"
+" 里加 point_sub=True"
 msgstr ""
-"{comp_name}.{index_name} n'a pas déclaré point_sub, commit n'enverra pas son"
-" canal de valeurs ; veuillez ajouter point_sub=True dans property_field"
+"{comp_name}.{index_name} n'a pas déclaré point_sub, commit n'enverra pas "
+"son canal de valeurs ; veuillez ajouter point_sub=True dans "
+"property_field"
 
 #: hetu/data/backend/base.py:1155 hetu/data/backend/repo.py:628
 #, python-brace-format
@@ -2025,9 +2021,9 @@ msgstr "le limit de range doit être un entier, reçu : {limit}"
 #: hetu/data/backend/base.py:1514
 msgid "SQL 后端已移除：SQLite 请把 type 改成 SQLite（地址不变），PostgreSQL / MariaDB 不再支持"
 msgstr ""
-"Le Backend SQL a été supprimé : pour SQLite, veuillez changer type en SQLite"
-" (l'adresse reste inchangée), PostgreSQL / MariaDB ne sont plus pris en "
-"charge"
+"Le Backend SQL a été supprimé : pour SQLite, veuillez changer type en "
+"SQLite (l'adresse reste inchangée), PostgreSQL / MariaDB ne sont plus "
+"pris en charge"
 
 #: hetu/data/backend/base.py:1523
 #, python-brace-format
@@ -2038,8 +2034,8 @@ msgstr "Le backend {alias} n'est pas implémenté"
 #, python-brace-format
 msgid "[💾TABLE_MAINT][{comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
 msgstr ""
-"[💾TABLE_MAINT][composant {comp_name}] Impossible de créer la table, l'état "
-"de la table du composant est incorrect, actuel : {status}"
+"[💾TABLE_MAINT][composant {comp_name}] Impossible de créer la table, "
+"l'état de la table du composant est incorrect, actuel : {status}"
 
 #: hetu/data/backend/base.py:1681
 #, python-brace-format
@@ -2052,15 +2048,14 @@ msgstr ""
 #: hetu/data/backend/base.py:1686
 #, python-brace-format
 msgid "  ✔️ [💾TABLE_MAINT][{comp_name}组件] 空表创建完成"
-msgstr ""
-"  ✔️ [💾TABLE_MAINT][composant {comp_name}] Table vide créée avec succès"
+msgstr "  ✔️ [💾TABLE_MAINT][composant {comp_name}] Table vide créée avec succès"
 
 #: hetu/data/backend/base.py:1705
 #, python-brace-format
 msgid "[💾TABLE_MAINT][{comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
 msgstr ""
-"[💾TABLE_MAINT][composant {comp_name}] Impossible de migrer l'ID de cluster, "
-"l'état de la table du composant est incorrect, actuel : {status}"
+"[💾TABLE_MAINT][composant {comp_name}] Impossible de migrer l'ID de "
+"cluster, l'état de la table du composant est incorrect, actuel : {status}"
 
 #: hetu/data/backend/base.py:1711
 #, python-brace-format
@@ -2068,8 +2063,8 @@ msgid ""
 "  ⚠️ [💾TABLE_MAINT][{comp_name}组件] cluster_id 由 {old_id} 变更为 "
 "{new_id}，将尝试迁移cluster数据..."
 msgstr ""
-"  ⚠️ [💾TABLE_MAINT][composant {comp_name}] cluster_id modifié de {old_id} à "
-"{new_id}, tentative de migration des données du cluster..."
+"  ⚠️ [💾TABLE_MAINT][composant {comp_name}] cluster_id modifié de {old_id}"
+" à {new_id}, tentative de migration des données du cluster..."
 
 #: hetu/data/backend/base.py:1750
 #, python-brace-format
@@ -2089,30 +2084,30 @@ msgstr ""
 #, python-brace-format
 msgid "  ✔️ [💾MIGRATION][{comp_name}组件] 上次迁移搬完数据后重建索引失败，这次已重建Index"
 msgstr ""
-"  ✔️ [💾MIGRATION][composant {comp_name}] La reconstruction des index avait "
-"échoué après le transfert des données lors de la migration précédente, les "
-"Index ont été reconstruits cette fois"
+"  ✔️ [💾MIGRATION][composant {comp_name}] La reconstruction des index "
+"avait échoué après le transfert des données lors de la migration "
+"précédente, les Index ont été reconstruits cette fois"
 
 #: hetu/data/backend/base.py:1826
 #, python-brace-format
 msgid "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
 msgstr ""
-"  ✔️ [💾MIGRATION][composant {comp_name}] La définition des index a changé, "
-"les Index ont été reconstruits"
+"  ✔️ [💾MIGRATION][composant {comp_name}] La définition des index a "
+"changé, les Index ont été reconstruits"
 
 #: hetu/data/backend/base.py:1833
 #, python-brace-format
 msgid "  ✔️ [💾MIGRATION][{comp_name}组件] 索引的存储格式有变更，已按新格式重建Index"
 msgstr ""
-"  ✔️ [💾MIGRATION][composant {comp_name}] Le format de stockage des index a "
-"changé, les Index ont été reconstruits selon le nouveau format"
+"  ✔️ [💾MIGRATION][composant {comp_name}] Le format de stockage des index "
+"a changé, les Index ont été reconstruits selon le nouveau format"
 
 #: hetu/data/backend/base.py:1840
 #, python-brace-format
 msgid "  ✔️ [💾MIGRATION][{comp_name}组件] 已把 schema 版本更新为当前定义"
 msgstr ""
-"  ✔️ [💾MIGRATION][composant {comp_name}] La version du schema a été mise à "
-"jour vers la définition actuelle"
+"  ✔️ [💾MIGRATION][composant {comp_name}] La version du schema a été mise "
+"à jour vers la définition actuelle"
 
 #: hetu/data/backend/base.py:1850
 msgid "flush正在强制删除所有数据，此方式只建议维护代码调用。"
@@ -2124,8 +2119,8 @@ msgstr ""
 #, python-brace-format
 msgid "⌚ [💾TABLE_MAINT][{comp_name}组件] 对非持久化组件flush清空数据中..."
 msgstr ""
-"⌚ [💾TABLE_MAINT][composant {comp_name}] Suppression des données par flush "
-"sur le composant non persistant en cours..."
+"⌚ [💾TABLE_MAINT][composant {comp_name}] Suppression des données par flush"
+" sur le composant non persistant en cours..."
 
 #: hetu/data/backend/base.py:1865
 #, python-brace-format
@@ -2155,8 +2150,7 @@ msgstr ""
 
 #: hetu/data/backend/base.py:1897
 #, python-brace-format
-msgid ""
-"  ✔️ [💾TABLE_MAINT][{comp_name}组件] 索引重建完成, {count}行 * {num_indexes}个索引。"
+msgid "  ✔️ [💾TABLE_MAINT][{comp_name}组件] 索引重建完成, {count}行 * {num_indexes}个索引。"
 msgstr ""
 "  ✔️ [💾TABLE_MAINT][composant {comp_name}] Reconstruction des index "
 "terminée, {count} lignes * {num_indexes} index."
@@ -2170,9 +2164,9 @@ msgstr "⚠️ [MQ] Exception dans le callback interne du canal {channel}"
 #, python-brace-format
 msgid "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
 msgstr ""
-"⚠️ [{tag}] Les notifications de mise à jour d'abonnement n'ont pas pu être "
-"traitées à temps, {count} messages datant de {seconds} secondes ont été "
-"abandonnés"
+"⚠️ [{tag}] Les notifications de mise à jour d'abonnement n'ont pas pu "
+"être traitées à temps, {count} messages datant de {seconds} secondes ont "
+"été abandonnés"
 
 #: hetu/data/backend/base.py:2221
 msgid "⚠️ [MQ] 通知接收器断线的回调异常"
@@ -2194,14 +2188,14 @@ msgstr "⚠️ [{tag}] Échec de l'abonnement / désabonnement au canal : {err}"
 
 #: hetu/data/backend/redis_model.py:130
 #, python-brace-format
-msgid ""
-"组件{comp_name}的提交序号列`{field}`在重建索引时发现组内重复的号：{rows}（最多列出{limit}个）。重复的号会让消费方静默漏掉后一行，请先写迁移脚本重新编号。"
+msgid "组件{comp_name}的提交序号列`{field}`在重建索引时发现组内重复的号：{rows}（最多列出{limit}个）。重复的号会让消费方静默漏掉后一行，请先写迁移脚本重新编号。"
 msgstr ""
 "La colonne de numéro de soumission `{field}` du composant {comp_name} "
-"contient, lors de la reconstruction de l'index, des numéros en double dans "
-"le groupe : {rows} ({limit} listés au maximum). Les numéros en double feront"
-" que le consommateur ignorera silencieusement la ligne suivante ; veuillez "
-"d'abord écrire un script de migration pour renuméroter."
+"contient, lors de la reconstruction de l'index, des numéros en double "
+"dans le groupe : {rows} ({limit} listés au maximum). Les numéros en "
+"double feront que le consommateur ignorera silencieusement la ligne "
+"suivante ; veuillez d'abord écrire un script de migration pour "
+"renuméroter."
 
 #: hetu/data/backend/redis_model.py:143
 #, python-brace-format
@@ -2225,21 +2219,23 @@ msgstr "Le paramètre {name} de seq_read doit être un entier, reçu : {value}"
 msgid "Component `{comp_name}` 的索引字段`{field}`使用了复数，Redis后端不支持此类型作为索引字段"
 msgstr ""
 "Le champ d'index `{field}` du composant `{comp_name}` utilise un type "
-"pluriel, le backend Redis ne prend pas en charge ce type comme champ d'index"
+"pluriel, le backend Redis ne prend pas en charge ce type comme champ "
+"d'index"
 
 #: hetu/data/backend/redis_model.py:227
 #, python-brace-format
 msgid "Component `{comp_name}` 的索引字段`{field}`使用了不可用的类型 `{dtype}`，此类型不支持索引"
 msgstr ""
-"Le champ d'index `{field}` du composant `{comp_name}` utilise un type non "
-"disponible `{dtype}`, ce type ne prend pas en charge l'indexation"
+"Le champ d'index `{field}` du composant `{comp_name}` utilise un type non"
+" disponible `{dtype}`, ce type ne prend pas en charge l'indexation"
 
 #: hetu/data/backend/redis_model.py:350
 #, python-brace-format
 msgid "{comp_name}.{index_name} 是复合索引，没有值频道；按组订阅请用 index_channel(…, group=…)"
 msgstr ""
 "{comp_name}.{index_name} est un index composite, il n'a pas de canal de "
-"valeurs ; pour un abonnement par groupe, utilisez index_channel(…, group=…)"
+"valeurs ; pour un abonnement par groupe, utilisez index_channel(…, "
+"group=…)"
 
 #: hetu/data/backend/redis_model.py:423
 #, python-brace-format
@@ -2256,39 +2252,36 @@ msgstr ""
 #: hetu/data/backend/redis_model.py:900
 #, python-brace-format
 msgid ""
-"提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。组里还有行时，跑 hetu upgrade 重建索引会把它校准回来；没有行时 "
-"upgrade 不动它，要手工改成不小于所有消费方游标的值，不能直接删"
+"提交序号列的计数器 {key} 的值不对：{raw}，应该是非负整数。组里还有行时，跑 hetu upgrade 重建索引会把它校准回来；没有行时"
+" upgrade 不动它，要手工改成不小于所有消费方游标的值，不能直接删"
 msgstr ""
 "La valeur du compteur {key} de la colonne de numéro de soumission est "
-"incorrecte : {raw}, elle devrait être un entier non négatif. S'il reste des "
-"lignes dans le groupe, exécuter hetu upgrade pour reconstruire l'index la "
-"recalibrera ; s'il n'y a aucune ligne, upgrade n'y touche pas, il faut la "
-"modifier manuellement pour une valeur non inférieure à tous les curseurs des"
-" consommateurs, sans la supprimer directement"
+"incorrecte : {raw}, elle devrait être un entier non négatif. S'il reste "
+"des lignes dans le groupe, exécuter hetu upgrade pour reconstruire "
+"l'index la recalibrera ; s'il n'y a aucune ligne, upgrade n'y touche pas,"
+" il faut la modifier manuellement pour une valeur non inférieure à tous "
+"les curseurs des consommateurs, sans la supprimer directement"
 
 #: hetu/data/backend/redis_model.py:936
 #, python-brace-format
 msgid "seq_read 的 after 要在 [0, 2^53) 里，收到：{after}"
-msgstr ""
-"Le paramètre after de seq_read doit être dans [0, 2^53), reçu : {after}"
+msgstr "Le paramètre after de seq_read doit être dans [0, 2^53), reçu : {after}"
 
 #: hetu/data/backend/redis_model.py:943
 #, python-brace-format
 msgid "seq_read 的 limit 必须是正整数，收到：{limit}"
-msgstr ""
-"Le paramètre limit de seq_read doit être un entier positif, reçu : {limit}"
+msgstr "Le paramètre limit de seq_read doit être un entier positif, reçu : {limit}"
 
 #: hetu/data/backend/redis_model.py:949
 #, python-brace-format
 msgid "seq_read 的 after_id 不在 int64 范围里：{id}"
-msgstr ""
-"Le paramètre after_id de seq_read n'est pas dans la plage int64 : {id}"
+msgstr "Le paramètre after_id de seq_read n'est pas dans la plage int64 : {id}"
 
 #: hetu/data/backend/redis_model.py:954
 msgid "给了 after_id 时 after 必须 >= 1：0 号没有行"
 msgstr ""
-"Lorsque after_id est fourni, after doit être >= 1 : le numéro 0 n'a pas de "
-"ligne"
+"Lorsque after_id est fourni, after doit être >= 1 : le numéro 0 n'a pas "
+"de ligne"
 
 #: hetu/data/backend/redis_model.py:957
 #, python-brace-format
@@ -2311,8 +2304,8 @@ msgstr ""
 #, python-brace-format
 msgid "提交序号列发号失败，本次提交没有写入：{resp}"
 msgstr ""
-"L'attribution du numéro de soumission a échoué, cette soumission n'a pas été"
-" écrite : {resp}"
+"L'attribution du numéro de soumission a échoué, cette soumission n'a pas "
+"été écrite : {resp}"
 
 #: hetu/data/backend/redis_model.py:1591
 #, python-brace-format
@@ -2341,8 +2334,8 @@ msgstr "Le composant `{comp_name}` n'a pas de champ `{prop}`"
 #, python-brace-format
 msgid "row id({row_id})在session中未寻到，更新操作必须有旧数据。"
 msgstr ""
-"L'ID de ligne ({row_id}) n'a pas été trouvé dans la session, une opération "
-"de mise à jour nécessite des données anciennes."
+"L'ID de ligne ({row_id}) n'a pas été trouvé dans la session, une "
+"opération de mise à jour nécessite des données anciennes."
 
 #: hetu/data/backend/repo.py:215 hetu/data/backend/repo.py:913
 #, python-brace-format
@@ -2363,24 +2356,23 @@ msgstr ""
 msgid "{comp_name} 的查询条件 {keys} 对不上任何索引：要么只给一个有索引的字段，要么正好给出复合索引的本字段和全部分组列"
 msgstr ""
 "Les conditions de requête {keys} de {comp_name} ne correspondent à aucun "
-"index : fournissez soit un seul champ indexé, soit exactement le champ lui-"
-"même et toutes les colonnes de groupe de l'index composite"
+"index : fournissez soit un seul champ indexé, soit exactement le champ "
+"lui-même et toutes les colonnes de groupe de l'index composite"
 
 #: hetu/data/backend/repo.py:350
 #, python-brace-format
 msgid "{comp_name} 的 upsert 条件 {keys} 同时匹配了 {matched} 几个 unique 索引，无法区分"
 msgstr ""
-"Les conditions upsert {keys} de {comp_name} correspondent simultanément à "
-"{matched} index uniques, impossible de les distinguer"
+"Les conditions upsert {keys} de {comp_name} correspondent simultanément à"
+" {matched} index uniques, impossible de les distinguer"
 
 #: hetu/data/backend/repo.py:358
 #, python-brace-format
-msgid ""
-"{comp_name} 的查询条件 {keys} 同时匹配了 {matched} 几个索引，请用 index_name、_group 参数指定"
+msgid "{comp_name} 的查询条件 {keys} 同时匹配了 {matched} 几个索引，请用 index_name、_group 参数指定"
 msgstr ""
-"Les conditions de requête {keys} de {comp_name} correspondent simultanément "
-"à {matched} index, veuillez les préciser avec les paramètres index_name et "
-"_group"
+"Les conditions de requête {keys} de {comp_name} correspondent "
+"simultanément à {matched} index, veuillez les préciser avec les "
+"paramètres index_name et _group"
 
 #: hetu/data/backend/repo.py:586
 #, python-brace-format
@@ -2398,59 +2390,62 @@ msgstr ""
 
 #: hetu/data/backend/repo.py:605
 msgid "不使用kwargs形式时，left不能为空"
-msgstr ""
-"Lorsque la forme kwargs n'est pas utilisée, left ne peut pas être vide."
+msgstr "Lorsque la forme kwargs n'est pas utilisée, left ne peut pas être vide."
 
 #: hetu/data/backend/repo.py:886
 #, python-brace-format
 msgid "{comp_name}.{field} 是提交序号列（commit_seq），号由提交时发，insert 时必须是 0，收到：{value}"
 msgstr ""
 "{comp_name}.{field} est la colonne de numéro de séquence de commit "
-"(commit_seq), le numéro est attribué au moment du commit, il doit valoir 0 "
-"lors de l'insert ; reçu : {value}"
+"(commit_seq), le numéro est attribué au moment du commit, il doit valoir "
+"0 lors de l'insert ; reçu : {value}"
 
 #: hetu/data/backend/repo.py:897
 #, python-brace-format
 msgid ""
-"{comp_name} 的 insert 行 id 为 0：本 Session 不发雪花号，请用 new_row(id_=...) 显式给出非零 id"
+"{comp_name} 的 insert 行 id 为 0：本 Session 不发雪花号，请用 new_row(id_=...) 显式给出非零 "
+"id"
 msgstr ""
-"L'ID de ligne d'insertion de {comp_name} est 0 : cette Session n'émet pas "
-"d'ID snowflake, veuillez utiliser new_row(id_=...) pour fournir "
+"L'ID de ligne d'insertion de {comp_name} est 0 : cette Session n'émet pas"
+" d'ID snowflake, veuillez utiliser new_row(id_=...) pour fournir "
 "explicitement un ID non nul."
 
 #: hetu/data/backend/repo.py:906
 #, python-brace-format
 msgid ""
-"{comp_name} 的行 id={row_id} 已在本事务中删除，不能再用同一个 id insert；要改这行请直接 update，不要先删再插"
+"{comp_name} 的行 id={row_id} 已在本事务中删除，不能再用同一个 id insert；要改这行请直接 "
+"update，不要先删再插"
 msgstr ""
 "La ligne id={row_id} de {comp_name} a déjà été supprimée dans cette "
 "transaction, vous ne pouvez plus insérer avec le même id ; pour modifier "
-"cette ligne, faites directement un update, ne supprimez pas puis réinsérez"
+"cette ligne, faites directement un update, ne supprimez pas puis "
+"réinsérez"
 
 #: hetu/data/backend/repo.py:981
 #, python-brace-format
 msgid "{comp_name}.{field} 是提交序号列（commit_seq），号由提交时发，不能修改"
 msgstr ""
 "{comp_name}.{field} est la colonne de numéro de séquence de commit "
-"(commit_seq), le numéro est attribué au moment du commit et ne peut pas être"
-" modifié"
+"(commit_seq), le numéro est attribué au moment du commit et ne peut pas "
+"être modifié"
 
 #: hetu/data/backend/repo.py:994
 #, python-brace-format
 msgid ""
-"{comp_name}.{cols} 是提交序号列 {field} 的分组列，这一行已经有号（{seq}），不能改分组列：搬到别的组会和那一组的号重复"
+"{comp_name}.{cols} 是提交序号列 {field} "
+"的分组列，这一行已经有号（{seq}），不能改分组列：搬到别的组会和那一组的号重复"
 msgstr ""
-"{comp_name}.{cols} sont les colonnes de groupe de la colonne de numéro de "
-"séquence de commit {field} ; cette ligne possède déjà un numéro ({seq}), les"
-" colonnes de groupe ne peuvent pas être modifiées : la déplacer vers un "
-"autre groupe créerait un doublon avec le numéro de ce groupe"
+"{comp_name}.{cols} sont les colonnes de groupe de la colonne de numéro de"
+" séquence de commit {field} ; cette ligne possède déjà un numéro ({seq}),"
+" les colonnes de groupe ne peuvent pas être modifiées : la déplacer vers "
+"un autre groupe créerait un doublon avec le numéro de ce groupe"
 
 #: hetu/data/backend/repo.py:1034
 #, python-brace-format
 msgid "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
 msgstr ""
-"Upsert ne peut être utilisé que pour des index uniques, l'index {index_name}"
-" du composant {comp_name} n'est pas un index unique."
+"Upsert ne peut être utilisé que pour des index uniques, l'index "
+"{index_name} du composant {comp_name} n'est pas un index unique."
 
 #: hetu/data/backend/repo.py:1094
 #, python-brace-format
@@ -2459,8 +2454,8 @@ msgid ""
 "upsert(id=...) 显式给出 id"
 msgstr ""
 "{comp_name}.{index_name}={value} n'existe pas : cette Session n'émet pas "
-"d'ID snowflake, upsert ne peut cibler que des lignes existantes, ou utilisez"
-" upsert(id=...) pour fournir explicitement un ID."
+"d'ID snowflake, upsert ne peut cibler que des lignes existantes, ou "
+"utilisez upsert(id=...) pour fournir explicitement un ID."
 
 #: hetu/data/backend/repo.py:1109
 #, python-brace-format
@@ -2468,10 +2463,10 @@ msgid ""
 "upsert 的锚定值超过了 {comp_name}.{index_name} 的列宽 "
 "{max_len}：{value}。新行存进去会被截断，之后拿这个值查不到它"
 msgstr ""
-"La valeur d'ancrage de l'upsert dépasse la largeur de colonne {max_len} de "
-"{comp_name}.{index_name} : {value}. La nouvelle ligne sera tronquée à "
-"l'enregistrement et ne pourra plus être retrouvée avec cette valeur par la "
-"suite"
+"La valeur d'ancrage de l'upsert dépasse la largeur de colonne {max_len} "
+"de {comp_name}.{index_name} : {value}. La nouvelle ligne sera tronquée à "
+"l'enregistrement et ne pourra plus être retrouvée avec cette valeur par "
+"la suite"
 
 #: hetu/data/backend/session.py:237
 msgid "事务超过最大重试次数。"
@@ -2481,8 +2476,8 @@ msgstr "La transaction a dépassé le nombre maximal de tentatives."
 msgid "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
 msgstr ""
 "⌚ [📡Serveur] Échec de l'attribution de l'ID Worker, peut-être dû à des "
-"pannes répétées ayant épuisé les ID Worker disponibles, nouvelle tentative "
-"dans 1 seconde..."
+"pannes répétées ayant épuisé les ID Worker disponibles, nouvelle "
+"tentative dans 1 seconde..."
 
 #: hetu/data/backend/snowflake_lease.py:103
 #: hetu/data/backend/snowflake_lease.py:157
@@ -2508,8 +2503,8 @@ msgstr ""
 #, python-brace-format
 msgid "[❄️ID] 关服时写入时间戳高水位失败: {err}"
 msgstr ""
-"[❄️ID] Échec de l'écriture de la borne haute d'horodatage lors de l'arrêt du"
-" serveur : {err}"
+"[❄️ID] Échec de l'écriture de la borne haute d'horodatage lors de l'arrêt"
+" du serveur : {err}"
 
 #: hetu/data/backend/snowflake_lease.py:181
 #, python-brace-format
@@ -2522,8 +2517,8 @@ msgstr ""
 #, python-brace-format
 msgid "[❄️ID] 读取时间戳高水位失败，退化为固定容忍度: {err}"
 msgstr ""
-"[❄️ID] Échec de lecture du niveau haut d'horodatage, repli sur une tolérance"
-" fixe : {err}"
+"[❄️ID] Échec de lecture du niveau haut d'horodatage, repli sur une "
+"tolérance fixe : {err}"
 
 #: hetu/data/backend/snowflake_timestamp.py:143
 #, python-brace-format
@@ -2531,28 +2526,28 @@ msgid "[❄️ID] 记录的高水位比当前时间超前 {ms} 毫秒（上次�
 msgstr ""
 "[❄️ID] Le niveau haut enregistré est en avance de {ms} millisecondes sur "
 "l'heure actuelle (le serveur n'a pas été arrêté correctement la dernière "
-"fois, ou l'horloge a reculé pendant le redémarrage) ; la génération d'ID a "
-"repris depuis le niveau haut afin d'éviter les doublons d'ID"
+"fois, ou l'horloge a reculé pendant le redémarrage) ; la génération d'ID "
+"a repris depuis le niveau haut afin d'éviter les doublons d'ID"
 
 #: hetu/data/backend/snowflake_timestamp.py:208
 #, python-brace-format
 msgid "[❄️ID] 补建时间戳高水位行失败（下个周期会重试）: {err}"
 msgstr ""
-"[❄️ID] Échec de la création de rattrapage de l'enregistrement de niveau haut"
-" d'horodatage (nouvelle tentative au prochain cycle) : {err}"
+"[❄️ID] Échec de la création de rattrapage de l'enregistrement de niveau "
+"haut d'horodatage (nouvelle tentative au prochain cycle) : {err}"
 
 #: hetu/data/backend/worker_keeper.py:101
 #, python-brace-format
 msgid "Worker序号 {worker_id} 超出雪花ID上限 {max}"
 msgstr ""
-"Le numéro de Worker {worker_id} dépasse la limite maximale de l'ID Snowflake"
-" {max}"
+"Le numéro de Worker {worker_id} dépasse la limite maximale de l'ID "
+"Snowflake {max}"
 
 #: hetu/data/backend/worker_keeper.py:108
 #, python-brace-format
 msgid ""
-"[❄️ID] [开发模式] 使用本机进程序号作为 Worker ID: {worker_id}。此模式只保证单机内不重复，多机部署请改用 Redis "
-"后端"
+"[❄️ID] [开发模式] 使用本机进程序号作为 Worker ID: {worker_id}。此模式只保证单机内不重复，多机部署请改用 "
+"Redis 后端"
 msgstr ""
 "[❄️ID] [Mode développement] Utilise le numéro de processus local comme "
 "Worker ID : {worker_id}. Ce mode ne garantit l'unicité qu'au sein d'une "
@@ -2565,15 +2560,15 @@ msgstr ""
 #, python-brace-format
 msgid "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
 msgstr ""
-"[❄️ID] ID de Worker obtenu avec succès : {worker_id}, code de processus : "
-"{node_id}"
+"[❄️ID] ID de Worker obtenu avec succès : {worker_id}, code de processus :"
+" {node_id}"
 
 #: hetu/data/backend/worker_keeper.py:188
 #, python-brace-format
 msgid "并发的 hetu call / shell 进程太多：SQLite 上预留给它们的 {count} 个 Worker ID 都被占用了"
 msgstr ""
-"Trop de processus hetu call / shell simultanés : les {count} Worker ID qui "
-"leur sont réservés sur SQLite sont tous occupés"
+"Trop de processus hetu call / shell simultanés : les {count} Worker ID "
+"qui leur sont réservés sur SQLite sont tous occupés"
 
 #: hetu/data/backend/worker_keeper.py:200
 #, python-brace-format
@@ -2582,10 +2577,10 @@ msgid ""
 "租约已不属于本进程（可能因本进程长时间卡住导致租约过期后被其他实例接手），继续发号会产生重复雪花ID"
 msgstr ""
 "[❄️ID] Échec du renouvellement du Worker ID {worker_id} : le bail "
-"n'appartient plus à ce processus (peut-être parce que ce processus est resté"
-" bloqué trop longtemps, ce qui a laissé le bail expirer et une autre "
-"instance l'a repris) ; continuer à générer des identifiants produirait des "
-"ID Snowflake en double"
+"n'appartient plus à ce processus (peut-être parce que ce processus est "
+"resté bloqué trop longtemps, ce qui a laissé le bail expirer et une autre"
+" instance l'a repris) ; continuer à générer des identifiants produirait "
+"des ID Snowflake en double"
 
 #: hetu/data/backend/worker_keeper.py:205
 msgid "Worker ID 续约失败"
@@ -2602,39 +2597,37 @@ msgstr "[❄️ID] Libération de l'ID de Worker : {worker_id}"
 #, python-brace-format
 msgid "[❄️ID] Worker ID {worker_id} 的租约已不属于本进程，跳过释放"
 msgstr ""
-"[❄️ID] Le bail du Worker ID {worker_id} n'appartient plus à ce processus, "
-"libération ignorée"
+"[❄️ID] Le bail du Worker ID {worker_id} n'appartient plus à ce processus,"
+" libération ignorée"
 
 #: hetu/data/backend/redis/client.py:82
 msgid "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
 msgstr ""
-"Le Servant n'est pas autorisé à charger des scripts de transaction Lua, les "
-"scripts de transaction Lua ne peuvent être chargés que sur le Master"
+"Le Servant n'est pas autorisé à charger des scripts de transaction Lua, "
+"les scripts de transaction Lua ne peuvent être chargés que sur le Master"
 
 #: hetu/data/backend/redis/client.py:85
 msgid "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
 msgstr ""
-"Les scripts de transaction Lua ne peuvent être chargés que sur le Master, "
-"mais le pool de connexions actuel contient plusieurs serveurs"
+"Les scripts de transaction Lua ne peuvent être chargés que sur le Master,"
+" mais le pool de connexions actuel contient plusieurs serveurs"
 
 #: hetu/data/backend/redis/client.py:121
 #, python-brace-format
 msgid "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set 改用同样语义的 Lua 脚本（稍慢）"
 msgstr ""
-"ℹ️ [💾Redis] HSETEX n'est pas disponible sur le master ({err}), direct_set "
-"utilise donc un script Lua au sémantique identique (un peu plus lent)"
+"ℹ️ [💾Redis] HSETEX n'est pas disponible sur le master ({err}), direct_set"
+" utilise donc un script Lua au sémantique identique (un peu plus lent)"
 
-#: hetu/data/backend/redis/client.py:140
-#: hetu/data/backend/sqlite/client.py:154
+#: hetu/data/backend/redis/client.py:140 hetu/data/backend/sqlite/client.py:154
 msgid "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 msgstr ""
-"Le Backend ne peut être utilisé que dans la même coroutine. Un changement de"
-" coroutine appelant cette fonction a été détecté"
+"Le Backend ne peut être utilisé que dans la même coroutine. Un changement"
+" de coroutine appelant cette fonction a été détecté"
 
 #: hetu/data/backend/redis/client.py:187
 msgid "必须至少指定一个数据库连接URL"
-msgstr ""
-"Au moins une URL de connexion à la base de données doit être spécifiée"
+msgstr "Au moins une URL de connexion à la base de données doit être spécifiée"
 
 #: hetu/data/backend/redis/client.py:223
 #, python-brace-format
@@ -2648,26 +2641,27 @@ msgid ""
 "?protocol=2 降级到 RESP2，master 和 servants 都要加。"
 msgstr ""
 "La base de données Redis {url} ne prend pas en charge la commande HELLO "
-"(poignée de main RESP3). Cela vient généralement d'une couche proxy en amont"
-" qui ne prend pas en charge RESP3 ; veuillez ajouter ?protocol=2 à la fin de"
-" l'url pour revenir à RESP2, sur le master comme sur les servants."
+"(poignée de main RESP3). Cela vient généralement d'une couche proxy en "
+"amont qui ne prend pas en charge RESP3 ; veuillez ajouter ?protocol=2 à "
+"la fin de l'url pour revenir à RESP2, sur le master comme sur les "
+"servants."
 
 #: hetu/data/backend/redis/client.py:240
 #, python-brace-format
 msgid "连接Redis数据库 {url} 时服务端返回错误：{error}"
 msgstr ""
-"Lors de la connexion à la base de données Redis {url}, le serveur a renvoyé "
-"une erreur : {error}"
+"Lors de la connexion à la base de données Redis {url}, le serveur a "
+"renvoyé une erreur : {error}"
 
 #: hetu/data/backend/redis/client.py:344
 #, python-brace-format
 msgid ""
-"⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将不起效。可手动设置配置文件：notify-keyspace-"
-"events={keyspace}"
+"⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将不起效。可手动设置配置文件：notify-"
+"keyspace-events={keyspace}"
 msgstr ""
-"⚠️ [💾Redis] Pas d'autorisation pour appeler la commande config_set sur la "
-"base de données {url}, l'abonnement aux données ne fonctionnera pas. Vous "
-"pouvez configurer manuellement le fichier : notify-keyspace-"
+"⚠️ [💾Redis] Pas d'autorisation pour appeler la commande config_set sur la"
+" base de données {url}, l'abonnement aux données ne fonctionnera pas. "
+"Vous pouvez configurer manuellement le fichier : notify-keyspace-"
 "events={keyspace}"
 
 #: hetu/data/backend/redis/client.py:372
@@ -2680,12 +2674,11 @@ msgstr ""
 "Le script lua_commit n'est pas initialisé, veuillez d'abord appeler "
 "post_configure"
 
-#: hetu/data/backend/redis/client.py:601
-#: hetu/data/backend/sqlite/client.py:324
+#: hetu/data/backend/redis/client.py:601 hetu/data/backend/sqlite/client.py:324
 msgid "消息队列只能挂在同类后端的连接上"
 msgstr ""
-"Une file de messages ne peut être rattachée qu'à une connexion d'un Backend "
-"de même type"
+"Une file de messages ne peut être rattachée qu'à une connexion d'un "
+"Backend de même type"
 
 #: hetu/data/backend/redis/mq.py:110
 #, python-brace-format
@@ -2695,33 +2688,34 @@ msgstr "⚠️ [💾Redis] Échec du désabonnement de {count} canaux : {err}"
 #: hetu/data/backend/redis/mq.py:129
 #, python-brace-format
 msgid "🔔 [💾Redis] 收到订阅更新通知: {channel_name}"
-msgstr ""
-"🔔 [💾Redis] Notification de mise à jour d'abonnement reçue : {channel_name}"
+msgstr "🔔 [💾Redis] Notification de mise à jour d'abonnement reçue : {channel_name}"
 
 #: hetu/data/backend/redis/mq.py:153
 #, python-brace-format
 msgid ""
-"⚠️ [💾Redis] pubsub 连接断了，{count} 个频道在恢复前收不到通知：挂了多个副本的订阅换到别的副本重订，其余的等它重连后重订、补读"
+"⚠️ [💾Redis] pubsub 连接断了，{count} "
+"个频道在恢复前收不到通知：挂了多个副本的订阅换到别的副本重订，其余的等它重连后重订、补读"
 msgstr ""
 "⚠️ [💾Redis] La connexion pubsub est rompue, {count} canaux ne recevront "
-"aucune notification avant le rétablissement : les abonnements présents sur "
-"plusieurs réplicas sont réabonnés sur un autre réplica, les autres attendent"
-" la reconnexion pour se réabonner et relire les messages manqués"
+"aucune notification avant le rétablissement : les abonnements présents "
+"sur plusieurs réplicas sont réabonnés sur un autre réplica, les autres "
+"attendent la reconnexion pour se réabonner et relire les messages manqués"
 
 #: hetu/data/backend/redis/mq.py:172
 #, python-brace-format
 msgid "⚠️ [💾Redis] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
 msgstr ""
-"⚠️ [💾Redis] Les notifications de mise à jour d'abonnement n'ont pas pu être "
-"traitées à temps, {count} messages datant de {seconds} secondes ont été "
-"abandonnés"
+"⚠️ [💾Redis] Les notifications de mise à jour d'abonnement n'ont pas pu "
+"être traitées à temps, {count} messages datant de {seconds} secondes ont "
+"été abandonnés"
 
 #: hetu/data/backend/redis/worker_keeper.py:216
 #: hetu/data/backend/redis/worker_keeper.py:336
 msgid "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
 msgstr ""
-"Impossible d'obtenir un ID de Worker disponible, tous les ID sont occupés. "
-"En cas de panne, veuillez attendre l'expiration de l'ID et réessayer."
+"Impossible d'obtenir un ID de Worker disponible, tous les ID sont "
+"occupés. En cas de panne, veuillez attendre l'expiration de l'ID et "
+"réessayer."
 
 #: hetu/data/backend/redis/worker_keeper.py:246
 #, python-brace-format
@@ -2729,17 +2723,17 @@ msgid ""
 "[❄️ID] 有持有者标识和本进程相同的 Worker ID 租约 {worker_ids}（多半是重启前留下的），等 {wait} "
 "秒确认没有进程在续约后接手"
 msgstr ""
-"[❄️ID] Il existe des baux de Worker ID {worker_ids} dont l'identifiant de "
-"détenteur est identique à celui de ce processus (probablement laissés par un"
-" redémarrage précédent) ; attente de {wait} secondes pour confirmer qu'aucun"
-" processus ne les renouvelle avant de les reprendre"
+"[❄️ID] Il existe des baux de Worker ID {worker_ids} dont l'identifiant de"
+" détenteur est identique à celui de ce processus (probablement laissés "
+"par un redémarrage précédent) ; attente de {wait} secondes pour confirmer"
+" qu'aucun processus ne les renouvelle avant de les reprendre"
 
 #: hetu/data/backend/redis/worker_keeper.py:266
 #, python-brace-format
 msgid "[❄️ID] 接手持有者标识和本进程相同的 Worker ID: {worker_id}（原来的值 {old}，现在 {node_id}）"
 msgstr ""
-"[❄️ID] Reprise du Worker ID dont l'identifiant de détenteur est identique à "
-"celui de ce processus : {worker_id} (ancienne valeur {old}, désormais "
+"[❄️ID] Reprise du Worker ID dont l'identifiant de détenteur est identique"
+" à celui de ce processus : {worker_id} (ancienne valeur {old}, désormais "
 "{node_id})"
 
 #: hetu/data/backend/redis/worker_keeper.py:274
@@ -2749,14 +2743,14 @@ msgid ""
 "的持有者标识和本进程相同，但还有进程在续约，不接手。多半是两个进程的持有者标识撞了（{owner}）：节点 token "
 "文件被打进了镜像，或者几个容器共用了 /var/tmp。不会撞号，但接不回原来的 Worker ID。滚动升级期间，旧版本开服时也会把它续期"
 msgstr ""
-"[❄️ID] L'identifiant de détenteur du Worker ID {worker_id} est identique à "
-"celui de ce processus, mais un processus le renouvelle encore, pas de "
-"reprise. Il s'agit probablement d'une collision d'identifiants de détenteur "
-"entre deux processus ({owner}) : le fichier de token du nœud a été intégré à"
-" l'image, ou plusieurs conteneurs partagent /var/tmp. Aucune collision de "
-"numéro ne se produira, mais l'ancien Worker ID ne pourra pas être récupéré. "
-"Pendant une mise à jour progressive, l'ancienne version le renouvellera "
-"également au démarrage"
+"[❄️ID] L'identifiant de détenteur du Worker ID {worker_id} est identique "
+"à celui de ce processus, mais un processus le renouvelle encore, pas de "
+"reprise. Il s'agit probablement d'une collision d'identifiants de "
+"détenteur entre deux processus ({owner}) : le fichier de token du nœud a "
+"été intégré à l'image, ou plusieurs conteneurs partagent /var/tmp. Aucune"
+" collision de numéro ne se produira, mais l'ancien Worker ID ne pourra "
+"pas être récupéré. Pendant une mise à jour progressive, l'ancienne "
+"version le renouvellera également au démarrage"
 
 #: hetu/data/backend/redis/worker_keeper.py:381
 #, python-brace-format
@@ -2765,10 +2759,10 @@ msgid ""
 "租约已不属于本进程（可能因本进程长时间卡住导致租约过期后被其他实例接手），继续发号会产生重复雪花ID，将重启Worker..."
 msgstr ""
 "[❄️ID] Échec du renouvellement du Worker ID {worker_id} : le bail "
-"n'appartient plus à ce processus (peut-être parce que ce processus est resté"
-" bloqué trop longtemps, que le bail a expiré puis a été repris par une autre"
-" instance). Continuer à émettre des numéros produirait des identifiants "
-"snowflake en double, redémarrage du Worker..."
+"n'appartient plus à ce processus (peut-être parce que ce processus est "
+"resté bloqué trop longtemps, que le bail a expiré puis a été repris par "
+"une autre instance). Continuer à émettre des numéros produirait des "
+"identifiants snowflake en double, redémarrage du Worker..."
 
 #: hetu/data/backend/redis/worker_keeper.py:387
 msgid "Worker ID 续约失败，重启Worker..."
@@ -2778,8 +2772,8 @@ msgstr "Échec du renouvellement de l'ID de Worker, redémarrage du Worker..."
 #, python-brace-format
 msgid "SQLite 后端的地址要写成 sqlite:///<库文件路径>，比如 sqlite:///./hetu.db，收到：{dsn}"
 msgstr ""
-"L'adresse du Backend SQLite doit s'écrire sqlite:///<chemin du fichier de "
-"base de données>, par exemple sqlite:///./hetu.db ; reçu : {dsn}"
+"L'adresse du Backend SQLite doit s'écrire sqlite:///<chemin du fichier de"
+" base de données>, par exemple sqlite:///./hetu.db ; reçu : {dsn}"
 
 #: hetu/data/backend/sqlite/client.py:74
 #, python-brace-format
@@ -2792,8 +2786,8 @@ msgstr ""
 #, python-brace-format
 msgid "SQLite 后端不支持内存库，请给一个库文件路径：{dsn}"
 msgstr ""
-"Le Backend SQLite ne prend pas en charge les bases de données en mémoire ; "
-"veuillez fournir un chemin de fichier de base de données : {dsn}"
+"Le Backend SQLite ne prend pas en charge les bases de données en mémoire "
+"; veuillez fournir un chemin de fichier de base de données : {dsn}"
 
 #: hetu/data/backend/sqlite/client.py:89
 #, python-brace-format
@@ -2805,14 +2799,12 @@ msgstr ""
 #: hetu/data/backend/sqlite/client.py:99
 #, python-brace-format
 msgid "SQLite 后端不认识的配置项：{names}"
-msgstr ""
-"Options de configuration non reconnues pour le Backend SQLite : {names}"
+msgstr "Options de configuration non reconnues pour le Backend SQLite : {names}"
 
 #: hetu/data/backend/sqlite/client.py:115
 #, python-brace-format
 msgid "无法打开SQLite库文件：{path}（{err}）"
-msgstr ""
-"Impossible d'ouvrir le fichier de base de données SQLite : {path} ({err})"
+msgstr "Impossible d'ouvrir le fichier de base de données SQLite : {path} ({err})"
 
 #: hetu/data/backend/sqlite/commit.py:185
 #, python-brace-format
@@ -2830,15 +2822,15 @@ msgstr ""
 #, python-brace-format
 msgid "  ✔️ [💾SQLite][{comp_name}组件] rename完成，共改名{count}个键值。"
 msgstr ""
-"  ✔️ [💾SQLite][Component {comp_name}] rename terminé, {count} paires clé-"
-"valeur renommées au total."
+"  ✔️ [💾SQLite][Component {comp_name}] rename terminé, {count} paires "
+"clé-valeur renommées au total."
 
 #: hetu/data/backend/sqlite/maint.py:304
 #, python-brace-format
 msgid "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，无法重建索引"
 msgstr ""
-"La ligne id={row_id} du Component {comp_name} n'a pas le champ `{idx_name}`,"
-" impossible de reconstruire l'index"
+"La ligne id={row_id} du Component {comp_name} n'a pas le champ "
+"`{idx_name}`, impossible de reconstruire l'index"
 
 #: hetu/data/backend/sqlite/maint.py:326
 #, python-brace-format
@@ -2847,17 +2839,18 @@ msgid ""
 "{columns}）在重建时发现违反unique约束，可能是迁移时缩短了值类型、新增了Unique标记、或去掉了groupby（组内唯一变成了全局唯一）导致。"
 msgstr ""
 "Lors de la reconstruction, l'index unique `{idx_name}` du Component "
-"{comp_name} (colonnes {columns}) a enfreint la contrainte unique ; cela peut"
-" être dû à un raccourcissement du type de valeur lors de la migration, à "
-"l'ajout d'un marqueur Unique, ou à la suppression du groupby (l'unicité au "
-"sein du groupe est devenue une unicité globale)."
+"{comp_name} (colonnes {columns}) a enfreint la contrainte unique ; cela "
+"peut être dû à un raccourcissement du type de valeur lors de la "
+"migration, à l'ajout d'un marqueur Unique, ou à la suppression du groupby"
+" (l'unicité au sein du groupe est devenue une unicité globale)."
 
 #: hetu/data/backend/sqlite/mq.py:159
 #, python-brace-format
 msgid "⚠️ [💾SQLite] 订阅频道过多，轮询切换为按id扫描后本地过滤模式，当前订阅数={count}，阈值={limit}"
 msgstr ""
-"⚠️ [💾SQLite] Trop de canaux abonnés, le polling bascule en mode scan par id "
-"puis filtrage local, nombre d'abonnements actuel={count}, seuil={limit}"
+"⚠️ [💾SQLite] Trop de canaux abonnés, le polling bascule en mode scan par "
+"id puis filtrage local, nombre d'abonnements actuel={count}, "
+"seuil={limit}"
 
 #: hetu/data/backend/sqlite/mq.py:178
 #, python-brace-format
@@ -2870,14 +2863,16 @@ msgstr ""
 #, python-brace-format
 msgid "🔔 [💾SQLite] 收到订阅更新通知: {channel_name}"
 msgstr ""
-"🔔 [💾SQLite] Notification de mise à jour d'abonnement reçue : {channel_name}"
+"🔔 [💾SQLite] Notification de mise à jour d'abonnement reçue : "
+"{channel_name}"
 
 #: hetu/data/backend/sqlite/mq.py:213
 #, python-brace-format
 msgid "⚠️ [💾SQLite] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
 msgstr ""
-"⚠️ [💾SQLite] Notification de mise à jour d'abonnement trop tardive pour être"
-" traitée, {count} messages datant de {seconds} secondes ont été abandonnés"
+"⚠️ [💾SQLite] Notification de mise à jour d'abonnement trop tardive pour "
+"être traitée, {count} messages datant de {seconds} secondes ont été "
+"abandonnés"
 
 #: hetu/data/backend/sqlite/mq.py:237
 #, python-brace-format
@@ -2890,15 +2885,15 @@ msgstr ""
 #, python-brace-format
 msgid "❌ [💾SQLite] 轮询通知表连续失败 {count} 次，{backoff}s 后重试：{err}"
 msgstr ""
-"❌ [💾SQLite] Le polling de la table de notifications a échoué {count} fois "
-"consécutives, nouvelle tentative dans {backoff}s : {err}"
+"❌ [💾SQLite] Le polling de la table de notifications a échoué {count} fois"
+" consécutives, nouvelle tentative dans {backoff}s : {err}"
 
 #: hetu/data/backend/sqlite/mq.py:255
 #, python-brace-format
 msgid "✅ [💾SQLite] 轮询通知表恢复，期间失败 {count} 次"
 msgstr ""
-"✅ [💾SQLite] Le polling de la table de notifications a repris, {count} échecs"
-" pendant cette période"
+"✅ [💾SQLite] Le polling de la table de notifications a repris, {count} "
+"échecs pendant cette période"
 
 #: hetu/data/backend/sqlite/store.py:64
 #, python-brace-format
@@ -2908,8 +2903,8 @@ msgstr "N'est pas une clé de ligne : {key}"
 #: hetu/data/backend/sqlite/store.py:73
 msgid "不能直接写入 bool，请先转成 int / str"
 msgstr ""
-"Impossible d'écrire directement un bool, convertissez-le d'abord en int / "
-"str"
+"Impossible d'écrire directement un bool, convertissez-le d'abord en int /"
+" str"
 
 #: hetu/data/backend/sqlite/store.py:79
 #, python-brace-format
@@ -2920,17 +2915,17 @@ msgstr "Impossible d'écrire une valeur de type {type_name}"
 #, python-brace-format
 msgid "⚠️ [💾SQLite] {path} 开不了 WAL（当前 {mode}），读会被写挡住。库文件别放在网络文件系统上"
 msgstr ""
-"⚠️ [💾SQLite] Impossible d'activer le WAL pour {path} (actuellement {mode}), "
-"les lectures seront bloquées par les écritures. Ne placez pas le fichier de "
-"base de données sur un système de fichiers réseau"
+"⚠️ [💾SQLite] Impossible d'activer le WAL pour {path} (actuellement "
+"{mode}), les lectures seront bloquées par les écritures. Ne placez pas le"
+" fichier de base de données sur un système de fichiers réseau"
 
 #: hetu/data/backend/sqlite/store.py:192
 #, python-brace-format
 msgid "{path} 的格式版本是 {version}，本版 HeTu 用的是 {expected}：开发数据请删掉重建，或换个文件名"
 msgstr ""
 "Le format de {path} est en version {version}, alors que cette version de "
-"HeTu utilise {expected} : supprimez et recréez les données de développement,"
-" ou changez de nom de fichier"
+"HeTu utilise {expected} : supprimez et recréez les données de "
+"développement, ou changez de nom de fichier"
 
 #: hetu/data/backend/sqlite/store.py:200
 #, python-brace-format
@@ -2944,8 +2939,8 @@ msgstr ""
 #, python-brace-format
 msgid "{path} 不是 HeTu 的库文件，不会往里写：请换个文件名"
 msgstr ""
-"{path} n'est pas un fichier de base de données HeTu, rien n'y sera écrit : "
-"veuillez changer de nom de fichier"
+"{path} n'est pas un fichier de base de données HeTu, rien n'y sera écrit "
+": veuillez changer de nom de fichier"
 
 #: hetu/data/backend/sqlite/store.py:324
 #, python-brace-format
@@ -2960,16 +2955,16 @@ msgstr ""
 msgid "SQLite 列名不区分大小写：{table} 里有只差大小写的字段名（{err}），请改名"
 msgstr ""
 "Les noms de colonnes SQLite sont insensibles à la casse : dans {table}, "
-"certains noms de champs ne diffèrent que par la casse ({err}), veuillez les "
-"renommer"
+"certains noms de champs ne diffèrent que par la casse ({err}), veuillez "
+"les renommer"
 
 #: hetu/data/backend/sqlite/store.py:373
 #, python-brace-format
 msgid "SQLite 保留了 sqlite_ 开头的表名（不分大小写），建不了行表 {table}：请给实例换个不以 sqlite_ 开头的名字"
 msgstr ""
-"SQLite réserve les noms de tables commençant par sqlite_ (insensible à la "
-"casse), impossible de créer la table de lignes {table} : veuillez donner à "
-"l'instance un nom qui ne commence pas par sqlite_"
+"SQLite réserve les noms de tables commençant par sqlite_ (insensible à la"
+" casse), impossible de créer la table de lignes {table} : veuillez donner"
+" à l'instance un nom qui ne commence pas par sqlite_"
 
 #: hetu/data/backend/sqlite/store.py:403 hetu/data/backend/sqlite/store.py:424
 #, python-brace-format
@@ -2986,23 +2981,23 @@ msgid ""
 "⚠️ [📣DNS] 节点 {addr}（worker {field}）的时钟和本机差 {skew:.1f} 秒，请检查两边的 NTP（雪花 ID "
 "本来就要求时钟同步）"
 msgstr ""
-"⚠️ [📣DNS] L'horloge du nœud {addr} (worker {field}) diffère de {skew:.1f} "
-"secondes de celle de la machine locale, veuillez vérifier le NTP des deux "
-"côtés (les snowflake ID exigent déjà une horloge synchronisée)"
+"⚠️ [📣DNS] L'horloge du nœud {addr} (worker {field}) diffère de {skew:.1f}"
+" secondes de celle de la machine locale, veuillez vérifier le NTP des "
+"deux côtés (les snowflake ID exigent déjà une horloge synchronisée)"
 
 #: hetu/discovery/dns.py:435
 #, python-brace-format
 msgid "⚠️ [📣DNS] 注册表里 worker {field} 的登记解析不了，跳过：{err}"
 msgstr ""
-"⚠️ [📣DNS] L'enregistrement du worker {field} dans le registre ne peut pas "
-"être résolu, ignoré : {err}"
+"⚠️ [📣DNS] L'enregistrement du worker {field} dans le registre ne peut pas"
+" être résolu, ignoré : {err}"
 
 #: hetu/discovery/dns.py:451
 #, python-brace-format
 msgid "登记 {idle:.0f} 秒没更新，节点多半已经没了"
 msgstr ""
-"L'enregistrement n'a pas été mis à jour depuis {idle:.0f} secondes, le nœud "
-"a probablement disparu"
+"L'enregistrement n'a pas été mis à jour depuis {idle:.0f} secondes, le "
+"nœud a probablement disparu"
 
 #: hetu/discovery/dns.py:457
 #, python-brace-format
@@ -3021,8 +3016,8 @@ msgid ""
 "连不到它，不答。所有节点的 LISTEN 端口、--port、Caddyfile 里 dynamic a 的 port 要一致"
 msgstr ""
 "❌ [📣DNS] Le port enregistré pour le nœud {addr} est {port}, qui ne "
-"correspond pas à --port {expected} ; la passerelle ne peut pas le joindre "
-"sur {expected} et ne le renvoie pas. Le port LISTEN de tous les nœuds, "
+"correspond pas à --port {expected} ; la passerelle ne peut pas le joindre"
+" sur {expected} et ne le renvoie pas. Le port LISTEN de tous les nœuds, "
 "--port et le port de dynamic a dans le Caddyfile doivent être identiques"
 
 #: hetu/discovery/dns.py:510
@@ -3033,8 +3028,7 @@ msgstr "Connexion impossible en {timeout:g} secondes"
 #: hetu/discovery/dns.py:558
 #, python-brace-format
 msgid "从网关连不上 {addr}:{port}（{err}）"
-msgstr ""
-"Impossible de se connecter à {addr}:{port} depuis la passerelle ({err})"
+msgstr "Impossible de se connecter à {addr}:{port} depuis la passerelle ({err})"
 
 #: hetu/discovery/dns.py:561
 msgid "正在探测"
@@ -3044,20 +3038,20 @@ msgstr "Sondage en cours"
 #, python-brace-format
 msgid "ℹ️ [📣DNS] 从网关连得上 {addr}:{port} 了，开始答它"
 msgstr ""
-"ℹ️ [📣DNS] La connexion à {addr}:{port} depuis la passerelle fonctionne, on "
-"commence à le renvoyer"
+"ℹ️ [📣DNS] La connexion à {addr}:{port} depuis la passerelle fonctionne, "
+"on commence à le renvoyer"
 
 #: hetu/discovery/dns.py:604
 #, python-brace-format
 msgid ""
-"❌ [📣DNS] 从网关连不上节点 {addr}:{port}（{err}），先不答。请检查安全组是否放行网关到节点的 {port} 端口、节点的 "
-"LISTEN 和网络模式（只支持 host 网络）；每 {retry:g} 秒重试一次"
+"❌ [📣DNS] 从网关连不上节点 {addr}:{port}（{err}），先不答。请检查安全组是否放行网关到节点的 {port} 端口、节点的"
+" LISTEN 和网络模式（只支持 host 网络）；每 {retry:g} 秒重试一次"
 msgstr ""
-"❌ [📣DNS] Impossible de joindre le nœud {addr}:{port} depuis la passerelle "
-"({err}), on ne le renvoie pas pour l'instant. Vérifiez que le groupe de "
-"sécurité autorise le port {port} de la passerelle vers le nœud, ainsi que le"
-" LISTEN et le mode réseau du nœud (seul le réseau host est pris en charge) ;"
-" nouvelle tentative toutes les {retry:g} secondes"
+"❌ [📣DNS] Impossible de joindre le nœud {addr}:{port} depuis la passerelle"
+" ({err}), on ne le renvoie pas pour l'instant. Vérifiez que le groupe de "
+"sécurité autorise le port {port} de la passerelle vers le nœud, ainsi que"
+" le LISTEN et le mode réseau du nœud (seul le réseau host est pris en "
+"charge) ; nouvelle tentative toutes les {retry:g} secondes"
 
 #: hetu/discovery/dns.py:695
 #, python-brace-format
@@ -3081,8 +3075,8 @@ msgstr ""
 #, python-brace-format
 msgid "❌ [📣DNS] 读注册表失败，接着答上一次的结果。{hint}{err}"
 msgstr ""
-"❌ [📣DNS] Échec de la lecture du registre, on continue à renvoyer le dernier "
-"résultat. {hint}{err}"
+"❌ [📣DNS] Échec de la lecture du registre, on continue à renvoyer le "
+"dernier résultat. {hint}{err}"
 
 #: hetu/discovery/dns.py:716
 msgid "ℹ️ [📣DNS] 读注册表恢复正常"
@@ -3094,10 +3088,11 @@ msgid ""
 "❌ [📣DNS] namespace {ns} 的 {count} 条登记全都过期了，多半是副本落后或者和 master "
 "断开了，接着答上一次的结果。节点要是真的都没了，答上一次的结果也只是让 Caddy 连不上"
 msgstr ""
-"❌ [📣DNS] Les {count} enregistrements du namespace {ns} ont tous expiré ; la "
-"réplique est probablement en retard ou déconnectée du master, on continue à "
-"renvoyer le dernier résultat. Si les nœuds ont vraiment tous disparu, "
-"renvoyer le dernier résultat ne fera qu'empêcher Caddy de s'y connecter"
+"❌ [📣DNS] Les {count} enregistrements du namespace {ns} ont tous expiré ; "
+"la réplique est probablement en retard ou déconnectée du master, on "
+"continue à renvoyer le dernier résultat. Si les nœuds ont vraiment tous "
+"disparu, renvoyer le dernier résultat ne fera qu'empêcher Caddy de s'y "
+"connecter"
 
 #: hetu/discovery/dns.py:745
 msgid "ℹ️ [📣DNS] 注册表的登记又在更新了"
@@ -3117,31 +3112,30 @@ msgstr ""
 #, python-brace-format
 msgid "📣 [📣DNS] 答案变了：加了 {added}，去了 {removed}，一共 {count} 台"
 msgstr ""
-"📣 [📣DNS] La réponse a changé : {added} ajoutés, {removed} retirés, {count} "
-"au total"
+"📣 [📣DNS] La réponse a changé : {added} ajoutés, {removed} retirés, "
+"{count} au total"
 
 #: hetu/discovery/dns.py:784
 #, python-brace-format
 msgid "❌ [📣DNS] 重算答案出错，接着答上一次的结果，{interval:g} 秒后再算"
 msgstr ""
-"❌ [📣DNS] Erreur lors du recalcul de la réponse, on continue à renvoyer le "
-"dernier résultat, nouveau calcul dans {interval:g} secondes"
+"❌ [📣DNS] Erreur lors du recalcul de la réponse, on continue à renvoyer le"
+" dernier résultat, nouveau calcul dans {interval:g} secondes"
 
 #: hetu/discovery/dns.py:803
 #, python-brace-format
 msgid "ℹ️ [📣DNS] 收到第一个查询（来自 {peer}），Caddy 已经在用 hetu dns 了"
-msgstr ""
-"ℹ️ [📣DNS] Première requête reçue (de {peer}), Caddy utilise déjà hetu dns"
+msgstr "ℹ️ [📣DNS] Première requête reçue (de {peer}), Caddy utilise déjà hetu dns"
 
 #: hetu/discovery/dns.py:828
 #, python-brace-format
 msgid ""
-"⚠️ [📣DNS] 收到别的名字的查询：{name}，只答 {expected}。请检查 Caddyfile 里 dynamic a 的 name 和 "
-"--name 是否一致"
+"⚠️ [📣DNS] 收到别的名字的查询：{name}，只答 {expected}。请检查 Caddyfile 里 dynamic a 的 name"
+" 和 --name 是否一致"
 msgstr ""
 "⚠️ [📣DNS] Requête reçue pour un autre nom : {name}, seule {expected} est "
-"renvoyée. Vérifiez que le name de dynamic a dans le Caddyfile correspond à "
-"--name"
+"renvoyée. Vérifiez que le name de dynamic a dans le Caddyfile correspond "
+"à --name"
 
 #: hetu/discovery/dns.py:849
 msgid "❌ [📣DNS] 处理查询出错"
@@ -3151,22 +3145,22 @@ msgstr "❌ [📣DNS] Erreur lors du traitement de la requête"
 #, python-brace-format
 msgid "❌ --listen 要写成 IP:端口，比如 {default}，现在是 {listen!r}"
 msgstr ""
-"❌ --listen doit être au format IP:port, par exemple {default}, actuellement "
-"{listen!r}"
+"❌ --listen doit être au format IP:port, par exemple {default}, "
+"actuellement {listen!r}"
 
 #: hetu/discovery/dns.py:964
 #, python-brace-format
 msgid ""
 "❌ hetu dns 只支持 host 网络：连 Redis 用的地址 {src} 在 {device} 上，{device} "
-"是容器网络的虚拟网卡（veth 之类：iflink {iflink} ≠ ifindex {ifindex}）。Caddy 用 host 网络时查的 "
-"127.0.0.1 是宿主机的回环，bridge 网络里的 hetu dns 收不到。{hint}"
+"是容器网络的虚拟网卡（veth 之类：iflink {iflink} ≠ ifindex {ifindex}）。Caddy 用 host "
+"网络时查的 127.0.0.1 是宿主机的回环，bridge 网络里的 hetu dns 收不到。{hint}"
 msgstr ""
-"❌ hetu dns ne prend en charge que le réseau host : l'adresse {src} utilisée "
-"pour la connexion à Redis se trouve sur {device}, qui est une interface "
-"virtuelle de réseau de conteneurs (veth ou similaire : iflink {iflink} ≠ "
-"ifindex {ifindex}). Quand Caddy utilise le réseau host, le 127.0.0.1 qu'il "
-"interroge est la boucle locale de l'hôte, et hetu dns dans un réseau bridge "
-"ne le reçoit pas. {hint}"
+"❌ hetu dns ne prend en charge que le réseau host : l'adresse {src} "
+"utilisée pour la connexion à Redis se trouve sur {device}, qui est une "
+"interface virtuelle de réseau de conteneurs (veth ou similaire : iflink "
+"{iflink} ≠ ifindex {ifindex}). Quand Caddy utilise le réseau host, le "
+"127.0.0.1 qu'il interroge est la boucle locale de l'hôte, et hetu dns "
+"dans un réseau bridge ne le reçoit pas. {hint}"
 
 #: hetu/discovery/dns.py:1014
 #, python-brace-format
@@ -3175,16 +3169,16 @@ msgid ""
 "+select）：{command}"
 msgstr ""
 "Veuillez utiliser un utilisateur en lecture seule qui ne peut lire que "
-"hetu:nodes (les ACL ne sont pas synchronisées par la réplication, il faut le"
-" créer sur la réplique à laquelle hetu dns se connecte ; si vous n'utilisez "
-"pas la base 0, ajoutez aussi +select) : {command}"
+"hetu:nodes (les ACL ne sont pas synchronisées par la réplication, il faut"
+" le créer sur la réplique à laquelle hetu dns se connecte ; si vous "
+"n'utilisez pas la base 0, ajoutez aussi +select) : {command}"
 
 #: hetu/discovery/dns.py:1035
 #, python-brace-format
 msgid "❌ 连 Redis {url} 时用户名或口令不对：{err}"
 msgstr ""
-"❌ Nom d'utilisateur ou mot de passe incorrect lors de la connexion à Redis "
-"{url} : {err}"
+"❌ Nom d'utilisateur ou mot de passe incorrect lors de la connexion à "
+"Redis {url} : {err}"
 
 #: hetu/discovery/dns.py:1040
 #, python-brace-format
@@ -3199,16 +3193,16 @@ msgid ""
 msgstr ""
 "❌ Redis {url} est une réplique déconnectée du master ({err}) : replica-"
 "serve-stale-data no est configuré, les lectures sont refusées pendant la "
-"déconnexion. Attendez qu'elle se reconnecte au master, ou pointez vers une "
-"autre réplique"
+"déconnexion. Attendez qu'elle se reconnecte au master, ou pointez vers "
+"une autre réplique"
 
 #: hetu/discovery/dns.py:1057
 #, python-brace-format
 msgid "❌ Redis {url} 是原生集群（{err}），hetu dns 第一版不支持原生集群，请经代理层连"
 msgstr ""
-"❌ Redis {url} est un cluster natif ({err}) ; la première version de hetu dns"
-" ne prend pas en charge les clusters natifs, veuillez passer par une couche "
-"proxy"
+"❌ Redis {url} est un cluster natif ({err}) ; la première version de hetu "
+"dns ne prend pas en charge les clusters natifs, veuillez passer par une "
+"couche proxy"
 
 #: hetu/discovery/dns.py:1062
 #, python-brace-format
@@ -3226,8 +3220,7 @@ msgstr "D'autres clés que hetu:nodes sont également lisibles"
 
 #: hetu/discovery/dns.py:1085
 msgid "能执行管理命令（CONFIG、REPLICAOF 这些）"
-msgstr ""
-"Peut exécuter des commandes d'administration (CONFIG, REPLICAOF, etc.)"
+msgstr "Peut exécuter des commandes d'administration (CONFIG, REPLICAOF, etc.)"
 
 #: hetu/discovery/dns.py:1088
 #, python-brace-format
@@ -3244,8 +3237,8 @@ msgstr " ; "
 #, python-brace-format
 msgid "⚠️ hetu dns 连的是 master（{url}）：每秒一条 HGETALL 不大，但架构上读都走副本，请指向副本"
 msgstr ""
-"⚠️ hetu dns est connecté au master ({url}) : un HGETALL par seconde n'est "
-"pas énorme, mais architecturally toutes les lectures passent par les "
+"⚠️ hetu dns est connecté au master ({url}) : un HGETALL par seconde n'est"
+" pas énorme, mais architecturally toutes les lectures passent par les "
 "répliques, veuillez pointer vers une réplique"
 
 #: hetu/discovery/dns.py:1122
@@ -3259,22 +3252,23 @@ msgid ""
 "都不随复制同步，每台都要设。要给 master 也设的话，先在各副本上配好 masterauth（禁用了 default 的还要配 "
 "masteruser），不然主从复制会断"
 msgstr ""
-"⚠️ Redis {host} accepte les connexions même sans mot de passe : aucun mot de"
-" passe n'est défini pour l'utilisateur default. La passerelle est exposée "
-"sur Internet ; si elle était compromise, l'attaquant n'aurait pas besoin de "
-"l'utilisateur en lecture seule de hetu dns et se connecterait directement "
-"avec l'utilisateur default ; si default n'a pas de permissions restreintes "
-"(par défaut, il peut tout faire), il peut lire toutes les données, mais "
-"aussi modifier la configuration de réplication de la réplique (REPLICAOF) et"
-" falsifier les données que HeTu lit depuis la réplique. Veuillez définir un "
-"mot de passe pour l'utilisateur default de chaque réplique joignable par la "
-"passerelle (indiquez le mot de passe dans l'adresse des servants des "
-"BACKENDS des nœuds), ou le désactiver (ACL SETUSER default off, et les nœuds"
-" utilisent un autre utilisateur) ; les ACL et requirepass ne sont pas "
-"synchronisées par la réplication, il faut les définir sur chaque machine. Si"
-" vous voulez le définir aussi sur le master, configurez d'abord masterauth "
-"sur chaque réplique (et masteruser si default est désactivé), sinon la "
-"réplication master-réplique sera interrompue"
+"⚠️ Redis {host} accepte les connexions même sans mot de passe : aucun mot"
+" de passe n'est défini pour l'utilisateur default. La passerelle est "
+"exposée sur Internet ; si elle était compromise, l'attaquant n'aurait pas"
+" besoin de l'utilisateur en lecture seule de hetu dns et se connecterait "
+"directement avec l'utilisateur default ; si default n'a pas de "
+"permissions restreintes (par défaut, il peut tout faire), il peut lire "
+"toutes les données, mais aussi modifier la configuration de réplication "
+"de la réplique (REPLICAOF) et falsifier les données que HeTu lit depuis "
+"la réplique. Veuillez définir un mot de passe pour l'utilisateur default "
+"de chaque réplique joignable par la passerelle (indiquez le mot de passe "
+"dans l'adresse des servants des BACKENDS des nœuds), ou le désactiver "
+"(ACL SETUSER default off, et les nœuds utilisent un autre utilisateur) ; "
+"les ACL et requirepass ne sont pas synchronisées par la réplication, il "
+"faut les définir sur chaque machine. Si vous voulez le définir aussi sur "
+"le master, configurez d'abord masterauth sur chaque réplique (et "
+"masteruser si default est désactivé), sinon la réplication master-"
+"réplique sera interrompue"
 
 #: hetu/discovery/dns.py:1171
 #, python-brace-format
@@ -3283,14 +3277,13 @@ msgid ""
 "127.0.0.1 就够了"
 msgstr ""
 "⚠️ --listen {host} n'est pas une adresse de bouclage, d'autres machines "
-"peuvent aussi découvrir l'adresse interne des nœuds. Caddy et hetu dns sont "
-"sur la même machine, 127.0.0.1 suffit"
+"peuvent aussi découvrir l'adresse interne des nœuds. Caddy et hetu dns "
+"sont sur la même machine, 127.0.0.1 suffit"
 
 #: hetu/discovery/dns.py:1210
 #, python-brace-format
 msgid "hetu dns --once：namespace {ns}，名字 {name}，端口 {port}，Redis {url}"
-msgstr ""
-"hetu dns --once : namespace {ns}, nom {name}, port {port}, Redis {url}"
+msgstr "hetu dns --once : namespace {ns}, nom {name}, port {port}, Redis {url}"
 
 #: hetu/discovery/dns.py:1217
 #, python-brace-format
@@ -3300,8 +3293,8 @@ msgstr "Enregistrements de ce namespace : {count}"
 #: hetu/discovery/dns.py:1220
 msgid "这些登记全都过期了（hetu dns 常驻时会接着答上一次的结果）"
 msgstr ""
-"Ces enregistrements ont tous expiré (lorsque hetu dns tourne en continu, il "
-"continue à renvoyer le dernier résultat)"
+"Ces enregistrements ont tous expiré (lorsque hetu dns tourne en continu, "
+"il continue à renvoyer le dernier résultat)"
 
 #: hetu/discovery/dns.py:1221
 #, python-brace-format
@@ -3340,9 +3333,9 @@ msgstr "{ns} ({count} entrées)"
 msgid "❌ 要给 Redis 地址：环境变量 {env}（推荐，口令不会出现在进程列表里）或者 --redis，指向副本、用只读 ACL 用户"
 msgstr ""
 "❌ L'adresse Redis doit être fournie : variable d'environnement {env} "
-"(recommandé, le mot de passe n'apparaîtra pas dans la liste des processus) "
-"ou --redis, pointant vers un réplica, avec un utilisateur ACL en lecture "
-"seule"
+"(recommandé, le mot de passe n'apparaîtra pas dans la liste des "
+"processus) ou --redis, pointant vers un réplica, avec un utilisateur ACL "
+"en lecture seule"
 
 #: hetu/discovery/dns.py:1266
 #, python-brace-format
@@ -3391,15 +3384,14 @@ msgstr ""
 #: hetu/discovery/netcheck.py:89
 #, python-brace-format
 msgid "DISCOVERY 必须是 true 或 false，现在是 {value!r}。{hint}"
-msgstr ""
-"DISCOVERY doit être true ou false, actuellement c'est {value!r}.{hint}"
+msgstr "DISCOVERY doit être true ou false, actuellement c'est {value!r}.{hint}"
 
 #: hetu/discovery/netcheck.py:105
 #, python-brace-format
 msgid "它是字符串：加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）。请直接写 YAML 的布尔值、整数，或者用 !eval"
 msgstr ""
-"C'est une chaîne : soit elle est entre guillemets, soit c'est le résultat "
-"d'une interpolation ${VAR} (les interpolations produisent toujours des "
+"C'est une chaîne : soit elle est entre guillemets, soit c'est le résultat"
+" d'une interpolation ${VAR} (les interpolations produisent toujours des "
 "chaînes). Écrivez directement un booléen ou un entier YAML, ou utilisez "
 "!eval"
 
@@ -3407,58 +3399,56 @@ msgstr ""
 #, python-brace-format
 msgid "❌ 节点发现：LISTEN 要写成 主机:端口，端口是 1~65535（网关按同一个端口连各节点），现在是 {listen!r}"
 msgstr ""
-"❌ Découverte de nœuds : LISTEN doit s'écrire hôte:port, le port allant de 1 "
-"à 65535 (la passerelle se connecte à chaque nœud sur le même port), "
+"❌ Découverte de nœuds : LISTEN doit s'écrire hôte:port, le port allant de"
+" 1 à 65535 (la passerelle se connecte à chaque nœud sur le même port), "
 "actuellement c'est {listen!r}"
 
 #: hetu/discovery/netcheck.py:162
 #, python-brace-format
-msgid ""
-"❌ 节点发现：LISTEN 的主机要写 IP（0.0.0.0，或者本机的一个 IPv4 地址），不能写主机名 {host}：网关要拿它当地址连过来"
+msgid "❌ 节点发现：LISTEN 的主机要写 IP（0.0.0.0，或者本机的一个 IPv4 地址），不能写主机名 {host}：网关要拿它当地址连过来"
 msgstr ""
-"❌ Découverte de nœuds : l'hôte de LISTEN doit être une IP (0.0.0.0, ou une "
-"adresse IPv4 de la machine), pas un nom d'hôte {host} : la passerelle doit "
-"l'utiliser comme adresse pour se connecter"
+"❌ Découverte de nœuds : l'hôte de LISTEN doit être une IP (0.0.0.0, ou "
+"une adresse IPv4 de la machine), pas un nom d'hôte {host} : la passerelle"
+" doit l'utiliser comme adresse pour se connecter"
 
 #: hetu/discovery/netcheck.py:169
 #, python-brace-format
-msgid ""
-"❌ 节点发现只支持 IPv4（网关答的是 A 记录），LISTEN 写的是 {host}。请改成 0.0.0.0，或者本机的一个 IPv4 地址"
+msgid "❌ 节点发现只支持 IPv4（网关答的是 A 记录），LISTEN 写的是 {host}。请改成 0.0.0.0，或者本机的一个 IPv4 地址"
 msgstr ""
-"❌ La découverte de nœuds ne prend en charge qu'IPv4 (la passerelle répond "
-"avec un enregistrement A), LISTEN indique {host}. Remplacez par 0.0.0.0, ou "
-"par une adresse IPv4 de la machine"
+"❌ La découverte de nœuds ne prend en charge qu'IPv4 (la passerelle répond"
+" avec un enregistrement A), LISTEN indique {host}. Remplacez par 0.0.0.0,"
+" ou par une adresse IPv4 de la machine"
 
 #: hetu/discovery/netcheck.py:176
 #, python-brace-format
 msgid "❌ 节点发现：LISTEN 绑在回环地址 {host} 上，别的机器上的网关连不到。请改成 0.0.0.0，或者本机的对外 IP"
 msgstr ""
-"❌ Découverte de nœuds : LISTEN est lié à l'adresse de bouclage {host}, la "
-"passerelle située sur une autre machine ne peut pas s'y connecter. Remplacez"
-" par 0.0.0.0, ou par l'IP externe de la machine"
+"❌ Découverte de nœuds : LISTEN est lié à l'adresse de bouclage {host}, la"
+" passerelle située sur une autre machine ne peut pas s'y connecter. "
+"Remplacez par 0.0.0.0, ou par l'IP externe de la machine"
 
 #: hetu/discovery/netcheck.py:183
 #, python-brace-format
 msgid "❌ 节点发现：LISTEN 写的 {host} 不是本机（这个网络命名空间里）的地址。在容器里多半是没用 host 网络。{hint}"
 msgstr ""
-"❌ Découverte de nœuds : l'adresse {host} indiquée dans LISTEN n'est pas une "
-"adresse de la machine (dans cet espace de noms réseau). Dans un conteneur, "
-"c'est probablement que le réseau host n'est pas utilisé.{hint}"
+"❌ Découverte de nœuds : l'adresse {host} indiquée dans LISTEN n'est pas "
+"une adresse de la machine (dans cet espace de noms réseau). Dans un "
+"conteneur, c'est probablement que le réseau host n'est pas utilisé.{hint}"
 
 #: hetu/discovery/netcheck.py:198 hetu/discovery/netcheck.py:368
 msgid "❌ 节点发现：配置里没有 BACKENDS"
-msgstr ""
-"❌ Découverte de nœuds : il n'y a pas de BACKENDS dans la configuration"
+msgstr "❌ Découverte de nœuds : il n'y a pas de BACKENDS dans la configuration"
 
 #: hetu/discovery/netcheck.py:207
 #, python-brace-format
 msgid ""
-"❌ 节点发现：默认后端 {name} 经 unix socket 连 Redis，推不出本机对外的地址。请在 LISTEN 里写明本机的对外 IP，比如"
-" 10.0.3.17:2466"
+"❌ 节点发现：默认后端 {name} 经 unix socket 连 Redis，推不出本机对外的地址。请在 LISTEN 里写明本机的对外 "
+"IP，比如 10.0.3.17:2466"
 msgstr ""
-"❌ Découverte de nœuds : le Backend par défaut {name} se connecte à Redis via"
-" un socket unix, impossible d'en déduire l'adresse externe de la machine. "
-"Indiquez l'IP externe de la machine dans LISTEN, par exemple 10.0.3.17:2466"
+"❌ Découverte de nœuds : le Backend par défaut {name} se connecte à Redis "
+"via un socket unix, impossible d'en déduire l'adresse externe de la "
+"machine. Indiquez l'IP externe de la machine dans LISTEN, par exemple "
+"10.0.3.17:2466"
 
 #: hetu/discovery/netcheck.py:214
 #, python-brace-format
@@ -3474,14 +3464,16 @@ msgstr ""
 #: hetu/discovery/netcheck.py:232
 msgid "请在 LISTEN 里写明本机的对外 IP，比如 10.0.3.17:2466"
 msgstr ""
-"Indiquez l'IP externe de la machine dans LISTEN, par exemple 10.0.3.17:2466"
+"Indiquez l'IP externe de la machine dans LISTEN, par exemple "
+"10.0.3.17:2466"
 
 #: hetu/discovery/netcheck.py:239
 #, python-brace-format
 msgid "❌ 节点发现：解析不出 Redis 地址 {host} 的 IPv4 地址（{err}），推不出广播地址。{hint}"
 msgstr ""
-"❌ Découverte de nœuds : impossible de résoudre l'adresse IPv4 de l'adresse "
-"Redis {host} ({err}), impossible d'en déduire l'adresse de diffusion.{hint}"
+"❌ Découverte de nœuds : impossible de résoudre l'adresse IPv4 de "
+"l'adresse Redis {host} ({err}), impossible d'en déduire l'adresse de "
+"diffusion.{hint}"
 
 #: hetu/discovery/netcheck.py:249
 #, python-brace-format
@@ -3494,17 +3486,17 @@ msgstr ""
 #, python-brace-format
 msgid "❌ 节点发现：连 Redis（{host}）用的是回环地址 {src}，Redis 在本机，推不出别的机器连得到的地址。{hint}"
 msgstr ""
-"❌ Découverte de nœuds : la connexion à Redis ({host}) utilise l'adresse de "
-"bouclage {src}, Redis est sur la machine locale, impossible d'en déduire une"
-" adresse joignable depuis d'autres machines.{hint}"
+"❌ Découverte de nœuds : la connexion à Redis ({host}) utilise l'adresse "
+"de bouclage {src}, Redis est sur la machine locale, impossible d'en "
+"déduire une adresse joignable depuis d'autres machines.{hint}"
 
 #: hetu/discovery/netcheck.py:263
 #, python-brace-format
 msgid "❌ 节点发现：连 Redis（{host}）用的源地址 {src} 是链路本地地址，别的机器连不到。{hint}"
 msgstr ""
-"❌ Découverte de nœuds : l'adresse source {src} utilisée pour se connecter à "
-"Redis ({host}) est une adresse link-local, les autres machines ne peuvent "
-"pas l'atteindre.{hint}"
+"❌ Découverte de nœuds : l'adresse source {src} utilisée pour se connecter"
+" à Redis ({host}) est une adresse link-local, les autres machines ne "
+"peuvent pas l'atteindre.{hint}"
 
 #: hetu/discovery/netcheck.py:374
 #, python-brace-format
@@ -3512,22 +3504,22 @@ msgid ""
 "❌ 节点发现要用 Redis 后端：默认后端（配置里的第一个）{name} 的 type 是 {kind}。SQLite "
 "只用于单机开发，用不着节点发现，请关掉 DISCOVERY"
 msgstr ""
-"❌ La découverte de nœuds nécessite un Backend Redis : le Backend par défaut "
-"(le premier de la configuration) {name} a pour type {kind}. SQLite ne sert "
-"que pour le développement sur une seule machine, la découverte de nœuds est "
-"inutile, veuillez désactiver DISCOVERY"
+"❌ La découverte de nœuds nécessite un Backend Redis : le Backend par "
+"défaut (le premier de la configuration) {name} a pour type {kind}. SQLite"
+" ne sert que pour le développement sur une seule machine, la découverte "
+"de nœuds est inutile, veuillez désactiver DISCOVERY"
 
 #: hetu/discovery/netcheck.py:393
 #, python-brace-format
 msgid ""
 "❌ 节点发现要求 PROXIES_COUNT ≥ 1（现在是 {value!r}）：节点在网关后面，不从 X-Forwarded-For "
-"取地址的话，所有玩家的地址都是网关的，同 IP 的匿名连接上限（MAX_ANONYMOUS_CONNECTION_BY_IP）会把玩家挡在外面。前面只有"
-" Caddy 一层时设成 1。{hint}"
+"取地址的话，所有玩家的地址都是网关的，同 IP "
+"的匿名连接上限（MAX_ANONYMOUS_CONNECTION_BY_IP）会把玩家挡在外面。前面只有 Caddy 一层时设成 1。{hint}"
 msgstr ""
-"❌ La découverte de nœuds exige PROXIES_COUNT ≥ 1 (actuellement {value!r}) : "
-"les nœuds sont derrière la passerelle ; si l'adresse n'est pas extraite de "
-"X-Forwarded-For, toutes les adresses des joueurs seront celle de la "
-"passerelle, et la limite de connexions anonymes par IP "
+"❌ La découverte de nœuds exige PROXIES_COUNT ≥ 1 (actuellement {value!r})"
+" : les nœuds sont derrière la passerelle ; si l'adresse n'est pas "
+"extraite de X-Forwarded-For, toutes les adresses des joueurs seront celle"
+" de la passerelle, et la limite de connexions anonymes par IP "
 "(MAX_ANONYMOUS_CONNECTION_BY_IP) bloquera les joueurs. S'il n'y a qu'une "
 "seule couche Caddy devant, réglez-la sur 1.{hint}"
 
@@ -3536,48 +3528,49 @@ msgid ""
 "LISTEN 是 0.0.0.0，按连 Redis 的源地址推出来的，说明到 Redis 走的是本机网桥（Redis 跑在本机的 bridge "
 "网络容器里）。"
 msgstr ""
-"LISTEN vaut 0.0.0.0, valeur déduite de l'adresse source de la connexion à "
-"Redis, ce qui indique que le trafic vers Redis passe par le pont réseau "
-"local (Redis tourne dans un conteneur sur le réseau bridge de la machine)."
+"LISTEN vaut 0.0.0.0, valeur déduite de l'adresse source de la connexion à"
+" Redis, ce qui indique que le trafic vers Redis passe par le pont réseau "
+"local (Redis tourne dans un conteneur sur le réseau bridge de la "
+"machine)."
 
 #: hetu/discovery/netcheck.py:416
 #, python-brace-format
 msgid ""
-"❌ 节点发现：广播地址 {ip} 在本机的容器网桥 {device} 上，别的机器连不到。{cause}请在 LISTEN 里写明本机的对外 IP，比如"
-" 10.0.3.17:2466"
+"❌ 节点发现：广播地址 {ip} 在本机的容器网桥 {device} 上，别的机器连不到。{cause}请在 LISTEN 里写明本机的对外 "
+"IP，比如 10.0.3.17:2466"
 msgstr ""
-"❌ Découverte de nœuds : l'adresse de diffusion {ip} se trouve sur le pont "
-"réseau de conteneurs {device} de la machine, les autres machines ne peuvent "
-"pas l'atteindre.{cause}Indiquez l'IP externe de la machine dans LISTEN, par "
-"exemple 10.0.3.17:2466"
+"❌ Découverte de nœuds : l'adresse de diffusion {ip} se trouve sur le pont"
+" réseau de conteneurs {device} de la machine, les autres machines ne "
+"peuvent pas l'atteindre.{cause}Indiquez l'IP externe de la machine dans "
+"LISTEN, par exemple 10.0.3.17:2466"
 
 #: hetu/discovery/netcheck.py:420
 #, python-brace-format
 msgid ""
-"❌ 节点发现只支持 host 网络：广播地址 {ip} 在 {device} 上，{device} 是容器网络的虚拟网卡（veth 之类：iflink "
-"{iflink} ≠ ifindex {ifindex}），别的机器上的网关连不到。{hint}{already}"
+"❌ 节点发现只支持 host 网络：广播地址 {ip} 在 {device} 上，{device} 是容器网络的虚拟网卡（veth "
+"之类：iflink {iflink} ≠ ifindex {ifindex}），别的机器上的网关连不到。{hint}{already}"
 msgstr ""
-"❌ La découverte de nœuds ne prend en charge que le réseau host : l'adresse "
-"de diffusion {ip} se trouve sur {device}, et {device} est une interface "
-"réseau virtuelle de réseau de conteneurs (de type veth : iflink {iflink} ≠ "
-"ifindex {ifindex}), la passerelle située sur d'autres machines ne peut pas "
-"l'atteindre.{hint}{already}"
+"❌ La découverte de nœuds ne prend en charge que le réseau host : "
+"l'adresse de diffusion {ip} se trouve sur {device}, et {device} est une "
+"interface réseau virtuelle de réseau de conteneurs (de type veth : iflink"
+" {iflink} ≠ ifindex {ifindex}), la passerelle située sur d'autres "
+"machines ne peut pas l'atteindre.{hint}{already}"
 
 #: hetu/discovery/netcheck.py:429
 msgid ""
-"已经是 host 网络的话（比如 k8s 的 hostNetwork，到 Redis 走的是 CNI 的虚拟网卡），在 LISTEN 里写明本机的对外 "
-"IP，比如 10.0.3.17:2466"
+"已经是 host 网络的话（比如 k8s 的 hostNetwork，到 Redis 走的是 CNI 的虚拟网卡），在 LISTEN "
+"里写明本机的对外 IP，比如 10.0.3.17:2466"
 msgstr ""
-"Si vous êtes déjà sur le réseau host (par exemple hostNetwork de k8s, où le "
-"trafic vers Redis passe par l'interface virtuelle du CNI), indiquez l'IP "
-"externe de la machine dans LISTEN, par exemple 10.0.3.17:2466"
+"Si vous êtes déjà sur le réseau host (par exemple hostNetwork de k8s, où "
+"le trafic vers Redis passe par l'interface virtuelle du CNI), indiquez "
+"l'IP externe de la machine dans LISTEN, par exemple 10.0.3.17:2466"
 
 #: hetu/discovery/registry.py:121
 #, python-brace-format
 msgid "不认识的登记格式版本 {version}（这个版本的 HeTu 认识 {known}）"
 msgstr ""
-"Version de format d'enregistrement inconnue {version} (cette version de HeTu"
-" reconnaît {known})"
+"Version de format d'enregistrement inconnue {version} (cette version de "
+"HeTu reconnaît {known})"
 
 #: hetu/discovery/registry.py:148
 msgid "field 不是 worker id"
@@ -3598,8 +3591,8 @@ msgstr ""
 #, python-brace-format
 msgid "📣 [📣Discovery] 节点发现：登记地址 {addr}:{port}（worker id {field}）"
 msgstr ""
-"📣 [📣Discovery] Découverte de nœud : adresse d'enregistrement {addr}:{port} "
-"(worker id {field})"
+"📣 [📣Discovery] Découverte de nœud : adresse d'enregistrement "
+"{addr}:{port} (worker id {field})"
 
 #: hetu/discovery/registry.py:375
 #, python-brace-format
@@ -3613,8 +3606,9 @@ msgstr ""
 #, python-brace-format
 msgid "⚠️ [📣Discovery] 关服时删登记失败，等它过期（{stale:g} 秒）：{err}"
 msgstr ""
-"⚠️ [📣Discovery] Échec de la suppression de l'enregistrement lors de l'arrêt "
-"du serveur ; il faut attendre son expiration ({stale:g} secondes) : {err}"
+"⚠️ [📣Discovery] Échec de la suppression de l'enregistrement lors de "
+"l'arrêt du serveur ; il faut attendre son expiration ({stale:g} secondes)"
+" : {err}"
 
 #: hetu/endpoint/connection.py:91 hetu/endpoint/connection.py:135
 #: hetu/endpoint/connection.py:170
@@ -3627,8 +3621,8 @@ msgstr ""
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
 msgstr ""
-"⚠️ [📞Endpoint] [Opération illégale] Trop de connexions anonymes depuis la "
-"même IP ({count}), possible attaque."
+"⚠️ [📞Endpoint] [Opération illégale] Trop de connexions anonymes depuis la"
+" même IP ({count}), possible attaque."
 
 #: hetu/endpoint/connection.py:167
 msgid "请先初始化连接"
@@ -3644,8 +3638,8 @@ msgstr ""
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
 msgstr ""
-"⚠️ [📞Endpoint] Les données de connexion actuelles ont été supprimées, peut-"
-"être une expulsion, la connexion sera interrompue. Appel : {ex_info}"
+"⚠️ [📞Endpoint] Les données de connexion actuelles ont été supprimées, "
+"peut-être une expulsion, la connexion sera interrompue. Appel : {ex_info}"
 
 #: hetu/endpoint/connection.py:330
 #, python-brace-format
@@ -3653,8 +3647,8 @@ msgid ""
 "⚠️ [📞Endpoint] [非法操作] 发送消息数过多({sent_msgs} in "
 "{sent_elapsed}s)，可能是订阅攻击，将断开连接。调用：{info}"
 msgstr ""
-"⚠️ [📞Endpoint] [Opération illégale] Trop de messages envoyés ({sent_msgs} en"
-" {sent_elapsed}s), possible attaque par abonnement, la connexion sera "
+"⚠️ [📞Endpoint] [Opération illégale] Trop de messages envoyés ({sent_msgs}"
+" en {sent_elapsed}s), possible attaque par abonnement, la connexion sera "
 "interrompue. Appel : {info}"
 
 #: hetu/endpoint/connection.py:354
@@ -3663,9 +3657,9 @@ msgid ""
 "⚠️ [📞Endpoint] [非法操作] 收到消息数过多({received_msgs} in "
 "{received_elapsed}s)，可能是flood攻击，将断开连接。调用：{info}"
 msgstr ""
-"⚠️ [📞Endpoint] [Opération illégale] Trop de messages reçus ({received_msgs} "
-"en {received_elapsed}s), possible attaque par inondation, la connexion sera "
-"interrompue. Appel : {info}"
+"⚠️ [📞Endpoint] [Opération illégale] Trop de messages reçus "
+"({received_msgs} en {received_elapsed}s), possible attaque par "
+"inondation, la connexion sera interrompue. Appel : {info}"
 
 #: hetu/endpoint/definer.py:72
 msgid "Endpoint重复定义："
@@ -3675,8 +3669,8 @@ msgstr "Définition d'endpoint en double :"
 #, python-brace-format
 msgid "Endpoint参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
 msgstr ""
-"Erreur de définition du nom de paramètre d'endpoint, le premier paramètre "
-"doit être : ctx. Le vôtre : {func_arg_names}"
+"Erreur de définition du nom de paramètre d'endpoint, le premier paramètre"
+" doit être : ctx. Le vôtre : {func_arg_names}"
 
 #: hetu/endpoint/definer.py:179
 msgid "Endpoint的权限不支持OWNER/RLS"
@@ -3707,8 +3701,8 @@ msgstr ""
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] [非法操作] {context} | {endpoint}无调用权限，检查是否非法调用：{args}"
 msgstr ""
-"⚠️ [📞Endpoint] [Opération illégale] {context} | Aucune autorisation d'appel "
-"pour {endpoint}, vérifiez s'il s'agit d'un appel illégal : {args}"
+"⚠️ [📞Endpoint] [Opération illégale] {context} | Aucune autorisation "
+"d'appel pour {endpoint}, vérifiez s'il s'agit d'un appel illégal : {args}"
 
 #: hetu/endpoint/executor.py:154
 #, python-brace-format
@@ -3725,8 +3719,8 @@ msgid ""
 "传入了{actual_args}个。调用内容：{args}"
 msgstr ""
 "❌ [📞Endpoint] [Opération illégale] {context} | Nombre incorrect de "
-"paramètres pour {namespace}.{endpoint}, vérifiez le code client. Requis : "
-"{min_args}-{max_args} paramètres, fournis : {actual_args}. Contenu de "
+"paramètres pour {namespace}.{endpoint}, vérifiez le code client. Requis :"
+" {min_args}-{max_args} paramètres, fournis : {actual_args}. Contenu de "
 "l'appel : {args}"
 
 #: hetu/endpoint/executor.py:197
@@ -3738,8 +3732,8 @@ msgstr "🔜 [📞Endpoint] Appel de l'Endpoint : {ep_name}{args}"
 #, python-brace-format
 msgid "❌ [📞Endpoint] [调用异常] {context} | {ep_name}{args}，异常：{exc_type}:{exc}"
 msgstr ""
-"❌ [📞Endpoint] [Exception d'appel] {context} | {ep_name}{args}, exception : "
-"{exc_type}:{exc}"
+"❌ [📞Endpoint] [Exception d'appel] {context} | {ep_name}{args}, exception "
+": {exc_type}:{exc}"
 
 #: hetu/endpoint/executor.py:260
 #, python-brace-format
@@ -3749,7 +3743,8 @@ msgstr "🚧 [📞Endpoint] {endpoint} a été refusé par le garde : {code}"
 #: hetu/endpoint/guard.py:31
 msgid "@rate_limit/@guard 必须放在 @define_system/@define_endpoint 的下面"
 msgstr ""
-"@rate_limit/@guard doivent être placés sous @define_system/@define_endpoint"
+"@rate_limit/@guard doivent être placés sous "
+"@define_system/@define_endpoint"
 
 #: hetu/server/config.py:62
 #, python-brace-format
@@ -3770,8 +3765,7 @@ msgstr "[Opération illégale] Opération de souscription inconnue : {op}"
 
 #: hetu/server/receiver.py:261
 #, python-brace-format
-msgid ""
-" [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，{num_tbl_sub}个整表订阅"
+msgid " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，{num_tbl_sub}个整表订阅"
 msgstr ""
 " [Opération illégale] Le nombre d'abonnements dépasse la limite : "
 "{num_row_sub} abonnements de ligne, {num_idx_sub} abonnements d'index, "
@@ -3823,22 +3817,21 @@ msgstr "❌ [📡WSReceiver] Erreur de connexion Redis, déconnexion : {err}"
 #: hetu/server/receiver.py:396
 #, python-brace-format
 msgid "⚠️ [📡WSReceiver] [非法操作] 封包：{data}，异常：{err}"
-msgstr ""
-"⚠️ [📡WSReceiver] [Opération illégale] Paquet : {data}, exception : {err}"
+msgstr "⚠️ [📡WSReceiver] [Opération illégale] Paquet : {data}, exception : {err}"
 
 #: hetu/server/receiver.py:403
 #, python-brace-format
 msgid "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
 msgstr ""
-"❌ [📡WSReceiver] Exception lors de l'exécution, paquet : {data}, exception : "
-"{err}"
+"❌ [📡WSReceiver] Exception lors de l'exécution, paquet : {data}, exception"
+" : {err}"
 
 #: hetu/server/receiver.py:424
 #, python-brace-format
 msgid "⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}"
 msgstr ""
-"⛓️ [📡WSReceiver] Coroutine de réception terminée, fermeture de la connexion "
-": {reason}"
+"⛓️ [📡WSReceiver] Coroutine de réception terminée, fermeture de la "
+"connexion : {reason}"
 
 #: hetu/server/runtime.py:114
 #, python-brace-format
@@ -3848,10 +3841,13 @@ msgid ""
 "* 如果是通过Config启动，此文件由APP_FILE参数设置\n"
 "* 如果由Docker启动，还需检查是否正确映射了/app目录\n"
 msgstr ""
-"Impossible de charger le fichier de démarrage principal ({err}) : {app_file}, vérifiez les possibilités suivantes :\n"
-"* Si démarré en ligne de commande, vérifiez que le chemin du paramètre --app-file est correct\n"
+"Impossible de charger le fichier de démarrage principal ({err}) : "
+"{app_file}, vérifiez les possibilités suivantes :\n"
+"* Si démarré en ligne de commande, vérifiez que le chemin du paramètre "
+"--app-file est correct\n"
 "* Si démarré via Config, ce fichier est défini par le paramètre APP_FILE\n"
-"* Si démarré via Docker, vérifiez également que le répertoire /app est correctement mappé\n"
+"* Si démarré via Docker, vérifiez également que le répertoire /app est "
+"correctement mappé\n"
 
 #: hetu/server/runtime.py:177
 #, python-brace-format
@@ -3859,9 +3855,9 @@ msgid ""
 "LOGGING 配置引用了 Sanic 的类，HeTu 已经不用 Sanic 了：{items}。控制台的彩色格式请改用 "
 "hetu.safelogging.formatter.ContextAutoFormatter，写法见 CONFIG_TEMPLATE.yml"
 msgstr ""
-"La configuration LOGGING référence des classes de Sanic, or HeTu n'utilise "
-"plus Sanic : {items}. Pour le formatage coloré de la console, utilisez "
-"plutôt hetu.safelogging.formatter.ContextAutoFormatter, voir "
+"La configuration LOGGING référence des classes de Sanic, or HeTu "
+"n'utilise plus Sanic : {items}. Pour le formatage coloré de la console, "
+"utilisez plutôt hetu.safelogging.formatter.ContextAutoFormatter, voir "
 "CONFIG_TEMPLATE.yml pour la syntaxe"
 
 #: hetu/server/runtime.py:251
@@ -3877,8 +3873,11 @@ msgid ""
 "❌ 进程[{pid}] 启动超时({timeout}秒): {err}\n"
 "    启动流程卡住会让服务器一直起不来，已中止。如果它本来就需要跑这么久，请调大配置 STARTUP_TIMEOUT（0为不限制）"
 msgstr ""
-"❌ Le processus [{pid}] a dépassé le délai de démarrage ({timeout} secondes) : {err}\n"
-"    Le processus de démarrage bloqué empêcherait le serveur de démarrer, il a été interrompu. Si ce temps de démarrage est réellement nécessaire, veuillez augmenter la configuration STARTUP_TIMEOUT (0 pour illimité)"
+"❌ Le processus [{pid}] a dépassé le délai de démarrage ({timeout} "
+"secondes) : {err}\n"
+"    Le processus de démarrage bloqué empêcherait le serveur de démarrer, "
+"il a été interrompu. Si ce temps de démarrage est réellement nécessaire, "
+"veuillez augmenter la configuration STARTUP_TIMEOUT (0 pour illimité)"
 
 #: hetu/server/runtime.py:391
 #, python-brace-format
@@ -3888,8 +3887,8 @@ msgstr "Délai de démarrage dépassé ({timeout} secondes) : {err}"
 #: hetu/server/runtime.py:409
 msgid "卡在连接后端、租 Worker ID 或建表阶段"
 msgstr ""
-"Bloqué à l'étape de connexion au Backend, de location d'un Worker ID ou de "
-"création des tables"
+"Bloqué à l'étape de connexion au Backend, de location d'un Worker ID ou "
+"de création des tables"
 
 #: hetu/server/runtime.py:412
 #, python-brace-format
@@ -3910,14 +3909,13 @@ msgstr "ℹ️ Le processus [{pid}] a terminé le chargement de {app_file}"
 #, python-brace-format
 msgid "ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服"
 msgstr ""
-"ℹ️ Le processus [{pid}] a démarré {instances} serveur(s) pour l'application "
-"{namespace}"
+"ℹ️ Le processus [{pid}] a démarré {instances} serveur(s) pour "
+"l'application {namespace}"
 
 #: hetu/server/runtime.py:457
 #, python-brace-format
 msgid "❌ 进程[{pid}] 启动System执行失败: {err}"
-msgstr ""
-"❌ Le processus [{pid}] a échoué à exécuter le System de démarrage : {err}"
+msgstr "❌ Le processus [{pid}] a échoué à exécuter le System de démarrage : {err}"
 
 #: hetu/server/runtime.py:462
 #, python-brace-format
@@ -3926,10 +3924,11 @@ msgstr "Échec de l'exécution du System de démarrage : {err}"
 
 #: hetu/server/runtime.py:487
 msgid ""
-"❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令：hetu upgrade --config <your_config_file>.yml"
+"❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令：hetu upgrade --config "
+"<your_config_file>.yml"
 msgstr ""
-"❌ [📡Serveur] La structure de la table de la base de données nécessite une "
-"migration, veuillez utiliser la commande de migration : hetu upgrade "
+"❌ [📡Serveur] La structure de la table de la base de données nécessite une"
+" migration, veuillez utiliser la commande de migration : hetu upgrade "
 "--config <your_config_file>.yml"
 
 #: hetu/server/runtime.py:586
@@ -3937,14 +3936,15 @@ msgstr ""
 msgid "⌚ [📣Discovery] 已在注册表里注销，照常服务 {wait:g} 秒、等网关刷新之后再停止监听"
 msgstr ""
 "⌚ [📣Discovery] Désenregistré du registre, continue de servir normalement "
-"pendant {wait:g} secondes, puis arrête l'écoute après le rafraîchissement de"
-" la passerelle"
+"pendant {wait:g} secondes, puis arrête l'écoute après le rafraîchissement"
+" de la passerelle"
 
 #: hetu/server/runtime.py:604
 msgid "⚠️ [📡Server] 开服失败后释放 Worker ID 租约超时，等它自己过期"
 msgstr ""
-"⚠️ [📡Serveur] Délai dépassé lors de la libération du bail de Worker ID après"
-" l'échec du démarrage du serveur, attente de son expiration automatique"
+"⚠️ [📡Serveur] Délai dépassé lors de la libération du bail de Worker ID "
+"après l'échec du démarrage du serveur, attente de son expiration "
+"automatique"
 
 #: hetu/server/runtime.py:632
 #, python-brace-format
@@ -3957,15 +3957,15 @@ msgstr ""
 #: hetu/server/runtime.py:672
 msgid "⚠️ [📡Server] 关服时还有连接相关的任务没停下，不再等待"
 msgstr ""
-"⚠️ [📡Serveur] À l'arrêt du serveur, des tâches liées aux connexions ne sont "
-"pas encore arrêtées, on n'attend plus"
+"⚠️ [📡Serveur] À l'arrêt du serveur, des tâches liées aux connexions ne "
+"sont pas encore arrêtées, on n'attend plus"
 
 #: hetu/server/runtime.py:676
 #, python-brace-format
 msgid "⚠️ [⚙️Future] 关服时 FutureCalls 没在{timeout}秒内停下，不再等待"
 msgstr ""
-"⚠️ [⚙️Future] À l'arrêt du serveur, les FutureCalls ne se sont pas arrêtées "
-"dans les {timeout} secondes, on n'attend plus"
+"⚠️ [⚙️Future] À l'arrêt du serveur, les FutureCalls ne se sont pas "
+"arrêtées dans les {timeout} secondes, on n'attend plus"
 
 #: hetu/server/runtime.py:702
 #, python-brace-format
@@ -4039,8 +4039,7 @@ msgstr "Code de sortie {code}"
 #: hetu/server/supervisor.py:625
 #, python-brace-format
 msgid "❌ [🗂️Supervisor] worker {index} 在就绪之前退出了（{reason}）"
-msgstr ""
-"❌ [🗂️Supervisor] le worker {index} a quitté avant d'être prêt ({reason})"
+msgstr "❌ [🗂️Supervisor] le worker {index} a quitté avant d'être prêt ({reason})"
 
 #: hetu/server/supervisor.py:641
 #, python-brace-format
@@ -4059,48 +4058,46 @@ msgstr ""
 #: hetu/server/supervisor.py:658
 #, python-brace-format
 msgid "❌ [🗂️Supervisor] worker {index} 也没能开服（{reason}）"
-msgstr ""
-"❌ [🗂️Supervisor] le worker {index} n'a pas non plus pu démarrer ({reason})"
+msgstr "❌ [🗂️Supervisor] le worker {index} n'a pas non plus pu démarrer ({reason})"
 
 #: hetu/server/supervisor.py:679
 #, python-brace-format
-msgid ""
-"❌ [🗂️Supervisor] worker {index} 连续 {count} 次意外退出（最近一次：{reason}），不再重启，关服"
+msgid "❌ [🗂️Supervisor] worker {index} 连续 {count} 次意外退出（最近一次：{reason}），不再重启，关服"
 msgstr ""
-"❌ [🗂️Supervisor] le worker {index} a quitté de façon inattendue {count} fois"
-" de suite (la plus récente : {reason}), plus de redémarrage, arrêt"
+"❌ [🗂️Supervisor] le worker {index} a quitté de façon inattendue {count} "
+"fois de suite (la plus récente : {reason}), plus de redémarrage, arrêt"
 
 #: hetu/server/supervisor.py:688
 #, python-brace-format
 msgid "⚠️ [🗂️Supervisor] worker {index} 意外退出（{reason}），{delay:g} 秒后以同一序号重启"
 msgstr ""
-"⚠️ [🗂️Supervisor] le worker {index} a quitté de façon inattendue ({reason}),"
-" redémarrage avec le même index dans {delay:g} secondes"
+"⚠️ [🗂️Supervisor] le worker {index} a quitté de façon inattendue "
+"({reason}), redémarrage avec le même index dans {delay:g} secondes"
 
 #: hetu/server/supervisor.py:710
 #, python-brace-format
 msgid ""
-"❌ [🗂️Supervisor] worker {index}（pid {pid}）没在 {timeout:g} 秒内就绪，卡在开服里了（比如启动 "
-"System 里有阻塞调用），强制结束"
+"❌ [🗂️Supervisor] worker {index}（pid {pid}）没在 {timeout:g} 秒内就绪，卡在开服里了（比如启动"
+" System 里有阻塞调用），强制结束"
 msgstr ""
 "❌ [🗂️Supervisor] le worker {index} (pid {pid}) n'a pas été prêt dans les "
-"{timeout:g} secondes, il est bloqué dans le démarrage (par exemple un appel "
-"bloquant dans un System au démarrage), fin forcée"
+"{timeout:g} secondes, il est bloqué dans le démarrage (par exemple un "
+"appel bloquant dans un System au démarrage), fin forcée"
 
 #: hetu/server/supervisor.py:769
 #, python-brace-format
 msgid "🔄 [🗂️Supervisor] 文件有改动（{files}），逐个重启 worker"
 msgstr ""
-"🔄 [🗂️Supervisor] des fichiers ont été modifiés ({files}), redémarrage des "
-"worker un par un"
+"🔄 [🗂️Supervisor] des fichiers ont été modifiés ({files}), redémarrage des"
+" worker un par un"
 
 #: hetu/server/supervisor.py:793
 #, python-brace-format
 msgid "❌ [🗂️Supervisor] 改动后 worker {index} 没能开服，先停着，其余 worker 照旧，等下一次改动再试"
 msgstr ""
 "❌ [🗂️Supervisor] après les modifications, le worker {index} n'a pas pu "
-"démarrer ; il reste arrêté, les autres worker continuent, nouvel essai à la "
-"prochaine modification"
+"démarrer ; il reste arrêté, les autres worker continuent, nouvel essai à "
+"la prochaine modification"
 
 #: hetu/server/threaded_accept.py:122
 msgid "accept 线程 select() 出错"
@@ -4119,15 +4116,15 @@ msgstr "🔗 [📡WSConnect] Nouvelle connexion : {instance} : {conn_id}"
 #, python-brace-format
 msgid "New Connect Error: 错误的路径，实例名不存在: {instance}"
 msgstr ""
-"Erreur de nouvelle connexion : Chemin incorrect, le nom d'instance n'existe "
-"pas : {instance}"
+"Erreur de nouvelle connexion : Chemin incorrect, le nom d'instance "
+"n'existe pas : {instance}"
 
 #: hetu/server/websocket.py:232
 #, python-brace-format
 msgid "⛓️ [📡WSConnect] 连接已被顶号，主动断开：{ctx}"
 msgstr ""
-"⛓️ [📡WSConnect] Connexion reprise par une autre session, déconnexion active "
-": {ctx}"
+"⛓️ [📡WSConnect] Connexion reprise par une autre session, déconnexion "
+"active : {ctx}"
 
 #: hetu/server/websocket.py:240
 #, python-brace-format
@@ -4165,8 +4162,8 @@ msgstr "⛓️ [📡WSConnect] Connexion fermée : {conn_id}"
 #, python-brace-format
 msgid "❌ [📡WSDisconnectHook] 断线System调用异常: {system} | {err}"
 msgstr ""
-"❌ [📡WSDisconnectHook] Exception d'appel système de déconnexion : {system} | "
-"{err}"
+"❌ [📡WSDisconnectHook] Exception d'appel système de déconnexion : {system}"
+" | {err}"
 
 #: hetu/server/adapters/aiohttp_app.py:368
 msgid "❌ [📡WorkerKeeper] Worker ID 租约已丢失，停止本 worker，由管理进程重启"
@@ -4177,27 +4174,28 @@ msgstr ""
 #: hetu/server/adapters/aiohttp_app.py:374
 msgid "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
 msgstr ""
-"❌ [📡WorkerKeeper] Le bail du Worker ID est perdu ; en mode mono-processus, "
-"impossible de ne redémarrer que le worker, arrêt du serveur"
+"❌ [📡WorkerKeeper] Le bail du Worker ID est perdu ; en mode mono-"
+"processus, impossible de ne redémarrer que le worker, arrêt du serveur"
 
 #: hetu/server/adapters/aiohttp_app.py:438
 #, python-brace-format
 msgid "⚠️ [📡Server] 关服排空：{count}个连接没在{timeout}秒内排空，直接断开，在途的调用随之取消"
 msgstr ""
-"⚠️ [📡Server] Drainage à l'arrêt : {count} connexions n'ont pas été évacuées "
-"en {timeout} secondes, elles sont coupées directement et les appels en cours"
-" sont annulés"
+"⚠️ [📡Server] Drainage à l'arrêt : {count} connexions n'ont pas été "
+"évacuées en {timeout} secondes, elles sont coupées directement et les "
+"appels en cours sont annulés"
 
 #: hetu/server/adapters/aiohttp_app.py:613
 #, python-brace-format
 msgid ""
 "⚠️ [📡Server] 监听队列 LISTEN_BACKLOG={backlog} 被内核截到了 "
-"net.core.somaxconn={somaxconn}，大批客户端同时重连时排不下的握手会被丢掉，建议调大 net.core.somaxconn"
+"net.core.somaxconn={somaxconn}，大批客户端同时重连时排不下的握手会被丢掉，建议调大 "
+"net.core.somaxconn"
 msgstr ""
-"⚠️ [📡Server] La file d'écoute LISTEN_BACKLOG={backlog} a été plafonnée par "
-"le noyau à net.core.somaxconn={somaxconn} ; lors de reconnexions simultanées"
-" massives, les handshakes qui ne trouvent pas de place sont perdus, il est "
-"recommandé d'augmenter net.core.somaxconn"
+"⚠️ [📡Server] La file d'écoute LISTEN_BACKLOG={backlog} a été plafonnée "
+"par le noyau à net.core.somaxconn={somaxconn} ; lors de reconnexions "
+"simultanées massives, les handshakes qui ne trouvent pas de place sont "
+"perdus, il est recommandé d'augmenter net.core.somaxconn"
 
 #: hetu/server/adapters/aiohttp_app.py:713
 #, python-brace-format
@@ -4208,8 +4206,7 @@ msgstr ""
 
 #: hetu/server/adapters/aiohttp_app.py:744
 msgid "⌚ [📡Server] 开服途中收到关服信号，中止开服"
-msgstr ""
-"⌚ [📡Server] Signal d'arrêt reçu pendant le démarrage, démarrage interrompu"
+msgstr "⌚ [📡Server] Signal d'arrêt reçu pendant le démarrage, démarrage interrompu"
 
 #: hetu/server/adapters/aiohttp_app.py:752
 msgid "✅ [📡Server] 服务器已就绪，开始接受连接"
@@ -4222,20 +4219,21 @@ msgstr "⌚ [📡Server] Arrêt du serveur en cours..."
 #: hetu/server/pipeline/crypto.py:100
 msgid "客户端发送未签名握手包，但服务器配置了 auth_key（客户端可能未配置 auth_key）"
 msgstr ""
-"Le client a envoyé un paquet de poignée de main non signé, mais le serveur a"
-" configuré auth_key (le client n'a peut-être pas configuré auth_key)"
+"Le client a envoyé un paquet de poignée de main non signé, mais le "
+"serveur a configuré auth_key (le client n'a peut-être pas configuré "
+"auth_key)"
 
 #: hetu/server/pipeline/crypto.py:117
 msgid "握手签名不匹配，客户端 auth_key 与服务器不一致"
 msgstr ""
-"La signature de la poignée de main ne correspond pas, l'auth_key du client "
-"ne correspond pas à celui du serveur"
+"La signature de la poignée de main ne correspond pas, l'auth_key du "
+"client ne correspond pas à celui du serveur"
 
 #: hetu/server/pipeline/crypto.py:122
 msgid "无法识别的握手包格式（非 HeTu 客户端 / 协议版本不符）"
 msgstr ""
-"Format de paquet de poignée de main non reconnu (client non HeTu / version "
-"du protocole incompatible)"
+"Format de paquet de poignée de main non reconnu (client non HeTu / "
+"version du protocole incompatible)"
 
 #: hetu/server/pipeline/crypto.py:173
 #, python-brace-format
@@ -4257,8 +4255,8 @@ msgstr "⚠️ [📡Pipeline] [Couche Crypto] Anomalie de poignée de main : {er
 #, python-brace-format
 msgid "解密失败：数据长度不足 (len={length})，可能非加密数据或截断"
 msgstr ""
-"Échec du déchiffrement : longueur de données insuffisante (len={length}), "
-"données peut-être non chiffrées ou tronquées"
+"Échec du déchiffrement : longueur de données insuffisante (len={length}),"
+" données peut-être non chiffrées ou tronquées"
 
 #: hetu/server/pipeline/crypto.py:232
 #, python-brace-format
@@ -4281,8 +4279,8 @@ msgstr "{alias} MessageProcessLayer non implémenté"
 #, python-brace-format
 msgid "{cls_name} MessageProcessLayer子类必须指定alias参数"
 msgstr ""
-"La sous-classe {cls_name} MessageProcessLayer doit spécifier le paramètre "
-"alias"
+"La sous-classe {cls_name} MessageProcessLayer doit spécifier le paramètre"
+" alias"
 
 #: hetu/server/pipeline/pipeline.py:150
 #, python-brace-format
@@ -4300,8 +4298,8 @@ msgstr ""
 #, python-brace-format
 msgid "Warning: dtype：{dtype} 不可识别, 转换为 string 类型"
 msgstr ""
-"Avertissement : le type de données {dtype} n'est pas reconnu, conversion en "
-"type string"
+"Avertissement : le type de données {dtype} n'est pas reconnu, conversion "
+"en type string"
 
 #: hetu/system/caller.py:47
 #, python-brace-format
@@ -4314,16 +4312,16 @@ msgstr ""
 #, python-brace-format
 msgid ""
 "❌ [📞System] {sys_name} 连续 {count} 次重试都卡在 {comp_name}.{index_name} 索引里的 "
-"id={row_id}：索引和行数据对不上（行已不存在，或值和索引不符），多半是索引里残留了旧数据，重试不会自愈。请停服后执行 hetu upgrade"
-" 重建索引"
+"id={row_id}：索引和行数据对不上（行已不存在，或值和索引不符），多半是索引里残留了旧数据，重试不会自愈。请停服后执行 hetu "
+"upgrade 重建索引"
 msgstr ""
 "❌ [📞System] {sys_name} est resté bloqué sur id={row_id} dans l'index "
-"{comp_name}.{index_name} après {count} tentatives consécutives : l'index et "
-"les données de la ligne ne correspondent pas (la ligne n'existe plus, ou la "
-"valeur ne correspond pas à l'index), il s'agit probablement de données "
-"obsolètes restées dans l'index, les tentatives ne corrigeront pas le "
-"problème d'elles-mêmes. Veuillez arrêter le service puis exécuter hetu "
-"upgrade pour reconstruire l'index"
+"{comp_name}.{index_name} après {count} tentatives consécutives : l'index "
+"et les données de la ligne ne correspondent pas (la ligne n'existe plus, "
+"ou la valeur ne correspond pas à l'index), il s'agit probablement de "
+"données obsolètes restées dans l'index, les tentatives ne corrigeront pas"
+" le problème d'elles-mêmes. Veuillez arrêter le service puis exécuter "
+"hetu upgrade pour reconstruire l'index"
 
 #: hetu/system/caller.py:97
 #, python-brace-format
@@ -4334,14 +4332,13 @@ msgstr "System inexistant, vérifiez si l'appel est illégal : {system}"
 #, python-brace-format
 msgid "调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
 msgstr ""
-"Lors de l'appel du System {sys_name}, la fonction anti-doublon uuid a été "
-"utilisée, mais ce System n'a pas défini call_lock=True"
+"Lors de l'appel du System {sys_name}, la fonction anti-doublon uuid a été"
+" utilisée, mais ce System n'a pas défini call_lock=True"
 
 #: hetu/system/caller.py:149
 #, python-brace-format
 msgid "调用System {sys_name} 的uuid超过了 {max_len} 个字符：{uuid}"
-msgstr ""
-"L'uuid du System {sys_name} appelé dépasse {max_len} caractères : {uuid}"
+msgstr "L'uuid du System {sys_name} appelé dépasse {max_len} caractères : {uuid}"
 
 #: hetu/system/caller.py:179
 #, python-brace-format
@@ -4385,15 +4382,14 @@ msgstr ""
 #: hetu/system/definer.py:198
 #, python-brace-format
 msgid "{sys_name} 的 `depends` 引用的System {base_name} 不存在"
-msgstr ""
-"Le System {base_name} référencé par `depends` de {sys_name} n'existe pas"
+msgstr "Le System {base_name} référencé par `depends` de {sys_name} n'existe pas"
 
 #: hetu/system/definer.py:240
 #, python-brace-format
 msgid "System {sys_name} 引用的Component必须都是同一种backend，现在有：{refs}"
 msgstr ""
-"Les Component référencés par le System {sys_name} doivent tous utiliser le "
-"même backend. Actuellement : {refs}"
+"Les Component référencés par le System {sys_name} doivent tous utiliser "
+"le même backend. Actuellement : {refs}"
 
 #: hetu/system/definer.py:258
 #, python-brace-format
@@ -4402,10 +4398,10 @@ msgid ""
 "引用了同一个Component的多张表：{tables}，ctx.repo里只能对应其中一张。一般是依赖图里同一个System以不同的副本后缀（或有、无后缀）各被引用了一次"
 msgstr ""
 "Le System {sys_name} référence plusieurs tables du même Component : "
-"{tables}, alors que ctx.repo ne peut en correspondre qu'à une seule. Cela se"
-" produit généralement lorsque, dans le graphe de dépendances, le même System"
-" est référencé plusieurs fois avec des suffixes de réplique différents (avec"
-" ou sans suffixe)"
+"{tables}, alors que ctx.repo ne peut en correspondre qu'à une seule. Cela"
+" se produit généralement lorsque, dans le graphe de dépendances, le même "
+"System est référencé plusieurs fois avec des suffixes de réplique "
+"différents (avec ou sans suffixe)"
 
 #: hetu/system/definer.py:345
 msgid "System重复定义："
@@ -4427,16 +4423,16 @@ msgid ""
 "on_start=True 的 System 权限只能为 None 或 ADMIN，否则会生成可被客户端调用的 "
 "Endpoint，启动种子逻辑有被外部触发的风险"
 msgstr ""
-"La permission d'un System avec on_start=True ne peut être que None ou ADMIN,"
-" sinon un Endpoint appelable par le client sera généré, avec le risque que "
-"la logique d'amorçage soit déclenchée de l'extérieur"
+"La permission d'un System avec on_start=True ne peut être que None ou "
+"ADMIN, sinon un Endpoint appelable par le client sera généré, avec le "
+"risque que la logique d'amorçage soit déclenchée de l'extérieur"
 
 #: hetu/system/definer.py:575
 #, python-brace-format
 msgid "System函数名过长，最大长度为{max_len}个字符"
 msgstr ""
-"Le nom de la fonction System est trop long. Longueur maximale : {max_len} "
-"caractères"
+"Le nom de la fonction System est trop long. Longueur maximale : {max_len}"
+" caractères"
 
 #: hetu/system/definer.py:579
 #, python-brace-format
@@ -4447,21 +4443,21 @@ msgstr "Le System {name} doit être une fonction asynchrone (`async def ...`)"
 #, python-brace-format
 msgid "System {name} 引用的Component必须都是同一种backend"
 msgstr ""
-"Les Component référencés par le System {name} doivent tous utiliser le même "
-"backend"
+"Les Component référencés par le System {name} doivent tous utiliser le "
+"même backend"
 
 #: hetu/system/definer.py:609
 #, python-brace-format
 msgid ""
 "@rate_limit/@guard 不能用于 permission=None 的 System {name}：该 System 不生成 "
-"endpoint，guard 永远不会执行（继承调用也会绕过）。请设置 permission，或把 guard 挂到直接被客户端调用的外层 System"
-" 上。"
+"endpoint，guard 永远不会执行（继承调用也会绕过）。请设置 permission，或把 guard 挂到直接被客户端调用的外层 "
+"System 上。"
 msgstr ""
 "@rate_limit/@guard ne peut pas être utilisé sur un System {name} avec "
-"permission=None : ce System ne génère pas d'endpoint, le guard ne sera donc "
-"jamais exécuté (les appels hérités le contournent également). Veuillez "
-"définir une permission, ou attacher le guard au System externe directement "
-"appelé par le client."
+"permission=None : ce System ne génère pas d'endpoint, le guard ne sera "
+"donc jamais exécuté (les appels hérités le contournent également). "
+"Veuillez définir une permission, ou attacher le guard au System externe "
+"directement appelé par le client."
 
 #: hetu/system/definer.py:633
 msgid "第一个参数必须是SystemContext实例"
@@ -4475,8 +4471,8 @@ msgstr "Erreur, la valeur de retour de ctx[{name}] n'est pas cette fonction"
 #: hetu/system/definer.py:642
 msgid "要调用其他System必须在define_system时通过depends参数定义"
 msgstr ""
-"Pour appeler un autre System, il doit être défini via le paramètre depends "
-"lors de define_system"
+"Pour appeler un autre System, il doit être défini via le paramètre "
+"depends lors de define_system"
 
 #: hetu/system/future.py:108
 #, python-brace-format
@@ -4526,8 +4522,8 @@ msgid ""
 msgstr ""
 "⚠️ [⚙️Future] [Avertissement] La cible de la tâche future {system} a une "
 "permission {permission}, il est recommandé de la définir sur None pour "
-"empêcher l'appel par le client. De plus, l'appel futur étant une tâche "
-"d'arrière-plan, le contexte n'a pas d'informations utilisateur lors de "
+"empêcher l'appel par le client. De plus, l'appel futur étant une tâche d"
+"'arrière-plan, le contexte n'a pas d'informations utilisateur lors de "
 "l'exécution."
 
 #: hetu/system/future.py:155
@@ -4555,18 +4551,18 @@ msgid ""
 "phantom_check=False"
 msgstr ""
 "⚠️ [⚙️Future] L'appel futur {system}{args} a été retenté {count} fois à "
-"cause de conflits de transaction sans aboutir ; on abandonne ce cycle pour "
-"l'instant et il sera renvoyé plus tard. Dernier conflit : {reason}. Tant "
-"qu'il y a des conflits, l'exécution n'aboutira jamais : veuillez réduire la "
-"portée de ses lectures et écritures ; pour les range qui ne dépendent pas "
-"d'un intervalle, vous pouvez passer phantom_check=False"
+"cause de conflits de transaction sans aboutir ; on abandonne ce cycle "
+"pour l'instant et il sera renvoyé plus tard. Dernier conflit : {reason}. "
+"Tant qu'il y a des conflits, l'exécution n'aboutira jamais : veuillez "
+"réduire la portée de ses lectures et écritures ; pour les range qui ne "
+"dépendent pas d'un intervalle, vous pouvez passer phantom_check=False"
 
 #: hetu/system/future.py:503
 #, python-brace-format
 msgid "❌ [⚙️Future] 不存在的System, 检查是否代码修改删除了该System：{system}"
 msgstr ""
-"❌ [⚙️Future] Système inexistant, vérifiez si le code a supprimé ce système :"
-" {system}"
+"❌ [⚙️Future] Système inexistant, vérifiez si le code a supprimé ce "
+"système : {system}"
 
 #: hetu/system/future.py:531
 #, python-brace-format
@@ -4589,14 +4585,13 @@ msgstr "🔗 [⚙️Future] {deleted} call lock expirés ont été libérés"
 #, python-brace-format
 msgid "⚠️ [⚙️Future] Task执行异常，将再次重试：{exc}"
 msgstr ""
-"⚠️ [⚙️Future] Exception lors de l'exécution de la tâche, nouvelle tentative "
-"à venir : {exc}"
+"⚠️ [⚙️Future] Exception lors de l'exécution de la tâche, nouvelle "
+"tentative à venir : {exc}"
 
 #: hetu/system/lock.py:94
 #, python-brace-format
 msgid "🔗 [⚙️Future] 释放了 {comp_name} 的 {deleted} 条过期数据"
-msgstr ""
-"🔗 [⚙️Future] {deleted} données expirées de {comp_name} ont été libérées"
+msgstr "🔗 [⚙️Future] {deleted} données expirées de {comp_name} ont été libérées"
 
 #: hetu/system/startup.py:88
 #, python-brace-format
@@ -4609,3 +4604,4 @@ msgstr ""
 #, python-brace-format
 msgid "卡在启动System {sys_name} (instance={instance})"
 msgstr "Bloqué sur le System de démarrage {sys_name} (instance={instance})"
+
