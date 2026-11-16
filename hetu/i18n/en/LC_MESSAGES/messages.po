@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-11-09 12:53+0000\n"
+"POT-Creation-Date: 2026-11-16 05:50+0000\n"
 "PO-Revision-Date: 2026-03-20 21:43+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: en <LL@li.org>\n"
@@ -182,27 +182,32 @@ msgid "⚠️  组件 {comp_name} 的表需要迁移到新集群。"
 msgstr ""
 "⚠️ Component {comp_name}'s table needs to be migrated to the new cluster."
 
-#: hetu/webext.py:91
+#: hetu/webext.py:97
 #, python-brace-format
 msgid "define_route的uri必须以'/'开头，你的：{uri}"
 msgstr "The uri of define_route must start with '/', yours: {uri}"
 
-#: hetu/webext.py:96
+#: hetu/webext.py:102
 #, python-brace-format
 msgid "define_route的uri不能占用HeTu保留的'{prefix}'路径（客户端SDK的WebSocket入口），你的：{uri}"
 msgstr ""
 "The uri of define_route cannot occupy the '{prefix}' path reserved by HeTu "
 "(the WebSocket entry for the client SDK), yours: {uri}"
 
-#: hetu/cli/__init__.py:70
+#: hetu/webext.py:112
+#, python-brace-format
+msgid "define_route的methods不能为空，你的uri：{uri}"
+msgstr "The methods of define_route cannot be empty, your uri: {uri}"
+
+#: hetu/cli/__init__.py:74
 msgid "河图数据库"
 msgstr "Hetu Database"
 
-#: hetu/cli/__init__.py:75
+#: hetu/cli/__init__.py:79
 msgid "执行操作"
 msgstr "Execute operation"
 
-#: hetu/cli/__init__.py:103
+#: hetu/cli/__init__.py:107
 #, python-brace-format
 msgid "无法识别的参数：{extras}"
 msgstr "Unrecognized arguments: {extras}"
@@ -265,11 +270,11 @@ msgstr ""
 msgid "配置里没有 INSTANCES"
 msgstr "No INSTANCES in the configuration"
 
-#: hetu/cli/base.py:247
+#: hetu/cli/base.py:247 hetu/cli/nodes.py:97
 msgid "配置"
 msgstr "config"
 
-#: hetu/cli/base.py:251
+#: hetu/cli/base.py:251 hetu/cli/nodes.py:101
 msgid "配置文件；不给时依次找环境变量 HETU_CONFIG、当前目录的 config.yml"
 msgstr ""
 "Config file; if not given, looks for the HETU_CONFIG environment variable, "
@@ -288,7 +293,7 @@ msgstr "(when no config file is used) the py file of the 河图 app"
 msgid "（无配置文件时）app的namespace"
 msgstr "(when no config file is used) the app namespace"
 
-#: hetu/cli/base.py:267
+#: hetu/cli/base.py:267 hetu/cli/nodes.py:106
 msgid "（无配置文件时）后端数据库地址"
 msgstr "(when no config file is used) the Backend database address"
 
@@ -450,7 +455,8 @@ msgstr ""
 msgid "System 调用的超时秒数，默认 30，0 为不限"
 msgstr "Timeout in seconds for the System call, default 30, 0 for unlimited"
 
-#: hetu/cli/call.py:501 hetu/cli/data.py:398 hetu/cli/shell.py:364
+#: hetu/cli/call.py:501 hetu/cli/data.py:398 hetu/cli/nodes.py:118
+#: hetu/cli/shell.py:364
 msgid "stderr 上多打日志：-v 为 INFO，-vv 为 DEBUG"
 msgstr "Print more logs to stderr: -v for INFO, -vv for DEBUG"
 
@@ -468,7 +474,7 @@ msgstr ""
 msgid "要给 System 名（hetu call --list 查看全部）"
 msgstr "The System name is required (run hetu call --list to see all)"
 
-#: hetu/cli/console.py:67
+#: hetu/cli/console.py:66
 msgid ""
 "本配置禁止 hetu call / shell 写入（CLI_ALLOW_WRITE: false）：加 --dry-run 看它会写什么，或在配置里设"
 " CLI_ALLOW_WRITE: true"
@@ -477,44 +483,44 @@ msgstr ""
 "false): add --dry-run to see what it would write, or set CLI_ALLOW_WRITE: "
 "true in the configuration"
 
-#: hetu/cli/console.py:366
+#: hetu/cli/console.py:361
 #, python-brace-format
 msgid "审计日志写不进去：{path}（{err}）。可用配置 CLI_AUDIT_LOG 改路径"
 msgstr ""
 "Could not write the audit log: {path} ({err}). You can change the path with "
 "the CLI_AUDIT_LOG configuration"
 
-#: hetu/cli/console.py:376
+#: hetu/cli/console.py:371
 #, python-brace-format
 msgid "⚠️ 审计日志写不进去：{path}（{err}）"
 msgstr "⚠️ Could not write the audit log: {path} ({err})"
 
-#: hetu/cli/console.py:550
+#: hetu/cli/console.py:545
 msgid "DEBUG 关闭的配置（按生产库对待）上 CLI 刚刚真写入了数据；要禁止，在配置里设 CLI_ALLOW_WRITE: false"
 msgstr ""
 "The CLI just actually wrote data to a configuration with DEBUG disabled "
 "(treated as a production database); to prohibit this, set CLI_ALLOW_WRITE: "
 "false in the configuration"
 
-#: hetu/cli/console.py:630
+#: hetu/cli/console.py:625
 msgid "Worker ID 租约丢失（本进程卡住太久被别人接手），命令已中止"
 msgstr ""
 "Worker ID lease lost (this process stalled too long and was taken over by "
 "another), command aborted"
 
-#: hetu/cli/console.py:653
+#: hetu/cli/console.py:648
 #, python-brace-format
 msgid "⚠️ 后台任务 {task} 退出时出错：{err}"
 msgstr "⚠️ Background task {task} errored on exit: {err}"
 
-#: hetu/cli/console.py:659
+#: hetu/cli/console.py:654
 #, python-brace-format
 msgid "⚠️ {n} 个后台任务 {timeout} 秒内没有响应取消，不再等待"
 msgstr ""
 "⚠️ {n} background tasks did not respond to cancellation within {timeout} "
 "seconds; no longer waiting"
 
-#: hetu/cli/console.py:672
+#: hetu/cli/console.py:667
 #, python-brace-format
 msgid "收尾释放租约 / 关闭连接时出错（不影响已经完成的操作）：{err}"
 msgstr ""
@@ -650,6 +656,58 @@ msgstr ""
 "Grouping values of a composite index, one per grouping column, e.g. --group "
 "zone=3"
 
+#: hetu/cli/dns.py:37
+msgid ""
+"网关上的 DNS 桥：把节点发现的注册表（hetu:nodes）答成 A 记录，给 Caddy 的 dynamic a 用（resolvers "
+"指向它）。只支持 host 网络"
+msgstr ""
+"DNS bridge on the gateway: answers the node discovery registry (hetu:nodes) "
+"as A records, for Caddy's dynamic a to use (resolvers point at it). Only "
+"supports host networking"
+
+#: hetu/cli/dns.py:44
+msgid "只答这个项目（节点配置里的 NAMESPACE）的节点"
+msgstr "Only answer nodes of this project (NAMESPACE in the node config)"
+
+#: hetu/cli/dns.py:50
+#, python-brace-format
+msgid "答哪个名字，和 Caddyfile 里 dynamic a 的 name 一致（默认 {default}）"
+msgstr ""
+"Which name to answer, matching the name of dynamic a in the Caddyfile "
+"(default {default})"
+
+#: hetu/cli/dns.py:58
+#, python-brace-format
+msgid ""
+"节点的端口，和节点的 LISTEN 端口、Caddyfile 里 dynamic a 的 port 一致（默认 {default}）：A 记录不带端口"
+msgstr ""
+"The node's port, matching the node's LISTEN port and the port of dynamic a "
+"in the Caddyfile (default {default}): A records carry no port"
+
+#: hetu/cli/dns.py:65
+#, python-brace-format
+msgid "在哪里应答 DNS 查询（UDP，默认 {default}）"
+msgstr "Where to answer DNS queries (UDP, default {default})"
+
+#: hetu/cli/dns.py:73
+#, python-brace-format
+msgid "Redis 地址，指向副本、用只读 ACL 用户；不给时读环境变量 {env}（推荐，口令不会出现在进程列表里）"
+msgstr ""
+"Redis address, pointing at a replica with a read-only ACL user; when "
+"omitted, the environment variable {env} is read (recommended, the password "
+"won't appear in the process list)"
+
+#: hetu/cli/dns.py:81
+msgid "排查用：跑一遍启动检查，读一次注册表并探测，打印会答哪些地址、哪些不答、为什么，然后退出"
+msgstr ""
+"For troubleshooting: run the startup checks once, read the registry once and"
+" probe, print which addresses will be answered, which will not, and why, "
+"then exit"
+
+#: hetu/cli/dns.py:89
+msgid "多打日志（DEBUG）"
+msgstr "Log more (DEBUG)"
+
 #: hetu/cli/init.py:325
 msgid "❌ 未找到 uv 命令，请先安装 uv：https://docs.astral.sh/uv/"
 msgstr ""
@@ -769,7 +827,7 @@ msgstr ""
 " exist and skipping if there are no changes. Also clears temporary tables. "
 "Should be executed once before each server start in the CI/CD pipeline."
 
-#: hetu/cli/migrate.py:44 hetu/cli/start.py:95
+#: hetu/cli/migrate.py:44 hetu/cli/start.py:153
 msgid "后端数据库地址，默认 redis://127.0.0.1:6379/0"
 msgstr "Backend database address, defaults to redis://127.0.0.1:6379/0"
 
@@ -777,11 +835,11 @@ msgstr "Backend database address, defaults to redis://127.0.0.1:6379/0"
 msgid "河图app的py文件，默认 app.py"
 msgstr "Python file for the hetu app, defaults to app.py"
 
-#: hetu/cli/migrate.py:54 hetu/cli/start.py:84
+#: hetu/cli/migrate.py:54 hetu/cli/start.py:142
 msgid "启动app.py中哪个namespace下的System"
 msgstr "Which System under which namespace in app.py to start"
 
-#: hetu/cli/migrate.py:57 hetu/cli/start.py:87
+#: hetu/cli/migrate.py:57 hetu/cli/start.py:145
 msgid "实例名称，每个实例是一个副本"
 msgstr "Instance name, each instance is a replica"
 
@@ -881,6 +939,38 @@ msgstr ""
 "🎉  Congratulations! All database table structures have been successfully "
 "upgraded!"
 
+#: hetu/cli/nodes.py:41
+msgid ""
+"找不到配置：用 --config 指定，或设环境变量 HETU_CONFIG，或在当前目录放 config.yml；也可以用 --db 直接给出地址"
+msgstr ""
+"No configuration found: specify one with --config, or set the environment "
+"variable HETU_CONFIG, or place config.yml in the current directory; you can "
+"also give the address directly with --db"
+
+#: hetu/cli/nodes.py:50
+msgid "配置里没有 BACKENDS：用 --config 指定配置文件，或者用 --db 给出地址"
+msgstr ""
+"No BACKENDS in the configuration: specify a configuration file with "
+"--config, or give the address with --db"
+
+#: hetu/cli/nodes.py:57
+#, python-brace-format
+msgid "节点发现的注册表在 Redis 后端里：默认后端（配置里的第一个）{name} 的 type 是 {kind}"
+msgstr ""
+"The node discovery registry lives in a Redis Backend: the default Backend "
+"(the first one in the configuration) {name} has type {kind}"
+
+#: hetu/cli/nodes.py:93
+msgid "看节点发现的注册表（hetu:nodes）：各节点的 worker 数、连接数、状态，过期的登记，stdout 输出一行 JSON"
+msgstr ""
+"View the node discovery registry (hetu:nodes): worker count, connection "
+"count, and status of each node, expired registrations; outputs one line of "
+"JSON to stdout"
+
+#: hetu/cli/nodes.py:111
+msgid "读 master；默认读 servant"
+msgstr "Read master; reads servant by default"
+
 #: hetu/cli/shell.py:70
 msgid "call 留给以后的 Endpoint 路径（与 Sandbox.call 同义），跑 System 请用 call_system"
 msgstr ""
@@ -936,29 +1026,71 @@ msgstr ""
 "Script to execute; - means stdin; if neither is given and stdin is a "
 "terminal, enter interactive mode"
 
-#: hetu/cli/start.py:73
+#: hetu/cli/start.py:58
+#, python-brace-format
+msgid "ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}"
+msgstr ""
+"ℹ️ {name}, {mode}, {workers} worker processes, manager process pid: {pid}"
+
+#: hetu/cli/start.py:66
+#, python-brace-format
+msgid "ℹ️ Python {version} 平台 {platform}"
+msgstr "ℹ️ Python {version} platform {platform}"
+
+#: hetu/cli/start.py:71
+#, python-brace-format
+msgid "📡 监听地址： http://{host}:{port}"
+msgstr "📡 Listening address: http://{host}:{port}"
+
+#: hetu/cli/start.py:74
+#, python-brace-format
+msgid "ℹ️ 消息流协议：json -> {layers} -> Network"
+msgstr "ℹ️ Message flow protocol: json -> {layers} -> Network"
+
+#: hetu/cli/start.py:90
+#, python-brace-format
+msgid "🔑 auth_key: {key}"
+msgstr "🔑 auth_key: {key}"
+
+#: hetu/cli/start.py:92
+msgid "🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"
+msgstr "🔑 auth_key not set ⚠️ any key can connect"
+
+#: hetu/cli/start.py:96
+msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
+msgstr ""
+"⚠️⚠️⚠️ Deep Debug Mode Enabled  ⚠️⚠️⚠️   Python coroutines are 90% slower in"
+" this mode."
+
+#: hetu/cli/start.py:105
+msgid "端口可能被系统 excludedportrange 禁用了，请用管理员执行：net stop winnatnet start winnat"
+msgstr ""
+"Port may be blocked by system's excludedportrange. Please run as "
+"administrator: net stop winnatnet start winnat"
+
+#: hetu/cli/start.py:131
 msgid "启动河图服务"
 msgstr "Start Hetu service"
 
-#: hetu/cli/start.py:75
+#: hetu/cli/start.py:133
 msgid "通过命令行启动参数"
 msgstr "Via command line startup parameters"
 
-#: hetu/cli/start.py:78
+#: hetu/cli/start.py:136
 msgid "河图app的py文件，默认 /app/app.py"
 msgstr "The py file of the Hetu app, default /app/app.py"
 
-#: hetu/cli/start.py:90
+#: hetu/cli/start.py:148
 msgid "监听的Websocket端口"
 msgstr "Websocket port to listen on"
 
-#: hetu/cli/start.py:100
+#: hetu/cli/start.py:158
 msgid "工作进程数，可设为 CPU * 1.2，-1为按CPU核心数自动"
 msgstr ""
 "Worker process count; can be set to CPU * 1.2, -1 to automatically use CPU "
 "core count"
 
-#: hetu/cli/start.py:109
+#: hetu/cli/start.py:167
 #, python-format
 msgid ""
 "开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90%%。"
@@ -967,20 +1099,13 @@ msgstr ""
 "information. If set to 2, debug mode is also enabled for the framework core,"
 " which activates Python coroutine Debug mode, slowing down by 90%%."
 
-#: hetu/cli/start.py:119
-msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
-msgstr ""
-"Certificate directory. If not set, an insecure connection is used. It is not"
-" recommended to set this here; please add an external reverse HTTPS proxy "
-"layer. Enter 'auto' to generate a self-signed HTTPS certificate."
-
-#: hetu/cli/start.py:127
+#: hetu/cli/start.py:176
 msgid "默认crypto层的auth_key，用于握手签名校验。留空则不启用。"
 msgstr ""
 "Default auth_key for the crypto layer, used for handshake signature "
 "verification. Leave empty to disable."
 
-#: hetu/cli/start.py:135
+#: hetu/cli/start.py:184
 msgid ""
 "配置文件模板见CONFIG_TEMPLATE.yml。不给且没用命令行参数时，依次找环境变量 HETU_CONFIG、当前目录的 config.yml"
 msgstr ""
@@ -988,64 +1113,55 @@ msgstr ""
 "and no command line parameters are used, the environment variable "
 "HETU_CONFIG is looked up first, then config.yml in the current directory"
 
-#: hetu/cli/start.py:170
+#: hetu/cli/start.py:246
 msgid "--app_file是必须参数，或者用--config"
 msgstr "--app_file is a required parameter, or use --config"
 
-#: hetu/cli/start.py:173
+#: hetu/cli/start.py:249
 msgid "--namespace是必须参数，或者用--config"
 msgstr "--namespace is a required parameter, or use --config"
 
-#: hetu/cli/start.py:176
+#: hetu/cli/start.py:252
 msgid "--instance是必须参数，或者用--config"
 msgstr "--instance is a required parameter, or use --config"
 
-#: hetu/cli/start.py:235
+#: hetu/cli/start.py:321
 #, python-brace-format
-msgid "ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}"
-msgstr ""
-"ℹ️ {name}, {mode}, {workers} worker processes, manager process pid: {pid}"
+msgid "❌ 监听 {listen} 失败：{err}"
+msgstr "❌ Failed to listen on {listen}: {err}"
 
-#: hetu/cli/start.py:243
-#, python-brace-format
-msgid "ℹ️ Python {version} 平台 {platform}"
-msgstr "ℹ️ Python {version} platform {platform}"
-
-#: hetu/cli/start.py:248
-#, python-brace-format
-msgid "📡 监听地址： http{s}://{host}:{port}"
-msgstr "📡 Listening address: http{s}://{host}:{port}"
-
-#: hetu/cli/start.py:254
-#, python-brace-format
-msgid "ℹ️ 消息流协议：json -> {layers} -> Network"
-msgstr "ℹ️ Message flow protocol: json -> {layers} -> Network"
-
-#: hetu/cli/start.py:270
-#, python-brace-format
-msgid "🔑 auth_key: {key}"
-msgstr "🔑 auth_key: {key}"
-
-#: hetu/cli/start.py:272
-msgid "🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"
-msgstr "🔑 auth_key not set ⚠️ any key can connect"
-
-#: hetu/cli/start.py:276
-msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
-msgstr ""
-"⚠️⚠️⚠️ Deep Debug Mode Enabled  ⚠️⚠️⚠️   Python coroutines are 90% slower in"
-" this mode."
-
-#: hetu/cli/start.py:303
+#: hetu/cli/start.py:335 hetu/server/supervisor.py:634
 #, python-brace-format
 msgid "❌ 服务器启动失败，已中止，未对外提供服务：{err}"
 msgstr "❌ Server startup failed, aborted, no external service provided: {err}"
 
-#: hetu/cli/start.py:311
-msgid "端口可能被系统 excludedportrange 禁用了，请用管理员执行：net stop winnatnet start winnat"
+#: hetu/common/helper.py:102
+#, python-brace-format
+msgid "环境变量 {name} 必须是非负整数，现在是 {value!r}"
 msgstr ""
-"Port may be blocked by system's excludedportrange. Please run as "
-"administrator: net stop winnatnet start winnat"
+"Environment variable {name} must be a non-negative integer, but it is "
+"currently {value!r}"
+
+#: hetu/common/helper.py:158
+#, python-brace-format
+msgid "内容不是合法的节点 token: {raw}"
+msgstr "Content is not a valid node token: {raw}"
+
+#: hetu/common/helper.py:197
+#, python-brace-format
+msgid "[❄️ID] 生成了新的节点 token，存在 {path}"
+msgstr "[❄️ID] Generated a new node token, stored at {path}"
+
+#: hetu/common/helper.py:227
+#, python-brace-format
+msgid ""
+"[❄️ID] 节点 token 文件 {path} 用不了（{err}），改用只在本进程有效的 token，重启后接不回原来的 Worker "
+"ID。删掉这个文件、或者让它所在的目录可写，下次启动就会重新生成"
+msgstr ""
+"[❄️ID] The node token file {path} is unusable ({err}); falling back to a "
+"token that is only valid in this process, so the original Worker ID cannot "
+"be reattached after a restart. Delete this file, or make its directory "
+"writable, and it will be regenerated on the next startup"
 
 #: hetu/common/slowlog.py:72
 #, python-brace-format
@@ -1068,19 +1184,19 @@ msgstr "Average Time"
 msgid "平均冲突次数"
 msgstr "Average Conflict Count"
 
-#: hetu/common/snowflake_id.py:119
+#: hetu/common/snowflake_id.py:129
 #, python-brace-format
 msgid "Worker ID不能大于{max}或小于0"
 msgstr "Worker ID cannot be greater than {max} or less than 0"
 
-#: hetu/common/snowflake_id.py:137
+#: hetu/common/snowflake_id.py:147
 #, python-brace-format
 msgid "[❄️ID] 雪花ID生成器初始化完成，Worker ID: {worker_id}, last_timestamp: {ts}"
 msgstr ""
 "[❄️ID] Snowflake ID generator initialized successfully. Worker ID: "
 "{worker_id}, last_timestamp: {ts}"
 
-#: hetu/common/snowflake_id.py:170
+#: hetu/common/snowflake_id.py:181
 #, python-brace-format
 msgid ""
 "[❄️ID] Worker ID {worker_id} 的租约已超出安全期 {overdue:.1f} "
@@ -1091,16 +1207,16 @@ msgstr ""
 "usually means this process has been stuck for a long time or the backend is "
 "unreachable, and the Worker will restart at the next lease renewal."
 
-#: hetu/common/snowflake_id.py:181
+#: hetu/common/snowflake_id.py:192
 msgid "SnowflakeID 未初始化，请先调用 init() 方法。"
 msgstr "SnowflakeID is not initialized. Please call the init() method first."
 
-#: hetu/common/snowflake_id.py:191
+#: hetu/common/snowflake_id.py:202
 #, python-brace-format
 msgid "[❄️ID] 时钟回拨了 {ms} 毫秒。"
 msgstr "[❄️ID] Clock moved backwards by {ms} milliseconds."
 
-#: hetu/common/snowflake_id.py:226 hetu/common/snowflake_id.py:242
+#: hetu/common/snowflake_id.py:237 hetu/common/snowflake_id.py:253
 msgid "[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms"
 msgstr ""
 "[❄️ID] Only a limited number of IDs can be generated per millisecond. Need "
@@ -1505,11 +1621,11 @@ msgstr "TableSubscription received an unknown channel message: {channel}"
 
 #: hetu/data/backend/base.py:2313 hetu/data/backend/base.py:2326
 #: hetu/data/backend/base.py:2338 hetu/data/backend/base.py:2353
-#: hetu/data/backend/redis/client.py:79 hetu/data/backend/redis/client.py:279
-#: hetu/data/backend/redis/client.py:304 hetu/data/backend/redis/client.py:364
-#: hetu/data/backend/redis/client.py:460 hetu/data/backend/redis/client.py:480
-#: hetu/data/backend/redis/client.py:506 hetu/data/backend/redis/client.py:527
-#: hetu/data/backend/redis/client.py:577 hetu/data/backend/redis/client.py:603
+#: hetu/data/backend/redis/client.py:80 hetu/data/backend/redis/client.py:282
+#: hetu/data/backend/redis/client.py:307 hetu/data/backend/redis/client.py:370
+#: hetu/data/backend/redis/client.py:466 hetu/data/backend/redis/client.py:486
+#: hetu/data/backend/redis/client.py:512 hetu/data/backend/redis/client.py:533
+#: hetu/data/backend/redis/client.py:583 hetu/data/backend/redis/client.py:609
 #: hetu/data/backend/redis/mq.py:54 hetu/data/backend/sqlite/client.py:140
 #: hetu/data/backend/sqlite/mq.py:88 hetu/data/sub.py:906 hetu/data/sub.py:954
 #: hetu/data/sub.py:983 hetu/data/sub.py:1130 hetu/data/sub.py:1973
@@ -2226,35 +2342,35 @@ msgstr ""
 msgid "事务超过最大重试次数。"
 msgstr "Transaction exceeded the maximum number of retries."
 
-#: hetu/data/backend/snowflake_lease.py:85
+#: hetu/data/backend/snowflake_lease.py:83
 msgid "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
 msgstr ""
 "⌚ [📡Server] Worker ID allocation failed, possibly due to repeated crashes "
 "exhausting the Worker ID pool. Retrying after 1 second..."
 
-#: hetu/data/backend/snowflake_lease.py:105
-#: hetu/data/backend/snowflake_lease.py:159
+#: hetu/data/backend/snowflake_lease.py:103
+#: hetu/data/backend/snowflake_lease.py:157
 #, python-brace-format
 msgid "[❄️ID] 写入时间戳高水位失败，将重试: {err}"
 msgstr "[❄️ID] Failed to write timestamp high-water mark, will retry: {err}"
 
-#: hetu/data/backend/snowflake_lease.py:121
+#: hetu/data/backend/snowflake_lease.py:119
 #, python-brace-format
 msgid "❌ [📡WorkerKeeper] 续约失败，将重试: {err}"
 msgstr "❌ [📡WorkerKeeper] Lease renewal failed, will retry: {err}"
 
-#: hetu/data/backend/snowflake_lease.py:138
+#: hetu/data/backend/snowflake_lease.py:136
 #, python-brace-format
 msgid "❌ [📡WorkerKeeper] 续约异常，将重试: {err}"
 msgstr "❌ [📡WorkerKeeper] Lease renewal error, will retry: {err}"
 
-#: hetu/data/backend/snowflake_lease.py:174
+#: hetu/data/backend/snowflake_lease.py:172
 #, python-brace-format
 msgid "[❄️ID] 关服时写入时间戳高水位失败: {err}"
 msgstr ""
 "[❄️ID] Failed to write timestamp high-water mark during shutdown: {err}"
 
-#: hetu/data/backend/snowflake_lease.py:183
+#: hetu/data/backend/snowflake_lease.py:181
 #, python-brace-format
 msgid "[❄️ID] 释放 Worker ID 失败，等它自己过期: {err}"
 msgstr ""
@@ -2299,15 +2415,15 @@ msgstr ""
 "{worker_id}. This mode only guarantees uniqueness within a single machine; "
 "for multi-machine deployment, switch to the Redis backend."
 
-#: hetu/data/backend/redis/worker_keeper.py:179
-#: hetu/data/backend/redis/worker_keeper.py:226
-#: hetu/data/backend/worker_keeper.py:183
+#: hetu/data/backend/redis/worker_keeper.py:209
+#: hetu/data/backend/redis/worker_keeper.py:293
+#: hetu/data/backend/worker_keeper.py:182
 #, python-brace-format
 msgid "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
 msgstr ""
 "[❄️ID] Successfully obtained Worker ID: {worker_id}, process code: {node_id}"
 
-#: hetu/data/backend/worker_keeper.py:189
+#: hetu/data/backend/worker_keeper.py:188
 #, python-brace-format
 msgid "并发的 hetu call / shell 进程太多：SQLite 上预留给它们的 {count} 个 Worker ID 都被占用了"
 msgstr ""
@@ -2329,56 +2445,56 @@ msgstr ""
 msgid "Worker ID 续约失败"
 msgstr "Failed to renew Worker ID"
 
-#: hetu/data/backend/redis/worker_keeper.py:250
-#: hetu/data/backend/worker_keeper.py:219
+#: hetu/data/backend/redis/worker_keeper.py:354
+#: hetu/data/backend/worker_keeper.py:221
 #, python-brace-format
 msgid "[❄️ID] 释放 Worker ID: {worker_id}"
 msgstr "[❄️ID] Releasing Worker ID: {worker_id}"
 
-#: hetu/data/backend/redis/worker_keeper.py:256
-#: hetu/data/backend/worker_keeper.py:223
+#: hetu/data/backend/redis/worker_keeper.py:360
+#: hetu/data/backend/worker_keeper.py:225
 #, python-brace-format
 msgid "[❄️ID] Worker ID {worker_id} 的租约已不属于本进程，跳过释放"
 msgstr ""
 "[❄️ID] The lease for Worker ID {worker_id} no longer belongs to this "
 "process, skipping release"
 
-#: hetu/data/backend/redis/client.py:81
+#: hetu/data/backend/redis/client.py:82
 msgid "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
 msgstr ""
 "Servants are not allowed to load Lua transaction scripts. Lua transaction "
 "scripts can only be loaded on the Master."
 
-#: hetu/data/backend/redis/client.py:84
+#: hetu/data/backend/redis/client.py:85
 msgid "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
 msgstr ""
 "Lua transaction scripts can only be loaded on the Master, but the current "
 "connection pool contains multiple servers."
 
-#: hetu/data/backend/redis/client.py:120
+#: hetu/data/backend/redis/client.py:121
 #, python-brace-format
 msgid "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set 改用同样语义的 Lua 脚本（稍慢）"
 msgstr ""
 "ℹ️ [💾Redis] HSETEX is not available on the master ({err}); direct_set will "
 "fall back to a Lua script with the same semantics (slightly slower)"
 
-#: hetu/data/backend/redis/client.py:139
+#: hetu/data/backend/redis/client.py:140
 #: hetu/data/backend/sqlite/client.py:154
 msgid "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 msgstr ""
 "Backend can only be used within the same coroutine. A change in the calling "
 "coroutine was detected."
 
-#: hetu/data/backend/redis/client.py:186
+#: hetu/data/backend/redis/client.py:187
 msgid "必须至少指定一个数据库连接URL"
 msgstr "At least one database connection URL must be specified."
 
-#: hetu/data/backend/redis/client.py:222
+#: hetu/data/backend/redis/client.py:223
 #, python-brace-format
 msgid "无法连接到Redis数据库：{url}"
 msgstr "Failed to connect to Redis database: {url}"
 
-#: hetu/data/backend/redis/client.py:231
+#: hetu/data/backend/redis/client.py:234
 #, python-brace-format
 msgid ""
 "Redis数据库 {url} 不支持 HELLO 命令（RESP3 握手）。通常是前面挂了不支持 RESP3 的代理层，请在 url 后追加 "
@@ -2389,14 +2505,14 @@ msgstr ""
 "RESP3. Please append ?protocol=2 to the url to downgrade to RESP2; this must"
 " be added for both master and servants."
 
-#: hetu/data/backend/redis/client.py:237
+#: hetu/data/backend/redis/client.py:240
 #, python-brace-format
 msgid "连接Redis数据库 {url} 时服务端返回错误：{error}"
 msgstr ""
 "The server returned an error while connecting to Redis database {url}: "
 "{error}"
 
-#: hetu/data/backend/redis/client.py:338
+#: hetu/data/backend/redis/client.py:344
 #, python-brace-format
 msgid ""
 "⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将不起效。可手动设置配置文件：notify-keyspace-"
@@ -2406,16 +2522,16 @@ msgstr ""
 "Data subscription will not work. You can manually set the configuration: "
 "notify-keyspace-events={keyspace}"
 
-#: hetu/data/backend/redis/client.py:366
+#: hetu/data/backend/redis/client.py:372
 msgid "is_synced只能在master上调用"
 msgstr "is_synced can only be called on the master."
 
-#: hetu/data/backend/redis/client.py:545
+#: hetu/data/backend/redis/client.py:551
 msgid "lua_commit脚本没有初始化，请先调用 post_configure"
 msgstr ""
 "The lua_commit script is not initialized. Please call post_configure first."
 
-#: hetu/data/backend/redis/client.py:595
+#: hetu/data/backend/redis/client.py:601
 #: hetu/data/backend/sqlite/client.py:324
 msgid "消息队列只能挂在同类后端的连接上"
 msgstr ""
@@ -2449,21 +2565,47 @@ msgstr ""
 "⚠️ [💾Redis] Subscription update notifications could not be processed in "
 "time; dropped {count} messages from {seconds} seconds ago"
 
-#: hetu/data/backend/redis/worker_keeper.py:186
-#: hetu/data/backend/redis/worker_keeper.py:234
+#: hetu/data/backend/redis/worker_keeper.py:216
+#: hetu/data/backend/redis/worker_keeper.py:336
 msgid "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
 msgstr ""
 "Unable to obtain an available Worker ID, all IDs are occupied. If there are "
 "crashed instances, please wait for the IDs to expire and try again."
 
-#: hetu/data/backend/redis/worker_keeper.py:205
+#: hetu/data/backend/redis/worker_keeper.py:246
 #, python-brace-format
-msgid "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} (通过相同进程码 {node_id} )"
+msgid ""
+"[❄️ID] 有持有者标识和本进程相同的 Worker ID 租约 {worker_ids}（多半是重启前留下的），等 {wait} "
+"秒确认没有进程在续约后接手"
 msgstr ""
-"[❄️ID] Reusing previously assigned Worker ID: {worker_id} (via the same "
-"process code {node_id})"
+"[❄️ID] There are Worker ID leases {worker_ids} whose owner identity is the "
+"same as this process (most likely left over from before the restart); "
+"waiting {wait} seconds to confirm that no process is renewing them before "
+"taking over"
 
-#: hetu/data/backend/redis/worker_keeper.py:275
+#: hetu/data/backend/redis/worker_keeper.py:266
+#, python-brace-format
+msgid "[❄️ID] 接手持有者标识和本进程相同的 Worker ID: {worker_id}（原来的值 {old}，现在 {node_id}）"
+msgstr ""
+"[❄️ID] Taking over Worker ID: {worker_id}, whose owner identity is the same "
+"as this process (previous value {old}, now {node_id})"
+
+#: hetu/data/backend/redis/worker_keeper.py:274
+#, python-brace-format
+msgid ""
+"[❄️ID] Worker ID {worker_id} "
+"的持有者标识和本进程相同，但还有进程在续约，不接手。多半是两个进程的持有者标识撞了（{owner}）：节点 token "
+"文件被打进了镜像，或者几个容器共用了 /var/tmp。不会撞号，但接不回原来的 Worker ID。滚动升级期间，旧版本开服时也会把它续期"
+msgstr ""
+"[❄️ID] The owner identity of Worker ID {worker_id} is the same as this "
+"process, but another process is still renewing it, so it will not be taken "
+"over. This is most likely because two processes have colliding owner "
+"identities ({owner}): the node token file was baked into the image, or "
+"several containers share /var/tmp. IDs will not collide, but the original "
+"Worker ID cannot be reclaimed. During rolling upgrades, the old version will"
+" also renew it when the service starts"
+
+#: hetu/data/backend/redis/worker_keeper.py:381
 #, python-brace-format
 msgid ""
 "[❄️ID] 续约 Worker ID {worker_id} 失败: "
@@ -2475,7 +2617,7 @@ msgstr ""
 "Continuing to issue IDs would generate duplicate snowflake IDs; restarting "
 "Worker..."
 
-#: hetu/data/backend/redis/worker_keeper.py:281
+#: hetu/data/backend/redis/worker_keeper.py:387
 msgid "Worker ID 续约失败，重启Worker..."
 msgstr "Worker ID renewal failed, restarting Worker..."
 
@@ -2672,37 +2814,658 @@ msgstr ""
 msgid "HSET 至少要给一个字段：{key}"
 msgstr "HSET requires at least one field: {key}"
 
-#: hetu/endpoint/connection.py:75 hetu/endpoint/connection.py:113
-#: hetu/endpoint/connection.py:146
+#: hetu/discovery/dns.py:80
+msgid "口令"
+msgstr "Password"
+
+#: hetu/discovery/dns.py:390
+#, python-brace-format
+msgid ""
+"⚠️ [📣DNS] 节点 {addr}（worker {field}）的时钟和本机差 {skew:.1f} 秒，请检查两边的 NTP（雪花 ID "
+"本来就要求时钟同步）"
+msgstr ""
+"⚠️ [📣DNS] Node {addr} (worker {field})'s clock differs from this machine by "
+"{skew:.1f} seconds; please check NTP on both sides (snowflake IDs already "
+"require clock synchronization)"
+
+#: hetu/discovery/dns.py:435
+#, python-brace-format
+msgid "⚠️ [📣DNS] 注册表里 worker {field} 的登记解析不了，跳过：{err}"
+msgstr ""
+"⚠️ [📣DNS] The registration for worker {field} in the registry cannot be "
+"resolved, skipping: {err}"
+
+#: hetu/discovery/dns.py:451
+#, python-brace-format
+msgid "登记 {idle:.0f} 秒没更新，节点多半已经没了"
+msgstr ""
+"Registration has not been updated for {idle:.0f} seconds; the node is most "
+"likely gone"
+
+#: hetu/discovery/dns.py:457
+#, python-brace-format
+msgid "关服中（{state}）"
+msgstr "Shutting down ({state})"
+
+#: hetu/discovery/dns.py:463
+#, python-brace-format
+msgid "端口 {port} 和 --port {expected} 不一致"
+msgstr "Port {port} does not match --port {expected}"
+
+#: hetu/discovery/dns.py:471
+#, python-brace-format
+msgid ""
+"❌ [📣DNS] 节点 {addr} 登记的端口是 {port}，和 --port {expected} 不一致，网关按 {expected} "
+"连不到它，不答。所有节点的 LISTEN 端口、--port、Caddyfile 里 dynamic a 的 port 要一致"
+msgstr ""
+"❌ [📣DNS] Node {addr} is registered with port {port}, which does not match "
+"--port {expected}; the gateway cannot connect to it using {expected}, so it "
+"will not be answered. The LISTEN port, --port, and the port of dynamic a in "
+"the Caddyfile must match on all nodes"
+
+#: hetu/discovery/dns.py:510
+#, python-brace-format
+msgid "{timeout:g} 秒内没连上"
+msgstr "Could not connect within {timeout:g} seconds"
+
+#: hetu/discovery/dns.py:558
+#, python-brace-format
+msgid "从网关连不上 {addr}:{port}（{err}）"
+msgstr "Cannot connect to {addr}:{port} from the gateway ({err})"
+
+#: hetu/discovery/dns.py:561
+msgid "正在探测"
+msgstr "Probing"
+
+#: hetu/discovery/dns.py:596
+#, python-brace-format
+msgid "ℹ️ [📣DNS] 从网关连得上 {addr}:{port} 了，开始答它"
+msgstr ""
+"ℹ️ [📣DNS] {addr}:{port} is now reachable from the gateway; starting to "
+"answer with it"
+
+#: hetu/discovery/dns.py:604
+#, python-brace-format
+msgid ""
+"❌ [📣DNS] 从网关连不上节点 {addr}:{port}（{err}），先不答。请检查安全组是否放行网关到节点的 {port} 端口、节点的 "
+"LISTEN 和网络模式（只支持 host 网络）；每 {retry:g} 秒重试一次"
+msgstr ""
+"❌ [📣DNS] Cannot connect to node {addr}:{port} from the gateway ({err}); not "
+"answering for now. Check whether the security group allows the gateway to "
+"reach port {port} on the node, the node's LISTEN setting, and the network "
+"mode (only host networking is supported); retrying every {retry:g} seconds"
+
+#: hetu/discovery/dns.py:695
+#, python-brace-format
+msgid "❌ 读注册表失败：{err}"
+msgstr "❌ Failed to read the registry: {err}"
+
+#: hetu/discovery/dns.py:700
+msgid "副本和 master 断开了（配了 replica-serve-stale-data no，断开期间不给读）。"
+msgstr ""
+"The replica has disconnected from master (replica-serve-stale-data no is "
+"configured, so reads are not served while disconnected)."
+
+#: hetu/discovery/dns.py:704
+msgid "连到的是原生集群（槽位迁走了？），hetu dns 第一版不支持原生集群，请经代理层连。"
+msgstr ""
+"Connected to a native cluster (were the slots migrated?), but the first "
+"version of hetu dns does not support native clusters; please connect through"
+" a proxy layer."
+
+#: hetu/discovery/dns.py:709
+#, python-brace-format
+msgid "❌ [📣DNS] 读注册表失败，接着答上一次的结果。{hint}{err}"
+msgstr ""
+"❌ [📣DNS] Failed to read the registry; continuing to answer with the previous"
+" result. {hint}{err}"
+
+#: hetu/discovery/dns.py:716
+msgid "ℹ️ [📣DNS] 读注册表恢复正常"
+msgstr "ℹ️ [📣DNS] Registry reads are back to normal"
+
+#: hetu/discovery/dns.py:740
+#, python-brace-format
+msgid ""
+"❌ [📣DNS] namespace {ns} 的 {count} 条登记全都过期了，多半是副本落后或者和 master "
+"断开了，接着答上一次的结果。节点要是真的都没了，答上一次的结果也只是让 Caddy 连不上"
+msgstr ""
+"❌ [📣DNS] All {count} registrations in namespace {ns} have expired; most "
+"likely the replica is lagging or has disconnected from master. Continuing to"
+" answer with the previous result. If the nodes really are all gone, "
+"answering with the previous result will only make Caddy fail to connect"
+
+#: hetu/discovery/dns.py:745
+msgid "ℹ️ [📣DNS] 注册表的登记又在更新了"
+msgstr "ℹ️ [📣DNS] Registry registrations are updating again"
+
+#: hetu/discovery/dns.py:751
+#, python-brace-format
+msgid ""
+"⚠️ [📣DNS] 注册表里没有 namespace {ns} 的登记，有的是：{found}。请检查 --namespace（和节点配置的 "
+"NAMESPACE 一致）"
+msgstr ""
+"⚠️ [📣DNS] There are no registrations for namespace {ns} in the registry; the"
+" ones present are: {found}. Please check --namespace (it must match the "
+"NAMESPACE configured on the nodes)"
+
+#: hetu/discovery/dns.py:762
+#, python-brace-format
+msgid "📣 [📣DNS] 答案变了：加了 {added}，去了 {removed}，一共 {count} 台"
+msgstr ""
+"📣 [📣DNS] The answer changed: added {added}, removed {removed}, {count} nodes"
+" total"
+
+#: hetu/discovery/dns.py:784
+#, python-brace-format
+msgid "❌ [📣DNS] 重算答案出错，接着答上一次的结果，{interval:g} 秒后再算"
+msgstr ""
+"❌ [📣DNS] Error recomputing the answer; continuing to answer with the "
+"previous result, and recomputing in {interval:g} seconds"
+
+#: hetu/discovery/dns.py:803
+#, python-brace-format
+msgid "ℹ️ [📣DNS] 收到第一个查询（来自 {peer}），Caddy 已经在用 hetu dns 了"
+msgstr ""
+"ℹ️ [📣DNS] Received the first query (from {peer}); Caddy is already using "
+"hetu dns"
+
+#: hetu/discovery/dns.py:828
+#, python-brace-format
+msgid ""
+"⚠️ [📣DNS] 收到别的名字的查询：{name}，只答 {expected}。请检查 Caddyfile 里 dynamic a 的 name 和 "
+"--name 是否一致"
+msgstr ""
+"⚠️ [📣DNS] Received a query for a different name: {name}; only answering for "
+"{expected}. Please check whether the name of dynamic a in the Caddyfile "
+"matches --name"
+
+#: hetu/discovery/dns.py:849
+msgid "❌ [📣DNS] 处理查询出错"
+msgstr "❌ [📣DNS] Error handling query"
+
+#: hetu/discovery/dns.py:914
+#, python-brace-format
+msgid "❌ --listen 要写成 IP:端口，比如 {default}，现在是 {listen!r}"
+msgstr ""
+"❌ --listen must be written as IP:port, for example {default}; it is "
+"currently {listen!r}"
+
+#: hetu/discovery/dns.py:964
+#, python-brace-format
+msgid ""
+"❌ hetu dns 只支持 host 网络：连 Redis 用的地址 {src} 在 {device} 上，{device} "
+"是容器网络的虚拟网卡（veth 之类：iflink {iflink} ≠ ifindex {ifindex}）。Caddy 用 host 网络时查的 "
+"127.0.0.1 是宿主机的回环，bridge 网络里的 hetu dns 收不到。{hint}"
+msgstr ""
+"❌ hetu dns only supports host networking: the address {src} used to connect "
+"to Redis is on {device}, and {device} is a virtual network interface for "
+"container networking (such as veth: iflink {iflink} ≠ ifindex {ifindex}). "
+"When Caddy uses host networking, the 127.0.0.1 it queries is the host's "
+"loopback, which hetu dns in a bridge network cannot receive. {hint}"
+
+#: hetu/discovery/dns.py:1014
+#, python-brace-format
+msgid ""
+"请用只能读 hetu:nodes 的只读用户（ACL 不随复制同步，要在 hetu dns 连的那台副本上建；用的不是 0 号库时还要加 "
+"+select）：{command}"
+msgstr ""
+"Please use a read-only user that can only read hetu:nodes (ACLs are not "
+"synchronized with replication, so it must be created on the replica that "
+"hetu dns connects to; if you are not using database 0, you also need to add "
+"+select): {command}"
+
+#: hetu/discovery/dns.py:1035
+#, python-brace-format
+msgid "❌ 连 Redis {url} 时用户名或口令不对：{err}"
+msgstr ""
+"❌ Incorrect username or password when connecting to Redis {url}: {err}"
+
+#: hetu/discovery/dns.py:1040
+#, python-brace-format
+msgid "❌ Redis {url} 拒绝了 HGETALL hetu:nodes（{err}）。{hint}"
+msgstr "❌ Redis {url} rejected HGETALL hetu:nodes ({err}). {hint}"
+
+#: hetu/discovery/dns.py:1049
+#, python-brace-format
+msgid ""
+"❌ Redis {url} 是和 master 断开了的副本（{err}）：配了 replica-serve-stale-data "
+"no，断开期间不给读。等它重新连上 master，或者指向别的副本"
+msgstr ""
+"❌ Redis {url} is a replica disconnected from master ({err}): replica-serve-"
+"stale-data no is configured, so reads are not served while disconnected. "
+"Wait for it to reconnect to master, or point to another replica"
+
+#: hetu/discovery/dns.py:1057
+#, python-brace-format
+msgid "❌ Redis {url} 是原生集群（{err}），hetu dns 第一版不支持原生集群，请经代理层连"
+msgstr ""
+"❌ Redis {url} is a native cluster ({err}); the first version of hetu dns "
+"does not support native clusters; please connect through a proxy layer"
+
+#: hetu/discovery/dns.py:1062
+#, python-brace-format
+msgid "❌ Redis {url} 返回错误：{err}"
+msgstr "❌ Redis {url} returned an error: {err}"
+
+#: hetu/discovery/dns.py:1067
+#, python-brace-format
+msgid "❌ 连不上 Redis {url}：{err}"
+msgstr "❌ Cannot connect to Redis {url}: {err}"
+
+#: hetu/discovery/dns.py:1078
+msgid "除了 hetu:nodes 别的 key 也能读"
+msgstr "Can also read keys other than hetu:nodes"
+
+#: hetu/discovery/dns.py:1085
+msgid "能执行管理命令（CONFIG、REPLICAOF 这些）"
+msgstr "Can execute administrative commands (such as CONFIG and REPLICAOF)"
+
+#: hetu/discovery/dns.py:1088
+#, python-brace-format
+msgid "⚠️ Redis 用户的权限太大：{what}。网关暴露在公网，{hint}"
+msgstr ""
+"⚠️ The Redis user has too many permissions: {what}. The gateway is exposed "
+"to the public internet; {hint}"
+
+#: hetu/discovery/dns.py:1089
+msgid "；"
+msgstr ";"
+
+#: hetu/discovery/dns.py:1099
+#, python-brace-format
+msgid "⚠️ hetu dns 连的是 master（{url}）：每秒一条 HGETALL 不大，但架构上读都走副本，请指向副本"
+msgstr ""
+"⚠️ hetu dns is connecting to master ({url}): one HGETALL per second is not a"
+" big deal, but architecturally reads should go through replicas; please "
+"point it to a replica"
+
+#: hetu/discovery/dns.py:1122
+#, python-brace-format
+msgid ""
+"⚠️ Redis {host} 不带口令也能连上：default 用户没设口令。网关暴露在公网，它被攻破的话，攻击者不用 hetu dns "
+"的只读用户，直接用 default 用户连；default "
+"没收紧权限的话（默认什么都能做），能读走全部数据，还能改副本的主从配置（REPLICAOF）、篡改 HeTu "
+"从副本读到的数据。请给网关连得到的每台副本的 default 用户设口令（节点 BACKENDS 里 servants "
+"的地址带上口令），或者禁用它（ACL SETUSER default off，节点改用别的用户）；ACL、requirepass "
+"都不随复制同步，每台都要设。要给 master 也设的话，先在各副本上配好 masterauth（禁用了 default 的还要配 "
+"masteruser），不然主从复制会断"
+msgstr ""
+"⚠️ Redis {host} can be connected to without a password: the default user has"
+" no password set. The gateway is exposed to the public internet; if it is "
+"compromised, an attacker does not need hetu dns's read-only user and can "
+"connect directly with the default user. If the default user's permissions "
+"have not been tightened (by default it can do anything), they can read all "
+"data, change the replica's replication configuration (REPLICAOF), and tamper"
+" with the data that hetu reads from the replica. Set a password for the "
+"default user on every replica reachable by the gateway (include the password"
+" in the servants addresses in the node's BACKENDS), or disable it (ACL "
+"SETUSER default off, and have the node use another user); ACLs and "
+"requirepass are not synchronized with replication, so they must be set on "
+"each one. If you also want to set one for master, configure masterauth on "
+"each replica first (and masteruser if default is disabled), otherwise "
+"replication will break"
+
+#: hetu/discovery/dns.py:1171
+#, python-brace-format
+msgid ""
+"⚠️ --listen {host} 不是回环地址，别的机器也能查到节点的内网地址。Caddy 和 hetu dns 在同一台机器上，用 "
+"127.0.0.1 就够了"
+msgstr ""
+"⚠️ --listen {host} is not a loopback address; other machines can also query "
+"the node's internal address. Caddy and hetu dns are on the same machine, so "
+"using 127.0.0.1 is enough"
+
+#: hetu/discovery/dns.py:1210
+#, python-brace-format
+msgid "hetu dns --once：namespace {ns}，名字 {name}，端口 {port}，Redis {url}"
+msgstr ""
+"hetu dns --once: namespace {ns}, name {name}, port {port}, Redis {url}"
+
+#: hetu/discovery/dns.py:1217
+#, python-brace-format
+msgid "本 namespace 的登记 {count} 条"
+msgstr "{count} registrations in this namespace"
+
+#: hetu/discovery/dns.py:1220
+msgid "这些登记全都过期了（hetu dns 常驻时会接着答上一次的结果）"
+msgstr ""
+"All these registrations have expired (when hetu dns is running continuously,"
+" it will continue to answer with the previous result)"
+
+#: hetu/discovery/dns.py:1221
+#, python-brace-format
+msgid "会答 {count} 个地址："
+msgstr "Will answer with {count} addresses:"
+
+#: hetu/discovery/dns.py:1224
+#, python-brace-format
+msgid "  {addr}  {workers} 个 worker，{conns} 个连接"
+msgstr "  {addr}  {workers} workers, {conns} connections"
+
+#: hetu/discovery/dns.py:1229
+msgid "不答的地址："
+msgstr "Addresses not answered:"
+
+#: hetu/discovery/dns.py:1233
+msgid "解析不了的登记："
+msgstr "Registrations that cannot be resolved:"
+
+#: hetu/discovery/dns.py:1241
+#, python-brace-format
+msgid "别的 namespace：{others}"
+msgstr "Other namespaces: {others}"
+
+#: hetu/discovery/dns.py:1242
+msgid "，"
+msgstr ","
+
+#: hetu/discovery/dns.py:1243
+#, python-brace-format
+msgid "{ns}（{count} 条）"
+msgstr "{ns} ({count} entries)"
+
+#: hetu/discovery/dns.py:1259
+#, python-brace-format
+msgid "❌ 要给 Redis 地址：环境变量 {env}（推荐，口令不会出现在进程列表里）或者 --redis，指向副本、用只读 ACL 用户"
+msgstr ""
+"❌ Provide a Redis address: environment variable {env} (recommended, the "
+"password won't show up in the process list) or --redis, pointing to a "
+"replica with a read-only ACL user"
+
+#: hetu/discovery/dns.py:1266
+#, python-brace-format
+msgid "❌ --port 要是 1~65535，现在是 {port}"
+msgstr "❌ --port must be 1–65535, currently {port}"
+
+#: hetu/discovery/dns.py:1275
+#, python-brace-format
+msgid "❌ --name 要是一个 ASCII 域名，现在是 {name!r}"
+msgstr "❌ --name must be an ASCII domain name, currently {name!r}"
+
+#: hetu/discovery/dns.py:1289
+#, python-brace-format
+msgid "❌ Redis 地址写得不对（{err}）：要写成 redis://用户:口令@主机:6379/0，指向副本"
+msgstr ""
+"❌ Malformed Redis address ({err}): expected "
+"redis://user:password@host:6379/0, pointing to a replica"
+
+#: hetu/discovery/dns.py:1314
+#, python-brace-format
+msgid "❌ 监听 {listen} 失败（端口被占用？）：{err}"
+msgstr "❌ Failed to listen on {listen} (port already in use?): {err}"
+
+#: hetu/discovery/dns.py:1322
+#, python-brace-format
+msgid ""
+"✅ [📣DNS] hetu dns 在 {listen} 上应答 {name}（namespace {ns}，端口 {port}），Redis "
+"{url}"
+msgstr ""
+"✅ [📣DNS] hetu dns answering {name} on {listen} (namespace {ns}, port "
+"{port}), Redis {url}"
+
+#: hetu/discovery/dns.py:1353
+msgid "👋 [📣DNS] 收到停止信号，hetu dns 退出"
+msgstr "👋 [📣DNS] Received stop signal, hetu dns exiting"
+
+#: hetu/discovery/netcheck.py:74
+msgid ""
+"请用 host 网络运行：docker run --network host ...（compose：network_mode: "
+"host；k8s：hostNetwork: true）。host 网络还省掉了端口映射，性能最好。"
+msgstr ""
+"Run with the host network: docker run --network host ... (compose: "
+"network_mode: host; k8s: hostNetwork: true). The host network also does away"
+" with port mapping and gives the best performance."
+
+#: hetu/discovery/netcheck.py:89
+#, python-brace-format
+msgid "DISCOVERY 必须是 true 或 false，现在是 {value!r}。{hint}"
+msgstr ""
+"DISCOVERY must be true or false, but it is currently {value!r}. {hint}"
+
+#: hetu/discovery/netcheck.py:105
+#, python-brace-format
+msgid "它是字符串：加了引号，或者是 ${VAR} 插值的结果（插值出来的都是字符串）。请直接写 YAML 的布尔值、整数，或者用 !eval"
+msgstr ""
+"It is a string: either it is quoted, or it is the result of ${VAR} "
+"interpolation (interpolated values are always strings). Write a YAML boolean"
+" or integer directly, or use !eval"
+
+#: hetu/discovery/netcheck.py:127
+#, python-brace-format
+msgid "❌ 节点发现：LISTEN 要写成 主机:端口，端口是 1~65535（网关按同一个端口连各节点），现在是 {listen!r}"
+msgstr ""
+"❌ Node discovery: LISTEN must be written as host:port, where the port is "
+"1~65535 (the gateway connects to each node on the same port); it is "
+"currently {listen!r}"
+
+#: hetu/discovery/netcheck.py:162
+#, python-brace-format
+msgid ""
+"❌ 节点发现：LISTEN 的主机要写 IP（0.0.0.0，或者本机的一个 IPv4 地址），不能写主机名 {host}：网关要拿它当地址连过来"
+msgstr ""
+"❌ Node discovery: the host in LISTEN must be an IP (0.0.0.0, or one of this "
+"machine's IPv4 addresses), not a hostname {host}: the gateway uses it as the"
+" address to connect to"
+
+#: hetu/discovery/netcheck.py:169
+#, python-brace-format
+msgid ""
+"❌ 节点发现只支持 IPv4（网关答的是 A 记录），LISTEN 写的是 {host}。请改成 0.0.0.0，或者本机的一个 IPv4 地址"
+msgstr ""
+"❌ Node discovery only supports IPv4 (the gateway answers with A records), "
+"but LISTEN is {host}. Change it to 0.0.0.0, or one of this machine's IPv4 "
+"addresses"
+
+#: hetu/discovery/netcheck.py:176
+#, python-brace-format
+msgid "❌ 节点发现：LISTEN 绑在回环地址 {host} 上，别的机器上的网关连不到。请改成 0.0.0.0，或者本机的对外 IP"
+msgstr ""
+"❌ Node discovery: LISTEN is bound to the loopback address {host}, so a "
+"gateway on another machine cannot connect. Change it to 0.0.0.0, or this "
+"machine's external IP"
+
+#: hetu/discovery/netcheck.py:183
+#, python-brace-format
+msgid "❌ 节点发现：LISTEN 写的 {host} 不是本机（这个网络命名空间里）的地址。在容器里多半是没用 host 网络。{hint}"
+msgstr ""
+"❌ Node discovery: {host} written in LISTEN is not an address of this machine"
+" (in this network namespace). In a container this usually means the host "
+"network is not used. {hint}"
+
+#: hetu/discovery/netcheck.py:198 hetu/discovery/netcheck.py:368
+msgid "❌ 节点发现：配置里没有 BACKENDS"
+msgstr "❌ Node discovery: there is no BACKENDS in the config"
+
+#: hetu/discovery/netcheck.py:207
+#, python-brace-format
+msgid ""
+"❌ 节点发现：默认后端 {name} 经 unix socket 连 Redis，推不出本机对外的地址。请在 LISTEN 里写明本机的对外 IP，比如"
+" 10.0.3.17:2466"
+msgstr ""
+"❌ Node discovery: the default Backend {name} connects to Redis over a unix "
+"socket, so this machine's external address cannot be inferred. Write this "
+"machine's external IP in LISTEN, e.g. 10.0.3.17:2466"
+
+#: hetu/discovery/netcheck.py:214
+#, python-brace-format
+msgid ""
+"❌ 节点发现：默认后端 {name} 的 master 地址里没有主机，推不出本机对外的地址。请在 LISTEN 里写明本机的对外 IP，比如 "
+"10.0.3.17:2466"
+msgstr ""
+"❌ Node discovery: the master address of the default Backend {name} has no "
+"host, so this machine's external address cannot be inferred. Write this "
+"machine's external IP in LISTEN, e.g. 10.0.3.17:2466"
+
+#: hetu/discovery/netcheck.py:232
+msgid "请在 LISTEN 里写明本机的对外 IP，比如 10.0.3.17:2466"
+msgstr "Write this machine's external IP in LISTEN, e.g. 10.0.3.17:2466"
+
+#: hetu/discovery/netcheck.py:239
+#, python-brace-format
+msgid "❌ 节点发现：解析不出 Redis 地址 {host} 的 IPv4 地址（{err}），推不出广播地址。{hint}"
+msgstr ""
+"❌ Node discovery: cannot resolve an IPv4 address for the Redis address "
+"{host} ({err}), so the broadcast address cannot be inferred. {hint}"
+
+#: hetu/discovery/netcheck.py:249
+#, python-brace-format
+msgid "❌ 节点发现：本机到 Redis {host} 没有路由（{err}），推不出广播地址。{hint}"
+msgstr ""
+"❌ Node discovery: there is no route from this machine to Redis {host} "
+"({err}), so the broadcast address cannot be inferred. {hint}"
+
+#: hetu/discovery/netcheck.py:256
+#, python-brace-format
+msgid "❌ 节点发现：连 Redis（{host}）用的是回环地址 {src}，Redis 在本机，推不出别的机器连得到的地址。{hint}"
+msgstr ""
+"❌ Node discovery: the connection to Redis ({host}) uses the loopback address"
+" {src}; Redis is on this machine, so an address that other machines can "
+"reach cannot be inferred. {hint}"
+
+#: hetu/discovery/netcheck.py:263
+#, python-brace-format
+msgid "❌ 节点发现：连 Redis（{host}）用的源地址 {src} 是链路本地地址，别的机器连不到。{hint}"
+msgstr ""
+"❌ Node discovery: the source address {src} used to connect to Redis ({host})"
+" is a link-local address, which other machines cannot reach. {hint}"
+
+#: hetu/discovery/netcheck.py:374
+#, python-brace-format
+msgid ""
+"❌ 节点发现要用 Redis 后端：默认后端（配置里的第一个）{name} 的 type 是 {kind}。SQLite "
+"只用于单机开发，用不着节点发现，请关掉 DISCOVERY"
+msgstr ""
+"❌ Node discovery requires a Redis Backend: the type of the default Backend "
+"(the first one in the config) {name} is {kind}. SQLite is only for single-"
+"machine development and has no use for node discovery, so turn off DISCOVERY"
+
+#: hetu/discovery/netcheck.py:393
+#, python-brace-format
+msgid ""
+"❌ 节点发现要求 PROXIES_COUNT ≥ 1（现在是 {value!r}）：节点在网关后面，不从 X-Forwarded-For "
+"取地址的话，所有玩家的地址都是网关的，同 IP 的匿名连接上限（MAX_ANONYMOUS_CONNECTION_BY_IP）会把玩家挡在外面。前面只有"
+" Caddy 一层时设成 1。{hint}"
+msgstr ""
+"❌ Node discovery requires PROXIES_COUNT ≥ 1 (currently {value!r}): nodes sit"
+" behind a gateway, and unless the address is taken from X-Forwarded-For, "
+"every player's address is the gateway's, so the per-IP anonymous connection "
+"limit (MAX_ANONYMOUS_CONNECTION_BY_IP) will lock players out. Set it to 1 "
+"when Caddy is the only layer in front. {hint}"
+
+#: hetu/discovery/netcheck.py:409
+msgid ""
+"LISTEN 是 0.0.0.0，按连 Redis 的源地址推出来的，说明到 Redis 走的是本机网桥（Redis 跑在本机的 bridge "
+"网络容器里）。"
+msgstr ""
+"LISTEN is 0.0.0.0, inferred from the source address used to connect to "
+"Redis, which means the route to Redis goes through this machine's bridge "
+"(Redis runs in a bridge-network container on this machine)."
+
+#: hetu/discovery/netcheck.py:416
+#, python-brace-format
+msgid ""
+"❌ 节点发现：广播地址 {ip} 在本机的容器网桥 {device} 上，别的机器连不到。{cause}请在 LISTEN 里写明本机的对外 IP，比如"
+" 10.0.3.17:2466"
+msgstr ""
+"❌ Node discovery: the broadcast address {ip} is on this machine's container "
+"bridge {device}, which other machines cannot reach. {cause}Write this "
+"machine's external IP in LISTEN, e.g. 10.0.3.17:2466"
+
+#: hetu/discovery/netcheck.py:420
+#, python-brace-format
+msgid ""
+"❌ 节点发现只支持 host 网络：广播地址 {ip} 在 {device} 上，{device} 是容器网络的虚拟网卡（veth 之类：iflink "
+"{iflink} ≠ ifindex {ifindex}），别的机器上的网关连不到。{hint}{already}"
+msgstr ""
+"❌ Node discovery only supports the host network: the broadcast address {ip} "
+"is on {device}, and {device} is a virtual NIC of the container network (a "
+"veth or similar: iflink {iflink} ≠ ifindex {ifindex}), so a gateway on "
+"another machine cannot connect. {hint}{already}"
+
+#: hetu/discovery/netcheck.py:429
+msgid ""
+"已经是 host 网络的话（比如 k8s 的 hostNetwork，到 Redis 走的是 CNI 的虚拟网卡），在 LISTEN 里写明本机的对外 "
+"IP，比如 10.0.3.17:2466"
+msgstr ""
+"If you are already on the host network (e.g. k8s hostNetwork, where the "
+"route to Redis goes through a CNI virtual NIC), write this machine's "
+"external IP in LISTEN, e.g. 10.0.3.17:2466"
+
+#: hetu/discovery/registry.py:121
+#, python-brace-format
+msgid "不认识的登记格式版本 {version}（这个版本的 HeTu 认识 {known}）"
+msgstr ""
+"Unrecognized registry format version {version} (this version of HeTu knows "
+"{known})"
+
+#: hetu/discovery/registry.py:148
+msgid "field 不是 worker id"
+msgstr "field is not a worker id"
+
+#: hetu/discovery/registry.py:331
+msgid "ℹ️ [📣Discovery] 写注册表恢复正常"
+msgstr "ℹ️ [📣Discovery] Registry writes recovered"
+
+#: hetu/discovery/registry.py:337
+#, python-brace-format
+msgid "⚠️ [📣Discovery] 写注册表失败，{interval} 秒后重试：{err}"
+msgstr ""
+"⚠️ [📣Discovery] Failed to write registry, retrying in {interval} seconds: "
+"{err}"
+
+#: hetu/discovery/registry.py:355
+#, python-brace-format
+msgid "📣 [📣Discovery] 节点发现：登记地址 {addr}:{port}（worker id {field}）"
+msgstr ""
+"📣 [📣Discovery] Node discovered: registered address {addr}:{port} (worker id "
+"{field})"
+
+#: hetu/discovery/registry.py:375
+#, python-brace-format
+msgid "⚠️ [📣Discovery] 关服时把登记改成 draining 失败，网关要等它过期（{stale:g} 秒）才不再连过来：{err}"
+msgstr ""
+"⚠️ [📣Discovery] Failed to mark registration as draining on shutdown; the "
+"gateway will keep connecting until it expires ({stale:g} seconds): {err}"
+
+#: hetu/discovery/registry.py:410
+#, python-brace-format
+msgid "⚠️ [📣Discovery] 关服时删登记失败，等它过期（{stale:g} 秒）：{err}"
+msgstr ""
+"⚠️ [📣Discovery] Failed to delete registration on shutdown; waiting for it to"
+" expire ({stale:g} seconds): {err}"
+
+#: hetu/endpoint/connection.py:91 hetu/endpoint/connection.py:135
+#: hetu/endpoint/connection.py:170
 msgid "未初始化ComponentTableManager，无法使用Connection组件"
 msgstr ""
 "ComponentTableManager not initialized, cannot use Connection component"
 
-#: hetu/endpoint/connection.py:94
+#: hetu/endpoint/connection.py:110
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
 msgstr ""
 "⚠️ [📞Endpoint] [Illegal Operation] Too many anonymous connections from the "
 "same IP ({count}), possible attack."
 
-#: hetu/endpoint/connection.py:143
+#: hetu/endpoint/connection.py:167
 msgid "请先初始化连接"
 msgstr "Please initialize the connection first"
 
-#: hetu/endpoint/connection.py:172
+#: hetu/endpoint/connection.py:196
 msgid "连接数据不存在，可能是写入未同步，重试"
 msgstr ""
 "Connection data does not exist, possibly due to write not being "
 "synchronized, retrying"
 
-#: hetu/endpoint/connection.py:269
+#: hetu/endpoint/connection.py:293
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
 msgstr ""
 "⚠️ [📞Endpoint] Current connection data has been deleted, possibly kicked "
 "out, will disconnect. Call: {ex_info}"
 
-#: hetu/endpoint/connection.py:306
+#: hetu/endpoint/connection.py:330
 #, python-brace-format
 msgid ""
 "⚠️ [📞Endpoint] [非法操作] 发送消息数过多({sent_msgs} in "
@@ -2712,7 +3475,7 @@ msgstr ""
 "{sent_elapsed}s), possible subscription attack, will disconnect. Call: "
 "{info}"
 
-#: hetu/endpoint/connection.py:330
+#: hetu/endpoint/connection.py:354
 #, python-brace-format
 msgid ""
 "⚠️ [📞Endpoint] [非法操作] 收到消息数过多({received_msgs} in "
@@ -2748,11 +3511,7 @@ msgstr ""
 msgid "Endpoint {name} 必须是异步函数(`async def ...`)"
 msgstr "Endpoint {name} must be an asynchronous function (`async def ...`)"
 
-#: hetu/endpoint/executor.py:89
-msgid "连接初始化失败，new_connection调用失败"
-msgstr "Connection initialization failed, new_connection call failed"
-
-#: hetu/endpoint/executor.py:110
+#: hetu/endpoint/executor.py:136
 #, python-brace-format
 msgid ""
 "⚠️ [📞Endpoint] [非法操作] {context} | 不存在的Endpoint, "
@@ -2761,21 +3520,21 @@ msgstr ""
 "⚠️ [📞Endpoint] [Illegal Operation] {context} | Non-existent Endpoint, check "
 "for illegal call: {namespace}.{endpoint}"
 
-#: hetu/endpoint/executor.py:122
+#: hetu/endpoint/executor.py:148
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] [非法操作] {context} | {endpoint}无调用权限，检查是否非法调用：{args}"
 msgstr ""
 "⚠️ [📞Endpoint] [Illegal Operation] {context} | No permission to call "
 "{endpoint}, check for illegal call: {args}"
 
-#: hetu/endpoint/executor.py:128
+#: hetu/endpoint/executor.py:154
 #, python-brace-format
 msgid "⚠️ [📞Endpoint] [非法操作] {context} | {endpoint}权限级别不支持，拒绝调用：{permission}"
 msgstr ""
 "⚠️ [📞Endpoint] [Illegal Operation] {context} | {endpoint} permission level "
 "not supported, call denied: {permission}"
 
-#: hetu/endpoint/executor.py:138
+#: hetu/endpoint/executor.py:164
 #, python-brace-format
 msgid ""
 "❌ [📞Endpoint] [非法操作] {context} | "
@@ -2787,19 +3546,19 @@ msgstr ""
 "{min_args}-{max_args} arguments, but {actual_args} were provided. Call "
 "content: {args}"
 
-#: hetu/endpoint/executor.py:171
+#: hetu/endpoint/executor.py:197
 #, python-brace-format
 msgid "🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}"
 msgstr "🔜 [📞Endpoint] Calling Endpoint: {ep_name}{args}"
 
-#: hetu/endpoint/executor.py:188
+#: hetu/endpoint/executor.py:214
 #, python-brace-format
 msgid "❌ [📞Endpoint] [调用异常] {context} | {ep_name}{args}，异常：{exc_type}:{exc}"
 msgstr ""
 "❌ [📞Endpoint] [Call Exception] {context} | {ep_name}{args}, exception: "
 "{exc_type}:{exc}"
 
-#: hetu/endpoint/executor.py:234
+#: hetu/endpoint/executor.py:260
 #, python-brace-format
 msgid "🚧 [📞Endpoint] {endpoint} 被守卫拒绝：{code}"
 msgstr "🚧 [📞Endpoint] {endpoint} rejected by guard: {code}"
@@ -2809,69 +3568,92 @@ msgid "@rate_limit/@guard 必须放在 @define_system/@define_endpoint 的下面
 msgstr ""
 "@rate_limit/@guard must be placed below @define_system/@define_endpoint"
 
-#: hetu/server/main.py:111
+#: hetu/server/config.py:62
+#, python-brace-format
+msgid "LISTEN_BACKLOG 必须是正整数，现在是 {value!r}"
+msgstr "LISTEN_BACKLOG must be a positive integer, got {value!r}"
+
+#: hetu/server/receiver.py:208
+#, python-brace-format
+msgid " [非法操作] subscribe了不存在的Component名，注意大小写：{name}"
+msgstr ""
+"[Illegal Operation] Subscribed to a non-existent Component name, note case "
+"sensitivity: {name}"
+
+#: hetu/server/receiver.py:228
+#, python-brace-format
+msgid " [非法操作] 未知订阅操作：{op}"
+msgstr "[Illegal Operation] Unknown subscription operation: {op}"
+
+#: hetu/server/receiver.py:261
+#, python-brace-format
 msgid ""
-"❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令：hetu upgrade --config <your_config_file>.yml"
+" [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，{num_tbl_sub}个整表订阅"
 msgstr ""
-"❌ [📡Server] Database table structure requires migration. Please use the "
-"migration command: hetu upgrade --config <your_config_file>.yml"
+" [Illegal Operation] Subscription count exceeds limit: {num_row_sub} row "
+"subscriptions, {num_idx_sub} index subscriptions, {num_tbl_sub} whole-table "
+"subscriptions"
 
-#: hetu/server/main.py:146
-#, python-brace-format
-msgid "⌚ [📡Server] Closing backend {attrib}..."
-msgstr "⌚ [📡Server] Closing backend {attrib}..."
+#: hetu/server/receiver.py:300
+msgid "接收循环意外结束"
+msgstr "Receive loop ended unexpectedly"
 
-#: hetu/server/main.py:168
+#: hetu/server/receiver.py:306
+msgid "收到空帧"
+msgstr "Received empty frame"
+
+#: hetu/server/receiver.py:310
 #, python-brace-format
-msgid ""
-"❌ 进程[{pid}] 启动超时({timeout}秒): {err}\n"
-"    启动流程卡住会让服务器一直起不来，已中止。如果它本来就需要跑这么久，请调大配置 STARTUP_TIMEOUT（0为不限制）"
+msgid "收到非二进制帧：{kind}"
+msgstr "Received non-binary frame: {kind}"
+
+#: hetu/server/receiver.py:332
+msgid "超出接收频率上限"
+msgstr "Receive rate limit exceeded"
+
+#: hetu/server/receiver.py:350
+msgid "连接已被顶号"
+msgstr "Connection has been taken over by another session"
+
+#: hetu/server/receiver.py:352
+msgid "rpc 调用失败"
+msgstr "RPC call failed"
+
+#: hetu/server/receiver.py:363
+msgid "订阅请求非法"
+msgstr "Invalid subscription request"
+
+#: hetu/server/receiver.py:373
+#, python-brace-format
+msgid " [非法操作] 未知消息类型：{msg_type}"
+msgstr "[Illegal Operation] Unknown message type: {msg_type}"
+
+#: hetu/server/receiver.py:386
+msgid "Redis ConnectionError"
+msgstr "Redis ConnectionError"
+
+#: hetu/server/receiver.py:387
+#, python-brace-format
+msgid "❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}"
+msgstr "❌ [📡WSReceiver] Redis ConnectionError, disconnecting: {err}"
+
+#: hetu/server/receiver.py:396
+#, python-brace-format
+msgid "⚠️ [📡WSReceiver] [非法操作] 封包：{data}，异常：{err}"
+msgstr "⚠️ [📡WSReceiver] [Illegal Operation] Packet: {data}, exception: {err}"
+
+#: hetu/server/receiver.py:403
+#, python-brace-format
+msgid "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
+msgstr "❌ [📡WSReceiver] Execution exception, packet: {data}, exception: {err}"
+
+#: hetu/server/receiver.py:424
+#, python-brace-format
+msgid "⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}"
 msgstr ""
-"❌ Process [{pid}] startup timed out ({timeout} seconds): {err}\n"
-"    The startup process got stuck, which would prevent the server from ever starting, so it was aborted. If it actually needs this long to run, increase the STARTUP_TIMEOUT configuration (0 means unlimited)."
+"⛓️ [📡WSReceiver] Receive coroutine ended, closing connection: {reason}"
 
-#: hetu/server/main.py:174
-#, python-brace-format
-msgid "启动超时({timeout}秒): {err}"
-msgstr "Startup timed out ({timeout} seconds): {err}"
-
-#: hetu/server/main.py:181
-msgid "卡在连接后端/建表阶段"
-msgstr "Stuck at the Backend connection/table creation stage"
-
-#: hetu/server/main.py:184
-#, python-brace-format
-msgid "❌ 进程[{pid}] 启动失败: {err}"
-msgstr "❌ Process [{pid}] failed to start: {err}"
-
-#: hetu/server/main.py:189
-#, python-brace-format
-msgid "后端启动失败: {err}"
-msgstr "Backend startup failed: {err}"
-
-#: hetu/server/main.py:196
-#, python-brace-format
-msgid "ℹ️ 进程[{pid}] 加载 {app_file} 完成"
-msgstr "ℹ️ Process [{pid}] has loaded {app_file}"
-
-#: hetu/server/main.py:202
-#, python-brace-format
-msgid "ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服"
-msgstr ""
-"ℹ️ Process [{pid}] has started {instances} server(s) for the {namespace} "
-"application"
-
-#: hetu/server/main.py:231
-#, python-brace-format
-msgid "❌ 进程[{pid}] 启动System执行失败: {err}"
-msgstr "❌ Process [{pid}] System execution failed during startup: {err}"
-
-#: hetu/server/main.py:236
-#, python-brace-format
-msgid "启动System执行失败: {err}"
-msgstr "System execution failed during startup: {err}"
-
-#: hetu/server/main.py:275
+#: hetu/server/runtime.py:114
 #, python-brace-format
 msgid ""
 "无法加载主启动文件({err})：{app_file}，检查以下可能性：\n"
@@ -2884,160 +3666,94 @@ msgstr ""
 "* If starting via Config, this file is set by the APP_FILE parameter.\n"
 "* If starting via Docker, also check if the /app directory is correctly mapped."
 
-#: hetu/server/receiver.py:207
-#, python-brace-format
-msgid " [非法操作] subscribe了不存在的Component名，注意大小写：{name}"
-msgstr ""
-"[Illegal Operation] Subscribed to a non-existent Component name, note case "
-"sensitivity: {name}"
-
-#: hetu/server/receiver.py:227
-#, python-brace-format
-msgid " [非法操作] 未知订阅操作：{op}"
-msgstr "[Illegal Operation] Unknown subscription operation: {op}"
-
-#: hetu/server/receiver.py:260
+#: hetu/server/runtime.py:177
 #, python-brace-format
 msgid ""
-" [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，{num_tbl_sub}个整表订阅"
+"LOGGING 配置引用了 Sanic 的类，HeTu 已经不用 Sanic 了：{items}。控制台的彩色格式请改用 "
+"hetu.safelogging.formatter.ContextAutoFormatter，写法见 CONFIG_TEMPLATE.yml"
 msgstr ""
-" [Illegal Operation] Subscription count exceeds limit: {num_row_sub} row "
-"subscriptions, {num_idx_sub} index subscriptions, {num_tbl_sub} whole-table "
-"subscriptions"
+"The LOGGING config references Sanic classes, but HeTu no longer uses Sanic: "
+"{items}. For colored console formatting, use "
+"hetu.safelogging.formatter.ContextAutoFormatter instead; see "
+"CONFIG_TEMPLATE.yml for usage"
 
-#: hetu/server/receiver.py:306
-msgid "接收循环意外结束"
-msgstr "Receive loop ended unexpectedly"
-
-#: hetu/server/receiver.py:311
-msgid "收到空帧"
-msgstr "Received empty frame"
-
-#: hetu/server/receiver.py:315
+#: hetu/server/runtime.py:251
 #, python-brace-format
-msgid "收到非二进制帧：{kind}"
-msgstr "Received non-binary frame: {kind}"
+msgid "❌ [📡Server] 后台任务 {name} 异常退出：{err}"
+msgstr "❌ [📡Server] Background task {name} exited with an error: {err}"
 
-#: hetu/server/receiver.py:337
-msgid "超出接收频率上限"
-msgstr "Receive rate limit exceeded"
-
-#: hetu/server/receiver.py:355
-msgid "连接已被顶号"
-msgstr "Connection has been taken over by another session"
-
-#: hetu/server/receiver.py:357
-msgid "rpc 调用失败"
-msgstr "RPC call failed"
-
-#: hetu/server/receiver.py:368
-msgid "订阅请求非法"
-msgstr "Invalid subscription request"
-
-#: hetu/server/receiver.py:378
-#, python-brace-format
-msgid " [非法操作] 未知消息类型：{msg_type}"
-msgstr "[Illegal Operation] Unknown message type: {msg_type}"
-
-#: hetu/server/receiver.py:387
-msgid "WebSocket 已关闭"
-msgstr "WebSocket closed"
-
-#: hetu/server/receiver.py:389
-msgid "Redis ConnectionError"
-msgstr "Redis ConnectionError"
-
-#: hetu/server/receiver.py:390
-#, python-brace-format
-msgid "❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}"
-msgstr "❌ [📡WSReceiver] Redis ConnectionError, disconnecting: {err}"
-
-#: hetu/server/receiver.py:399
-#, python-brace-format
-msgid "⚠️ [📡WSReceiver] [非法操作] 封包：{data}，异常：{err}"
-msgstr "⚠️ [📡WSReceiver] [Illegal Operation] Packet: {data}, exception: {err}"
-
-#: hetu/server/receiver.py:406
-#, python-brace-format
-msgid "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
-msgstr "❌ [📡WSReceiver] Execution exception, packet: {data}, exception: {err}"
-
-#: hetu/server/receiver.py:421
-#, python-brace-format
-msgid "⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}"
-msgstr ""
-"⛓️ [📡WSReceiver] Receive coroutine ended, closing connection: {reason}"
-
-#: hetu/server/threaded_accept.py:125
-msgid "accept 线程 select() 出错"
-msgstr "select() error in the accept thread"
-
-#: hetu/server/threaded_accept.py:139
-msgid "socket.accept() 出错"
-msgstr "socket.accept() error"
-
-#: hetu/server/threaded_accept.py:251
-#, python-brace-format
-msgid "🧵 进程[{pid}] 监听socket改由accept线程接连接"
-msgstr ""
-"🧵 Process [{pid}]: listening socket now accepts connections via the accept "
-"thread"
-
-#: hetu/server/threaded_accept.py:256
+#: hetu/server/runtime.py:385
 #, python-brace-format
 msgid ""
-"⚠️ 事件循环 {loop} 不是 selector 事件循环，没装上 accept 线程补丁，Windows 多 worker 下如遇 worker "
-"卡住不响应，请改用 WORKER_NUM: 1"
+"❌ 进程[{pid}] 启动超时({timeout}秒): {err}\n"
+"    启动流程卡住会让服务器一直起不来，已中止。如果它本来就需要跑这么久，请调大配置 STARTUP_TIMEOUT（0为不限制）"
 msgstr ""
-"⚠️ Event loop {loop} is not a selector event loop; the accept thread patch "
-"was not applied. On Windows with multiple workers, if a worker hangs and "
-"stops responding, switch to WORKER_NUM: 1"
+"❌ Process [{pid}] startup timed out ({timeout} seconds): {err}\n"
+"    The startup process got stuck, which would prevent the server from ever starting, so it was aborted. If it actually needs this long to run, increase the STARTUP_TIMEOUT configuration (0 means unlimited)."
 
-#: hetu/server/websocket.py:68
+#: hetu/server/runtime.py:391
 #, python-brace-format
-msgid "🔗 [📡WSConnect] 新连接：{db_name}: {task_name}"
-msgstr "🔗 [📡WSConnect] New connection: {db_name}: {task_name}"
+msgid "启动超时({timeout}秒): {err}"
+msgstr "Startup timed out ({timeout} seconds): {err}"
 
-#: hetu/server/websocket.py:104
-#, python-brace-format
-msgid "New Connect Error: 错误的路径，实例名不存在: {instance}"
+#: hetu/server/runtime.py:409
+msgid "卡在连接后端、租 Worker ID 或建表阶段"
 msgstr ""
-"New Connect Error: Invalid path, instance name does not exist: {instance}"
+"Stuck at connecting to the Backend, renting a Worker ID, or creating tables"
 
-#: hetu/server/websocket.py:195
+#: hetu/server/runtime.py:412
 #, python-brace-format
-msgid "⛓️ [📡WSConnect] 连接已被顶号，主动断开：{ctx}"
+msgid "❌ 进程[{pid}] 启动失败: {err}"
+msgstr "❌ Process [{pid}] failed to start: {err}"
+
+#: hetu/server/runtime.py:417
+#, python-brace-format
+msgid "后端启动失败: {err}"
+msgstr "Backend startup failed: {err}"
+
+#: hetu/server/runtime.py:423
+#, python-brace-format
+msgid "ℹ️ 进程[{pid}] 加载 {app_file} 完成"
+msgstr "ℹ️ Process [{pid}] has loaded {app_file}"
+
+#: hetu/server/runtime.py:428
+#, python-brace-format
+msgid "ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服"
 msgstr ""
-"⛓️ [📡WSConnect] Connection was superseded by another login, actively "
-"disconnecting: {ctx}"
+"ℹ️ Process [{pid}] has started {instances} server(s) for the {namespace} "
+"application"
 
-#: hetu/server/websocket.py:203
+#: hetu/server/runtime.py:457
 #, python-brace-format
-msgid "⚠️ [📡WSConnect] 顶号核查读库失败：{err}"
+msgid "❌ 进程[{pid}] 启动System执行失败: {err}"
+msgstr "❌ Process [{pid}] System execution failed during startup: {err}"
+
+#: hetu/server/runtime.py:462
+#, python-brace-format
+msgid "启动System执行失败: {err}"
+msgstr "System execution failed during startup: {err}"
+
+#: hetu/server/runtime.py:487
+msgid ""
+"❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令：hetu upgrade --config <your_config_file>.yml"
 msgstr ""
-"⚠️ [📡WSConnect] Failed to read database during duplicate-login check: {err}"
+"❌ [📡Server] Database table structure requires migration. Please use the "
+"migration command: hetu upgrade --config <your_config_file>.yml"
 
-#: hetu/server/websocket.py:257
+#: hetu/server/runtime.py:586
 #, python-brace-format
-msgid "❌ [📡WSConnect] 连接初始化异常：{err}"
-msgstr "❌ [📡WSConnect] Connection initialization exception: {err}"
+msgid "⌚ [📣Discovery] 已在注册表里注销，照常服务 {wait:g} 秒、等网关刷新之后再停止监听"
+msgstr ""
+"⌚ [📣Discovery] Deregistered from the registry; continuing to serve for "
+"{wait:g} seconds, and stopping the listener after the gateway refreshes"
 
-#: hetu/server/websocket.py:287
-#, python-brace-format
-msgid "❌ [📡WSSender] WS协议异常：{exc}"
-msgstr "❌ [📡WSSender] WebSocket protocol exception: {exc}"
+#: hetu/server/runtime.py:604
+msgid "⚠️ [📡Server] 开服失败后释放 Worker ID 租约超时，等它自己过期"
+msgstr ""
+"⚠️ [📡Server] Timed out releasing the Worker ID lease after a failed startup;"
+" waiting for it to expire on its own"
 
-#: hetu/server/websocket.py:296
-#, python-brace-format
-msgid "❌ [📡WSSender] 发送数据异常：{err}"
-msgstr "❌ [📡WSSender] Error sending data: {err}"
-
-#: hetu/server/websocket.py:400
-#, python-brace-format
-msgid "❌ [📡WSSender] 订阅初始化异常：{err}"
-msgstr "❌ [📡WSSender] Subscription initialization exception: {err}"
-
-#: hetu/server/websocket.py:445
+#: hetu/server/runtime.py:632
 #, python-brace-format
 msgid "⚠️ [📡Server] 关服时还有{count}个连接没拆完，已等待{timeout}秒，不再等待直接关闭后端"
 msgstr ""
@@ -3045,16 +3761,262 @@ msgstr ""
 "down; after waiting {timeout} seconds, no longer waiting and closing the "
 "Backend directly"
 
-#: hetu/server/websocket.py:464
-#, python-brace-format
-msgid "⛓️ [📡WSConnect] 连接断开：{task_name}"
-msgstr "⛓️ [📡WSConnect] Connection disconnected: {task_name}"
+#: hetu/server/runtime.py:672
+msgid "⚠️ [📡Server] 关服时还有连接相关的任务没停下，不再等待"
+msgstr ""
+"⚠️ [📡Server] Some connection-related tasks had not stopped at shutdown; no "
+"longer waiting"
 
-#: hetu/server/websocket.py:493
+#: hetu/server/runtime.py:676
+#, python-brace-format
+msgid "⚠️ [⚙️Future] 关服时 FutureCalls 没在{timeout}秒内停下，不再等待"
+msgstr ""
+"⚠️ [⚙️Future] FutureCalls did not stop within {timeout} seconds at shutdown;"
+" no longer waiting"
+
+#: hetu/server/runtime.py:702
+#, python-brace-format
+msgid "⌚ [📡Server] Closing backend {attrib}..."
+msgstr "⌚ [📡Server] Closing backend {attrib}..."
+
+#: hetu/server/supervisor.py:372
+msgid "⌚ [🗂️Supervisor] 开服途中收到关服信号，中止开服"
+msgstr ""
+"⌚ [🗂️Supervisor] Received shutdown signal during startup, aborting startup"
+
+#: hetu/server/supervisor.py:377
+#, python-brace-format
+msgid "✅ [🗂️Supervisor] {count} 个 worker 都已就绪"
+msgstr "✅ [🗂️Supervisor] All {count} workers are ready"
+
+#: hetu/server/supervisor.py:408
+msgid "⌚ [🗂️Supervisor] 收到关服信号，开始关服..."
+msgstr "⌚ [🗂️Supervisor] Received shutdown signal, starting shutdown..."
+
+#: hetu/server/supervisor.py:442
+#, python-brace-format
+msgid "⌚ [🗂️Supervisor] 通知 {count} 个 worker 关服..."
+msgstr "⌚ [🗂️Supervisor] Notifying {count} workers to shut down..."
+
+#: hetu/server/supervisor.py:457
+msgid "👋 [🗂️Supervisor] 所有 worker 都已退出"
+msgstr "👋 [🗂️Supervisor] All workers have exited"
+
+#: hetu/server/supervisor.py:488
+#, python-brace-format
+msgid "🚀 [🗂️Supervisor] 启动 worker {index}（pid {pid}）"
+msgstr "🚀 [🗂️Supervisor] Starting worker {index} (pid {pid})"
+
+#: hetu/server/supervisor.py:517
+#, python-brace-format
+msgid "⚠️ [🗂️Supervisor] worker {index}（pid {pid}）没在 {timeout:g} 秒内退出，强制结束"
+msgstr ""
+"⚠️ [🗂️Supervisor] worker {index} (pid {pid}) did not exit within {timeout:g}"
+" seconds, force killing"
+
+#: hetu/server/supervisor.py:584
+#, python-brace-format
+msgid ""
+"❌ [🗂️Supervisor] worker {index} 出错退出：\n"
+"{detail}"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} exited with an error:\n"
+"{detail}"
+
+#: hetu/server/supervisor.py:607
+msgid "Worker ID 租约丢失"
+msgstr "Worker ID lease lost"
+
+#: hetu/server/supervisor.py:609
+#, python-brace-format
+msgid "没在 {timeout:g} 秒内就绪"
+msgstr "did not become ready within {timeout:g} seconds"
+
+#: hetu/server/supervisor.py:616
+#, python-brace-format
+msgid "被信号 {name} 结束"
+msgstr "killed by signal {name}"
+
+#: hetu/server/supervisor.py:617
+#, python-brace-format
+msgid "退出码 {code}"
+msgstr "exit code {code}"
+
+#: hetu/server/supervisor.py:625
+#, python-brace-format
+msgid "❌ [🗂️Supervisor] worker {index} 在就绪之前退出了（{reason}）"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} exited before becoming ready ({reason})"
+
+#: hetu/server/supervisor.py:641
+#, python-brace-format
+msgid "❌ [🗂️Supervisor] worker {index} 开服失败：{err}"
+msgstr "❌ [🗂️Supervisor] worker {index} failed to start: {err}"
+
+#: hetu/server/supervisor.py:648
+#, python-brace-format
+msgid ""
+"❌ [🗂️Supervisor] worker {index} 开服出错：\n"
+"{detail}"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} errored during startup:\n"
+"{detail}"
+
+#: hetu/server/supervisor.py:658
+#, python-brace-format
+msgid "❌ [🗂️Supervisor] worker {index} 也没能开服（{reason}）"
+msgstr "❌ [🗂️Supervisor] worker {index} also failed to start ({reason})"
+
+#: hetu/server/supervisor.py:679
+#, python-brace-format
+msgid ""
+"❌ [🗂️Supervisor] worker {index} 连续 {count} 次意外退出（最近一次：{reason}），不再重启，关服"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} exited unexpectedly {count} times in a row "
+"(most recent: {reason}), not restarting it, shutting down"
+
+#: hetu/server/supervisor.py:688
+#, python-brace-format
+msgid "⚠️ [🗂️Supervisor] worker {index} 意外退出（{reason}），{delay:g} 秒后以同一序号重启"
+msgstr ""
+"⚠️ [🗂️Supervisor] worker {index} exited unexpectedly ({reason}), restarting "
+"with the same index in {delay:g} seconds"
+
+#: hetu/server/supervisor.py:710
+#, python-brace-format
+msgid ""
+"❌ [🗂️Supervisor] worker {index}（pid {pid}）没在 {timeout:g} 秒内就绪，卡在开服里了（比如启动 "
+"System 里有阻塞调用），强制结束"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} (pid {pid}) did not become ready within "
+"{timeout:g} seconds, stuck in startup (e.g. a blocking call in a startup "
+"System), force killing"
+
+#: hetu/server/supervisor.py:769
+#, python-brace-format
+msgid "🔄 [🗂️Supervisor] 文件有改动（{files}），逐个重启 worker"
+msgstr ""
+"🔄 [🗂️Supervisor] Files changed ({files}), restarting workers one by one"
+
+#: hetu/server/supervisor.py:793
+#, python-brace-format
+msgid "❌ [🗂️Supervisor] 改动后 worker {index} 没能开服，先停着，其余 worker 照旧，等下一次改动再试"
+msgstr ""
+"❌ [🗂️Supervisor] worker {index} failed to start after the change; leaving it"
+" stopped for now, the other workers keep running, will retry on the next "
+"change"
+
+#: hetu/server/threaded_accept.py:122
+msgid "accept 线程 select() 出错"
+msgstr "select() error in the accept thread"
+
+#: hetu/server/threaded_accept.py:136
+msgid "socket.accept() 出错"
+msgstr "socket.accept() error"
+
+#: hetu/server/websocket.py:90
+#, python-brace-format
+msgid "🔗 [📡WSConnect] 新连接：{instance}: {conn_id}"
+msgstr "🔗 [📡WSConnect] New connection: {instance}: {conn_id}"
+
+#: hetu/server/websocket.py:136
+#, python-brace-format
+msgid "New Connect Error: 错误的路径，实例名不存在: {instance}"
+msgstr ""
+"New Connect Error: Invalid path, instance name does not exist: {instance}"
+
+#: hetu/server/websocket.py:232
+#, python-brace-format
+msgid "⛓️ [📡WSConnect] 连接已被顶号，主动断开：{ctx}"
+msgstr ""
+"⛓️ [📡WSConnect] Connection was superseded by another login, actively "
+"disconnecting: {ctx}"
+
+#: hetu/server/websocket.py:240
+#, python-brace-format
+msgid "⚠️ [📡WSConnect] 顶号核查读库失败：{err}"
+msgstr ""
+"⚠️ [📡WSConnect] Failed to read database during duplicate-login check: {err}"
+
+#: hetu/server/websocket.py:319
+#, python-brace-format
+msgid "❌ [📡WSConnect] 连接初始化异常：{err}"
+msgstr "❌ [📡WSConnect] Connection initialization exception: {err}"
+
+#: hetu/server/websocket.py:342
+#, python-brace-format
+msgid "❌ [📡WSConnect] WS协议异常：{exc}"
+msgstr "❌ [📡WSConnect] WS protocol exception: {exc}"
+
+#: hetu/server/websocket.py:392
+#, python-brace-format
+msgid "❌ [📡WSSender] 发送数据异常：{err}"
+msgstr "❌ [📡WSSender] Error sending data: {err}"
+
+#: hetu/server/websocket.py:480
+#, python-brace-format
+msgid "❌ [📡WSSender] 订阅初始化异常：{err}"
+msgstr "❌ [📡WSSender] Subscription initialization exception: {err}"
+
+#: hetu/server/websocket.py:521
+#, python-brace-format
+msgid "⛓️ [📡WSConnect] 连接断开：{conn_id}"
+msgstr "⛓️ [📡WSConnect] Connection closed: {conn_id}"
+
+#: hetu/server/websocket.py:569
 #, python-brace-format
 msgid "❌ [📡WSDisconnectHook] 断线System调用异常: {system} | {err}"
 msgstr ""
 "❌ [📡WSDisconnectHook] Disconnect System call exception: {system} | {err}"
+
+#: hetu/server/adapters/aiohttp_app.py:368
+msgid "❌ [📡WorkerKeeper] Worker ID 租约已丢失，停止本 worker，由管理进程重启"
+msgstr ""
+"❌ [📡WorkerKeeper] Worker ID lease lost, stopping this worker; it will be "
+"restarted by the manager process"
+
+#: hetu/server/adapters/aiohttp_app.py:374
+msgid "❌ [📡WorkerKeeper] Worker ID 租约已丢失，单进程模式没法只重启 worker，停止服务器"
+msgstr ""
+"❌ [📡WorkerKeeper] Worker ID lease lost; in single-process mode the worker "
+"cannot be restarted alone, stopping the server"
+
+#: hetu/server/adapters/aiohttp_app.py:438
+#, python-brace-format
+msgid "⚠️ [📡Server] 关服排空：{count}个连接没在{timeout}秒内排空，直接断开，在途的调用随之取消"
+msgstr ""
+"⚠️ [📡Server] Shutdown drain: {count} connection(s) did not drain within "
+"{timeout} seconds, disconnecting them directly; in-flight calls are "
+"cancelled accordingly"
+
+#: hetu/server/adapters/aiohttp_app.py:613
+#, python-brace-format
+msgid ""
+"⚠️ [📡Server] 监听队列 LISTEN_BACKLOG={backlog} 被内核截到了 "
+"net.core.somaxconn={somaxconn}，大批客户端同时重连时排不下的握手会被丢掉，建议调大 net.core.somaxconn"
+msgstr ""
+"⚠️ [📡Server] Listen queue LISTEN_BACKLOG={backlog} was capped by the kernel "
+"to net.core.somaxconn={somaxconn}; handshakes that don't fit will be dropped"
+" when many clients reconnect at once, consider increasing net.core.somaxconn"
+
+#: hetu/server/adapters/aiohttp_app.py:713
+#, python-brace-format
+msgid "🧵 进程[{pid}] 监听socket改由accept线程接连接"
+msgstr ""
+"🧵 Process [{pid}]: listening socket now accepts connections via the accept "
+"thread"
+
+#: hetu/server/adapters/aiohttp_app.py:744
+msgid "⌚ [📡Server] 开服途中收到关服信号，中止开服"
+msgstr "⌚ [📡Server] Shutdown signal received during startup, aborting startup"
+
+#: hetu/server/adapters/aiohttp_app.py:752
+msgid "✅ [📡Server] 服务器已就绪，开始接受连接"
+msgstr "✅ [📡Server] Server is ready, accepting connections"
+
+#: hetu/server/adapters/aiohttp_app.py:756
+msgid "⌚ [📡Server] 开始关服..."
+msgstr "⌚ [📡Server] Shutting down..."
 
 #: hetu/server/pipeline/crypto.py:100
 msgid "客户端发送未签名握手包，但服务器配置了 auth_key（客户端可能未配置 auth_key）"
@@ -3400,17 +4362,17 @@ msgstr ""
 "❌ [⚙️Future] Future System call exception, call: {system}{args}, exception: "
 "{exc}"
 
-#: hetu/system/future.py:594
+#: hetu/system/future.py:595
 #, python-brace-format
 msgid "🔗 [⚙️Future] 新Task：{task_name}"
 msgstr "🔗 [⚙️Future] New Task: {task_name}"
 
-#: hetu/system/future.py:601
+#: hetu/system/future.py:602
 #, python-brace-format
 msgid "🔗 [⚙️Future] 释放了 {deleted} 条过期的 call lock"
 msgstr "🔗 [⚙️Future] Released {deleted} expired call locks"
 
-#: hetu/system/future.py:660
+#: hetu/system/future.py:661
 #, python-brace-format
 msgid "⚠️ [⚙️Future] Task执行异常，将再次重试：{exc}"
 msgstr "⚠️ [⚙️Future] Task execution exception, will retry again: {exc}"
