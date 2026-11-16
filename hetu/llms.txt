@@ -37,11 +37,11 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Advanced
 
-- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、binlog 式同步（`commit_seq` 消费方写法；库外 / headless 消费方用 `servant_seq_read` 确认缺口、`servant_seq_head` 读发到第几号、裁剪只删落盘游标之前的行）、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns、`hetu.headless`（非服务器进程直接读写组件表）
+- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、binlog 式同步（`commit_seq` 消费方写法；库外 / headless 消费方用 `servant_seq_read` 确认缺口、`servant_seq_head` 读发到第几号、裁剪只删落盘游标之前的行）、Raw Endpoints（无事务 RPC）、custom pipeline layers、自定义 HTTP 端点（`define_route` / `on_server_setup`，aiohttp handler）、用于 range query 的 NumPy patterns、`hetu.headless`（非服务器进程直接读写组件表）
 
 ## Operations & Deployment
 
-- [Operations](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/operations.md): 生产部署——Docker 部署（`heerozh/hetu:latest` / 阿里云上海镜像）、pip + miniconda 原生部署（约比 Docker 高 20% 性能）、Redis 拓扑（master + servant 读写分离、Redis Cluster、订阅的副本复制延迟预算 100ms）、Caddy 反向代理 + Docker Swarm 自动负载均衡、`hetu` CLI（`start` / `build` / `upgrade`）
+- [Operations](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/operations.md): 生产部署——Docker 部署（`heerozh/hetu:latest` / 阿里云上海镜像）、pip + miniconda 原生部署（约比 Docker 高 20% 性能）、Redis 拓扑（master + servant 读写分离、Redis Cluster、订阅的副本复制延迟预算 100ms）、参考部署（云上多机：节点用 host 网络、打开 `DISCOVERY`，开好服登记进 Redis 的 `hetu:nodes`、停服前先注销；网关上 Caddy + `hetu dns`（把注册表答成 `dynamic a` 的 A 记录，只读 ACL 用户读副本），开服 / 启动时的部署检查，TLS、真实 IP）、停服（注销、排空、`SHUTDOWN_DRAIN_TIMEOUT` / `GRACEFUL_SHUTDOWN_TIMEOUT`、编排器宽限期）、`hetu` CLI（`start` / `build` / `upgrade` / `dns` / `nodes`）
 
 ## API Reference
 
@@ -51,7 +51,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
 - [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition` / `UniqueViolation` / `CommitSeqDiverged`（提交序号列的序列和库外消费方记下的对不上：号被复用、游标那一行没了、组内重号）
-- [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Sanic / System 直接读写组件表，写入走与 System 相同的提交路径
+- [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Web 服务器 / System 直接读写组件表，写入走与 System 相同的提交路径
 - [Local](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/local.md): `hetu.local.open_local_app` / `LocalApp` —— 进程内直连后端跑 System、读写组件表，`hetu call` / `hetu shell` 与测试用 `Sandbox` 共用同一套 API
 
 ## For LLM-assisted Development

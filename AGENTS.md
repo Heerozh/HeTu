@@ -29,6 +29,12 @@ docs/api 的改动：行号一变，改了同一个源文件的 PR 就会互相�
 发版时先在 dev 上跑一次脚本、单独提交，再开 dev → main 的 PR，CI 只在指向 main 的 PR 上比对
 docs/api 是否过期。它的读者（文档站、`hetu/llms.txt`）只读 main。
 
+`hetu/i18n/*/LC_MESSAGES/messages.po` 不用手动同步：dev → main 的发版 PR 打开（及之后每次往
+dev 推）时，CD 跑 `autolang sync` + `autolang translate` 并把译文直接提交回 dev，随该 PR 当版
+生效，**合并前等这个 job 跑完**。`.mo` 不进 git，由 `setup.py` 在打 wheel / 镜像时编译进包；
+editable 安装不编（测试按 zh_CN 断言中文原文）。`tests/test_i18n_catalogs.py` 检查译文的
+`%` / `{}` 占位符与原文一致。
+
 测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
 worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /
 终端可以同时跑测试。`-n` 并行时默认按（测试文件, 后端）分组调度，每个 worker 只启动自己用到
@@ -62,7 +68,7 @@ worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己
 ### Data Flow
 
 ```
-Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExecutor
+Client (Unity/JS/C#) ─WebSocket─► aiohttp Worker ──► EndpointExecutor
                                                          │
                                           ┌──────────────┤
                                           ▼              ▼
@@ -109,12 +115,23 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ### Server Layer (`hetu/server/`)
 
-- 基于 Sanic（async web framework）。每个 worker process 独立运行。
-- `main.py`：worker 入口 —— 初始化 backends、SnowflakeID、
-  ComponentTableManagers、SystemClusters。
-- `websocket.py`：WebSocket handler —— 为每个连接创建 `EndpointExecutor`、
-  `SystemCaller`、`SubscriptionBroker`。
-- `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`sel` 命令。
+- 基于 aiohttp（原来是 Sanic，迁移的设计见
+  `docs/superpowers/specs/2026-11-14-aiohttp-migration-design.md`）。每个 worker process 独立运行。
+- `runtime.py`：与框架无关的 `WorkerRuntime` —— 每次开服新建一个，持有 backends、
+  ComponentTableManagers、雪花号租约、任务表、连接表，管开服 / 关服的先后顺序；
+  `prepare_worker` 加载 app 文件、建 SystemClusters。
+- `adapters/aiohttp_app.py`：aiohttp 适配。`AiohttpServer` 管一次开服到关服，`hetu start` 和测试
+  harness 共用；关服时先排空（在途的 RPC 处理完、回复发出去再断开）。单进程时 `run()`，多进程时每个
+  worker 里跑 `run_worker()`。
+- `supervisor.py`：多进程管理（`WORKER_NUM>1`）。管理进程不加载 app 文件，用 spawn 起
+  worker，经控制管道通知停服、收 ready；ready 之前的失败整体中止，之后崩溃的以同一序号退避重启；DEBUG 时
+  自动重载。测试用假 worker（`tests/fixtures/fake_workers.py`）。
+- `forwarded.py`：从反向代理头取客户端地址（`PROXIES_COUNT` 等），规则同原来的 Sanic。
+- `conn.py`：`WsConnection` 接口（recv / send / fail / protocol_error）和 `ConnectionClosed`，
+  处理连接的代码只经它收发，不碰 Web 框架。
+- `websocket.py`：`serve_connection` —— 为每个连接创建 `EndpointExecutor`、
+  `SystemCaller`、`SubscriptionBroker`，收、发各起一个协程，任意一边结束就拆连接。
+- `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`motd` 命令。
   `rpcs` 是等推送的调用：照常回 rsp，再在 `SubscriptionHub` 里起栅栏（`fence_`），这次调用
   引起的推送发出之后发 `["sync", id]`（设计见
   `docs/superpowers/specs/2026-10-10-rpcs-sync-design.md`）。
@@ -143,9 +160,10 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 | `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor`                          |
 | `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`                                      |
 | `hetu/data/sub.py`       | `SubscriptionHub`（worker 级）, `SubscriptionBroker`（每连接）, 三种 Subscription      |
-| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline                                      |
+| `hetu/server/`           | aiohttp workers、多进程 supervisor、WebSocket handler、message pipeline                 |
 | `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables                          |
-| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK）；调试用 `call` / `get` / `range` / `shell` |
+| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK）；调试用 `call` / `get` / `range` / `shell`；节点发现用 `dns`（网关上的 DNS 桥）/ `nodes` |
+| `hetu/discovery/`        | 节点发现：注册表 `hetu:nodes`（`registry`，开好服登记、关服先注销）、开服检查（`netcheck`，广播地址、只支持 host 网络）、`hetu dns`（`dns`，手写的 DNS 报文），设计见 `docs/superpowers/specs/2026-11-15-node-discovery-design.md` |
 | `hetu/local.py`          | `LocalApp` / `open_local_app` —— 进程内直连后端跑 System、读写组件表（`hetu call` / `shell` 与 `Sandbox` 共用） |
 | `hetu/data/backend/snowflake_lease.py` | `SnowflakeLease` —— 雪花号租约生命周期（worker id + 时间戳水位 + 续约），服务器与 CLI 共用 |
 | `hetu/sourcegen/`        | Client SDK code generation（C#）；由 `hetu build` 调用                                  |

@@ -65,7 +65,7 @@ TOPIC_META: dict[str, tuple[str, str, int]] = {
     ),
     "headless": (
         "Headless",
-        "无服务器进程的表直读写客户端：可信内部进程不经 Sanic / System 直接读写组件表。",
+        "无服务器进程的表直读写客户端：可信内部进程不经 Web 服务器 / System 直接读写组件表。",
         70,
     ),
     "local": (

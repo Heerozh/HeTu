@@ -187,10 +187,10 @@ uv run hetu start \
   --app-file=./src/app.py \
   --db=sqlite:///./chat.db \
   --namespace=Chat \
-  --instance=dev
+  --instance=chat-room-1
 ```
 
-提供的示例还附带了一个 `config.yml`，你可以使用它：
+提供的示例还附带了一个 `config.yml`（实例名同样是 `chat-room-1`），你可以使用它：
 
 ```bash
 cd examples/chat/server
@@ -204,7 +204,8 @@ uv run hetu start --config=./config.yml
 ```csharp
 // Fire and forget connect
 // 实际使用中，应将其包装在异步方法中，并通过循环控制自动重连。
-HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat"); 
+// 路径最后一段是实例名，也就是开服时的 --instance
+HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/chat-room-1"); 
 // 会自动等待连接建立后再发送。
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 

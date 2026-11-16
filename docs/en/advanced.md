@@ -1140,24 +1140,39 @@ auto-discovery on the wire.
 
 ## Custom HTTP endpoints
 
-HeTu's built-in web server is Sanic, and the client SDK's websocket entry is
+HeTu's built-in web server is aiohttp, and the client SDK's websocket entry is
 just one route on it. You can mount your own plain HTTP routes next to it —
 file downloads, an admin page, a health check — with `@hetu.define_route`:
 
 ```python
 import hetu
-from sanic import Request, response
+from aiohttp import web
 
 
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return await response.file(f"/data/{name}")
+@hetu.define_route("/hello/{name}")
+async def hello(request: web.Request) -> web.StreamResponse:
+    return web.Response(text=f"hello {request.match_info['name']}")
 ```
 
-The decorator has to run while the engine loads your app file, i.e. at module
-top level, the same as `@define_system`. Everything after the uri is passed
-straight through to Sanic's `Blueprint.route`, so `methods=["POST"]`,
-`stream=True` and friends behave exactly as Sanic documents them.
+The decorated function is a plain aiohttp handler: it takes a single
+`web.Request` and returns a `web.Response`, `web.json_response(...)`,
+`web.FileResponse` and the like. Path parameters are written `{name}` (a regex
+is allowed, e.g. `{id:\d+}`) and read from `request.match_info`. The decorator
+has to run while the engine loads your app file, i.e. at module top level, the
+same as `@define_system`.
+
+- `methods` lists the HTTP methods the route accepts and defaults to `GET`
+  only, e.g. `@hetu.define_route("/upload", methods=["POST"])`. Any other
+  method on that path gets a 405.
+- Any other keyword arguments are passed straight through to aiohttp's
+  `UrlDispatcher.add_route` (`name`, for example).
+- Request bodies are capped by the `REQUEST_MAX_SIZE` setting (100 MB by
+  default); anything larger gets a 413.
+- **Never build a file path from a path parameter.** Values in `match_info`
+  are already URL-decoded, so `/download/..%2Fconfig.yml` hands you
+  `../config.yml`, and joining that onto a directory reads files outside it.
+  Serve downloads with `add_static` from an `on_server_setup` callback (see
+  below), which normalizes the path and stays inside the directory.
 
 These are plain web endpoints and nothing more. They do not go through HeTu's
 `Permission` system, they get no `SystemContext`, and they have no database
@@ -1165,29 +1180,31 @@ access — authentication, rate limiting and input validation are yours to
 write. Game logic that the client SDK calls belongs in `define_system` /
 `define_endpoint` instead.
 
-For anything a single route can't express — a static directory, middleware, an
-error handler, your own Blueprint with a `url_prefix` — use
-`@hetu.on_server_setup`, which hands you the Sanic app right after it is
-created:
+For anything a single route can't express — a static directory, middleware, a
+sub-application, work to do at startup or shutdown — use
+`@hetu.on_server_setup`, which hands you the aiohttp `web.Application`:
 
 ```python
 @hetu.on_server_setup
-def setup(app):
-    app.static("/download", "/data/files")
+def setup(app: web.Application):
+    app.router.add_static("/download", "/data/files")
 ```
 
 Three things to know:
 
 - `/hetu/...` is reserved for the websocket entry, and `define_route` refuses
-  it. `/` is *not* reserved: register it and your page quietly replaces
-  HeTu's default welcome text.
-- Both hooks run once in the manager process and once per worker, before any
-  backend is connected. Do registration only; anything that needs per-worker
-  initialization should be hung off `app.before_server_start(...)` from
-  inside the setup callback.
+  it. `/` is *not* reserved: register it (with `define_route` or from a setup
+  callback) and your page quietly replaces HeTu's default welcome text.
+- Setup callbacks run once in every worker process each time the server
+  starts, before the backends are connected and before it starts listening;
+  the manager process of a multi-worker server never runs them. They run
+  after the `define_route` routes are mounted, and an exception in one aborts
+  the startup. Anything that needs per-worker initialization or cleanup (a
+  connection pool, say) belongs in `app.on_startup` / `app.on_cleanup`,
+  registered from the callback.
 - Your routes share the event loop with websocket game traffic, and every
   worker serves them. Keep handlers stateless, and in production put large or
-  slow downloads behind nginx or a CDN instead of through the game workers.
+  slow downloads behind Caddy or a CDN instead of through the game workers.
 
 ## Operational visibility: replay and slow logs
 
@@ -1225,15 +1242,39 @@ The numbers you actually care about:
 - Up to 1024 workers across the cluster (the lease pool).
 - 69 years of headroom from the epoch (`2025-12-18` UTC+8).
 
-Worker IDs are leased automatically by `WorkerKeeper`: on the Redis
-backend each lease is a Redis key renewed every 5 seconds, and if a
-process dies without releasing its lease, the slot is reclaimed after the
-lease expires; the SQLite backend (development only) simply uses the
-process's index on the host. On startup, the engine restores the *last
-persisted timestamp* from the `WorkerLease` `Component` (a `core`/volatile
-table) and waits a short grace period if the system clock has gone
-backwards — that's HeTu's defense against duplicate ids when a host's NTP
-slews after a reboot.
+Worker IDs are leased automatically by `WorkerKeeper`: on the Redis backend
+each lease is a Redis key renewed every 5 seconds, and if a process dies
+without releasing its lease, the slot is reclaimed after the lease expires (60
+seconds). The SQLite backend (development only) simply uses the process's
+index on the host.
+
+A container that restarts, or a worker restarted by the manager process under
+the same index, takes back its previous id, so that a few hundred workers
+restarting abnormally at once don't use up the 1024 ids with old and new
+leases combined (a normal shutdown releases the lease, so it has no such
+problem). Before taking an id back it makes sure the old lease has gone
+unrenewed for at least 20 seconds, so a restart right after an abnormal exit
+can take up to 20 seconds longer to start serving.
+
+To tell apart containers that share a hostname on one host (host networking,
+for example), each container stores a random token in
+`/var/tmp/hetu-node-token` on first start:
+
+- Keep this file out of images. Committing an image from a container that has
+  run HeTu, or running `hetu start` / `call` / `shell` during an image build,
+  bakes it in. Containers that end up with the same token never issue
+  duplicate ids, but they can't take their ids back, start more slowly, and
+  log an ERROR.
+- If the restart creates a new container (as k8s does when it restarts a
+  container within a pod, and many orchestrators do when they restart a task),
+  or `/var/tmp` is a tmpfs, the token changes and the old id can't be taken
+  back. On k8s, if you need that, mount `/var/tmp` as a pod-level `emptyDir`
+  into one HeTu container of the pod only.
+
+On startup, the engine restores the *last persisted timestamp* from the
+`WorkerLease` `Component` (a `core`/volatile table) and waits a short grace
+period if the system clock has gone backwards — that's HeTu's defense against
+duplicate ids when a host's NTP slews after a reboot.
 
 For your code, the practical implications are short:
 
@@ -1245,10 +1286,15 @@ For your code, the practical implications are short:
   will refuse to issue ids and stall**. Run NTP. If you must fix a
   rollback, restart the affected workers — the keeper will reseed the
   timestamps automatically.
+- An id is only issued within 15 seconds of the last confirmed lease renewal
+  (renewals run every 5 seconds). If renewals keep failing, or a `System`
+  blocks the event loop with synchronous work for more than about 10 seconds,
+  issuing ids raises `WorkerLeaseExpired` until the next renewal succeeds.
+  Move long synchronous computations to a thread or process pool.
 
 ## Reading and writing tables from a non-server process (`hetu.headless`)
 
-Some processes must share a backend with a HeTu server without *being* a HeTu app: a standalone battle simulation, say — it runs no Sanic, defines no `System`, accepts no client connections, and only wants to read a command table, write a report table, and maintain a lease table together with the server. `hetu.headless` is the table client for such **trusted internal processes**.
+Some processes must share a backend with a HeTu server without *being* a HeTu app: a standalone battle simulation, say — it runs no web server, defines no `System`, accepts no client connections, and only wants to read a command table, write a report table, and maintain a lease table together with the server. `hetu.headless` is the table client for such **trusted internal processes**.
 
 ```python
 import hetu.headless
@@ -1260,7 +1306,7 @@ client = await hetu.headless.connect(
 )
 ```
 
-It has exactly one principle: **writes go through the very same `Session.commit()` path a `System` uses**. Table-level PUBLISH, keyspace notifications, optimistic version checks and unique validation all live in that layer, so a client's `WatchRow` / `WatchRange` / table subscriptions — and the server's own subscriptions and FutureCalls — cannot tell whether a row was written by a `System` or by a headless process. What it deliberately does *not* do is just as clear: no sanic import, no app file, no cluster building, no table creation or migration, no snowflake ids, and **no permission / RLS checks** — treat it as a trusted internal database connection for your own processes only.
+It has exactly one principle: **writes go through the very same `Session.commit()` path a `System` uses**. Table-level PUBLISH, keyspace notifications, optimistic version checks and unique validation all live in that layer, so a client's `WatchRow` / `WatchRange` / table subscriptions — and the server's own subscriptions and FutureCalls — cannot tell whether a row was written by a `System` or by a headless process. What it deliberately does *not* do is just as clear: no aiohttp import, no app file, no cluster building, no table creation or migration, no snowflake ids, and **no permission / RLS checks** — treat it as a trusted internal database connection for your own processes only.
 
 ### Resolving tables: cluster ids and schemas come from the server's meta
 
@@ -1325,17 +1371,11 @@ async def lease_loop():
 
 ### Threads and event loops
 
-Headless can be created and used on an event loop in a non-main thread and does not depend on Sanic; the typical deployment runs the sim thread as a synchronous numpy loop with HeTu on a loop in a side thread. The one constraint: **`connect`, use and `close` must happen on the same loop** (Redis async connections are bound to a loop) — one client per loop. `await client.close()` only closes connections; there is no lease and no message queue, so a killed process leaves no cross-process state behind.
+Headless can be created and used on an event loop in a non-main thread and does not depend on the web server; the typical deployment runs the sim thread as a synchronous numpy loop with HeTu on a loop in a side thread. The one constraint: **`connect`, use and `close` must happen on the same loop** (Redis async connections are bound to a loop) — one client per loop. `await client.close()` only closes connections; there is no lease and no message queue, so a killed process leaves no cross-process state behind.
 
 ## Where to next
 
 - **[Operations](operations.md)** — production deployment, Redis topology,
   the `hetu` CLI, and the rest of `config.yml`.
 - **[API Reference](api/)** — every public symbol referenced on this page.
-  refer `new_rows(N)` so all ids come from
-  the same monotonic burst.
-- The clock-rollback guard means **a server with a wildly wrong clock
-  will refuse to issue ids and stall**. Run NTP. If you must fix a
-  rollback, restart the affected workers — the keeper will reseed the
-  timestamps automatically.
 

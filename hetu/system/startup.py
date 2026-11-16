@@ -43,11 +43,11 @@ async def run_startup_systems(
 
     ``boot_uuid`` 是本次开服的唯一标识，作为 SystemLock 的去重 uuid：同一次开服的所有
     worker 传入相同值 → 整集群只成功提交一次（并发由乐观锁收敛）；下次开服传入新值 →
-    再次执行。任一 System 抛出非竞态异常都会向上传播，由调用方（``worker_start``）据此
-    中止启动。
+    再次执行。任一 System 抛出非竞态异常都会向上传播，由调用方（``WorkerRuntime.start``）
+    据此中止启动。
 
     ``deadline`` 是整个启动流程共用的截止时间（``loop.time()`` 时钟，None 为不限制，
-    由 ``worker_start`` 按配置 STARTUP_TIMEOUT 算出）。超过则抛 ``TimeoutError``，
+    由 ``WorkerRuntime.start`` 按配置 STARTUP_TIMEOUT 算出）。超过则抛 ``TimeoutError``，
     消息中带上是哪个 instance 的哪个 System 卡住了。没有这个超时的话，卡死的启动 System
     在单进程模式下会让服务器永久静默挂起。
 

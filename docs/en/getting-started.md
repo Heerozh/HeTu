@@ -124,8 +124,8 @@ uv run hetu start \
   --instance=dev
 ```
 
-You should see Sanic's startup banner and a `WebSocket listening on
-ws://0.0.0.0:2466` line.
+You should see HeTu's logo, a `Listening address: http://0.0.0.0:2466` line,
+and finally a line saying the server is ready to accept connections.
 
 If you want Redis instead (recommended past the first run), install Redis
 locally and substitute:
@@ -148,7 +148,8 @@ Then, in any MonoBehaviour:
 
 ```csharp
 // Connect is a blocked async function, so we use fire and forget.
-_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
+// The last path segment is the instance name, i.e. --instance at startup
+_ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/dev");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
 

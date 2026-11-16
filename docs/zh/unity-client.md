@@ -8,8 +8,16 @@ next: advanced
 ---
 
 Unity SDK (`cn.hetudb.clientsdk`) 是 Unity 游戏与 HeTu 服务器通信的方式。它封装了
-WebSocket 协议、消息管道（MessagePack + zlib + 加密）以及订阅管理，全部通过一个
-`HeTuClient.Instance` 实现。
+WebSocket 协议、消息管道（MessagePack + zlib + 加密）以及订阅管理，分成两层入口：
+
+- **`HeTuClient.Instance`** — 单例，对应一条物理 WebSocket。最底层：你自己调用 `Connect`、自己处理
+  断线、自己重新鉴权。
+- **`HeTuSessionClient.Instance`** — *游戏客户端推荐用这个。* 同样是单例，是建在 `HeTuClient` 之上的
+  持久逻辑会话：自动重连、重跑你的 `bootstrap`（比如登录），并自动恢复所有还活着的订阅。
+
+两者的报文协议、组件、`CallSystem` 以及 `WatchRow` / `WatchRange` 的用法完全一样 — 会话客户端只是在
+断网时把它们续上。先读[连接、调用、断开](#连接调用断开)了解基本操作，再看
+[逻辑会话](#逻辑会话hetusessionclient)里的生产用法。
 
 本文假设你已能启动服务器并阅读过[概念](concepts.md) — `Components`、`Systems` 和
 Subscriptions 会直接引用，不再重新解释。
@@ -44,22 +52,15 @@ public class NetBootstrap : MonoBehaviour
 
     async void Start()
     {
-        // 在 Connect 之前挂接，以免错过握手完成事件。
-        HeTuClient.Instance.OnConnected += () =>
-        {
-            // Forget() = 触发后忘记；入队并按顺序发送。
-            HeTuClient.Instance.CallSystem("login", SelfID).Forget();
-        };
+        // Connect() 在握手完成后返回。
+        await HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/MyGame");
 
-        // Connect() 仅在连接结束时返回。
-        // 使用 while 循环在临时断开时自动重连。
-        while (true)
-        {
-            var err = await HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/MyGame");
-            if (err is null || err == "Canceled") break;     // 正常关闭或应用退出
-            Debug.LogError($"Reconnecting after error: {err}");
-            await Awaitable.WaitForSecondsAsync(1f);          // 2022.3 上使用 UniTask.Delay
-        }
+        // 连接已建立 — 直接调用。
+        await HeTuClient.Instance.CallSystem("login", SelfID);
+
+        // 可选：之后连接断开时收到通知。
+        HeTuClient.Instance.OnClosed += err =>
+            Debug.Log($"disconnected: {err ?? "normal close"}");
     }
 
     void OnDestroy() => HeTuClient.Instance.Close();
@@ -68,23 +69,19 @@ public class NetBootstrap : MonoBehaviour
 
 源码强制执行但片段中不易察觉的关键点：
 
-- **URL 格式** — `ws://<host>:<port>/hetu/<instance>`（如果服务器/反向代理终止 TLS，则使用
-  `wss://...`）。`/hetu/` 前缀是必需的，`<instance>` 必须匹配服务器 `config.yml` 中的
+- **URL 格式** — `ws://<host>:<port>/hetu/<instance>`（如果前面的反向代理（推荐 Caddy）终止了 TLS，
+  则使用 `wss://...`；HeTu 自己不处理 TLS）。`/hetu/` 前缀是必需的，`<instance>` 必须匹配服务器 `config.yml` 中的
   `INSTANCES:` 条目之一（如果从 CLI 启动，则匹配 `--instance`
   标志）。未知实例会在握手后被拒绝 — 这是设计使然，以防止端口扫描器枚举有效名称。
-- **`Connect` 是长阻塞的。** 它会等待直到套接字关闭，正常关闭时返回 `null`，应用退出 / 调用
-  `Close()` 时返回 `"Canceled"`，否则返回错误字符串。不要在需要开始发送 RPC 的同一路径上
-  `await` 它 — 从 `OnConnected`（或单独的任务）中发起 `CallSystem`，而不是在
-  `await Connect` 之后。
-- **`Connect(url, authKey)`** 是相同的调用，但使用预共享密钥对握手进行签名；如果你的服务器使用
-  `--authkey` 运行，请使用此方法。
-- **每个 `Connect()` 对应一个 `Close()`。** `Close()` 会取消正在进行的 `CallSystem` /
-  `Get` / `Range` 调用并销毁套接字 — 在 `OnDestroy` 中调用它，这样退出播放模式时不会泄漏工作任务。
+- **`Connect` 在握手完成后返回。** await 成功就说明套接字已连上、加密 / 字典握手已完成，可以立刻调用
+  `CallSystem` / `WatchRow` / `WatchRange`。要知道连接什么时候意外断开，订阅 `OnClosed` 事件 — 套接字
+  断开时触发，服务器正常关闭时参数为 `null`，否则是错误字符串（你自己调用 `Close()` 不会触发）。
+  （旧版 SDK 的 `Connect` 会一直阻塞到连接关闭；如果是升级，把 `while (true) { await Connect... }`
+  这样的重连循环换成下面的 `HeTuSessionClient`。）
 - **被顶号（账号在别处登录）。** 同一账号在另一条连接登录时，服务器会先发 WebSocket close 码
   `4001`（`HeTuCloseCode.Kicked`）、原因 `"kicked"`，再断开本连接。在 `OnClosed` 里判断
   `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked`，提示玩家"账号已在别处登录"，
-  并且不要自动重连 — 重连会重新登录，把对方顶掉。`HeTuSessionClient` 遇到它会直接进入 `Faulted`
-  终态（异常为 `HeTuKickedException`），不会重连。
+  并且不要自动重连 — 重连会重新登录，反过来把对方顶掉。
 - **请求被拒。** release 模式下客户端越界（调了服务器上不存在的 System、无权限、参数数量不对、
   报文非法、超出收发频率上限）时，服务器发 close 码 `4002`（`HeTuCloseCode.Rejected`）、原因
   `"rejected"` 再断开，不回具体原因（看服务器日志）。最常见的是客户端比服务器新。同样不要自动
@@ -92,6 +89,12 @@ public class NetBootstrap : MonoBehaviour
   （`HeTuCloseCode.IsTerminal(code)`），`HeTuSessionClient` 遇到都直接进入 `Faulted`（被顶号之外的
   异常为 `HeTuConnectionRejectedException`，`Code` 是 close 码）。服务端内部出错（后端连不上、
   System 抛异常）发 `1011`（`HeTuCloseCode.InternalError`），可以重连。
+- **`Connect(url, authKey)`** 是相同的调用，但使用预共享密钥对握手进行签名；如果你的服务器使用
+  `--authkey` 运行，请使用此方法。
+- **每个 `Connect()` 对应一个 `Close()`。** `Close()` 会取消正在进行的 `CallSystem` /
+  `WatchRow` / `WatchRange` 调用并销毁套接字 — 在 `OnDestroy` 中调用它，这样退出播放模式时不会泄漏工作任务。
+- **这一层不会自动重连。** 套接字断开后，`HeTuClient` 会一直断着，直到你再次调用 `Connect`。需要一个能扛过
+  短暂断线、并自动恢复订阅的会话，请用 [`HeTuSessionClient`](#逻辑会话hetusessionclient)。
 
 ## 调用 `Systems`
 
@@ -137,7 +140,7 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 };
 ```
 
-## 订阅：`Get` vs `Range` vs `Table`
+## 订阅：`WatchRow` vs `WatchRange` vs `WatchTable`
 
 三种订阅都是**实时的**：当底层行在 Redis 中发生变化时，服务器会推送增量更新。
 
@@ -154,13 +157,13 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 `T` 参数是你的强类型 `Component` 类（见下一节）。如果不指定，则使用 `DictComponent`
 ，它是一个可用字符串键手动索引的 `Dictionary`。
 
-`Range` 的 `force=true`（默认值）即使初始查询返回零行也会保持订阅活跃，因此新插入的行仍然会触发
+`WatchRange` 的 `force=true`（默认值）即使初始查询返回零行也会保持订阅活跃，因此新插入的行仍然会触发
 `OnInsert` / `ObserveAdd`。如果你不希望订阅空查询，请设置 `force=false`。
 
-`Table` 返回的对象和 `Range` 是同一个 `IndexSubscription<T>`，事件与 R3 流用法完全一样，
-区别在服务端：`Range` 为结果集里的每一行各订阅一个频道，几千行就是几千个频道；`Table`
+`WatchTable` 返回的对象和 `WatchRange` 是同一个 `IndexSubscription<T>`，事件与 R3 流用法完全一样，
+区别在服务端：`WatchRange` 为结果集里的每一行各订阅一个频道，几千行就是几千个频道；`WatchTable`
 不管多少行都只订一个表级频道，所以不计入行订阅配额。代价是该表**任何**写入都会触发一次
-通知（服务端按权限过滤后再推），所以高频写入的表（位置、血量）请用 `Range`。
+通知（服务端按权限过滤后再推），所以高频写入的表（位置、血量）请用 `WatchRange`。
 服务端组件要声明 `table_sub=True`（见[概念 · 订阅](concepts.md#何时用整表订阅)），没声明的表、
 以及行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表都会拒绝整表订阅，此时返回 `null`。
 
@@ -175,7 +178,7 @@ var names = await namesTask;
 var guilds = await guildsTask;
 ```
 
-`Range` 的点查询（`left == right`，如 `WatchRange<Item>("owner", myId, myId, 100)`）要高效，
+`WatchRange` 的点查询（`left == right`，如 `WatchRange<Item>("owner", myId, myId, 100)`）要高效，
 服务端对应的索引要声明 `point_sub=True`，否则该索引上任何写入都会让服务端重跑一次比对。
 
 ```csharp
@@ -381,9 +384,154 @@ try { /* 使用 sub */ } finally { sub.Dispose(); }
 - 退订可能稍晚才发出：有订阅请求还在等回复时，SDK 会等它们回复后再退订，以免把刚好落到同一个
   订阅上的请求一起退掉。持续不断地发订阅请求（比如快速翻页）时，旧订阅会一直留到请求停下来。
 
+## 逻辑会话：`HeTuSessionClient`
+
+裸的 `HeTuClient` 就是一条物理 WebSocket — 断了之后数据就不再更新，直到你重连、重新登录、重新发出每一个
+`WatchRow` / `WatchRange`。`HeTuSessionClient` 替你做这些事。和 `HeTuClient` 一样，它也是单例
+（`HeTuSessionClient.Instance`）— 它管理底层的 `HeTuClient.Instance`，自己重连，重跑你的 `bootstrap`
+（通常是登录那一次调用），并按每个还活着的订阅的**原始订阅意图**（组件 + 索引 + 值 / 范围）重新订阅。
+
+```csharp
+var session = HeTuSessionClient.Instance;
+
+await session.Connect(
+    "ws://127.0.0.1:2466/hetu/MyGame",
+    bootstrap: async client =>
+    {
+        // 'client' 就是 HeTuClient.Instance — 正在建立的那条物理连接。
+        // 每次（重）连都要重新鉴权。
+        await client.CallSystem("login", SelfID);
+    });
+// 这时 session.State 已经是 Ready。
+
+using var hp = await session.WatchRow<HP>("owner", SelfID);
+using var nearby = await session.WatchRange<Position>("zone", zone, zone, 50);
+
+await session.CallSystem("move_to", 12f, 8f);
+```
+
+`Connect` 要等 bootstrap 和订阅恢复*都*完成之后才返回 — 所以一返回，实时数据就已经到位，你的代码和断线之前
+处在同样的状态。
+
+完整签名：
+
+```csharp
+Awaitable Connect(
+    string url,
+    string authKey = null,
+    Func<HeTuClient, Awaitable> bootstrap = null,
+    TimeSpan? reconnectDelay = null,        // 默认 1 秒
+    TimeSpan? maxReconnectDelay = null,     // 默认 30 秒（指数退避的上限）
+    int maxReconnectAttempts = 20,          // 0 = 不限次数
+    TimeSpan? connectTimeout = null,        // 默认 30 秒
+    TimeSpan? requestTimeout = null,        // 默认 30 秒
+    double? reconnectJitter = null);        // 默认 0.5
+```
+
+这个 await 可能的结果：
+
+- 会话到达 `Ready` 时**正常返回** — 正常路径。
+- 一出错就抛出**底层的那个失败异常** — 会话在**第一次到达 `Ready` 之前不会重试**。首次连接中的任何失败
+  （套接字关闭、bootstrap 抛异常、恢复订阅出错）都会在第一次尝试时进入 `Faulted` 终态，await 拿到的是原始
+  异常（比如你的 `CallSystem("login", ...)` 抛的异常，或者
+  `InvalidOperationException("Connection closed: <reason>")`）。用同样的 URL / 凭据重试也没用，所以 SDK 不会去试。
+- 在 `connectTimeout`（默认 30 秒）内没到 `Ready` 就抛 **`TimeoutException`** — 主要是给传输层卡住、又一直
+  不报关闭 / 错误的情况兜底。`Message` 和 `InnerException` 带着最后一次捕获到的错误（如果有的话）。抛出前会
+  `Close()` 会话，之后可以再次 `Connect(...)`。
+- 别的代码路径调用了 `Close()` 时，抛 **`OperationCanceledException`**。
+
+会话已经在运行时再调用 `Connect` 会抛异常 — 真要换个 URL 重连，先调 `Close()`。`Close()` 之后（或者进入
+`Faulted` 之后）可以再次 `Connect`，状态机会用一个全新的内核从头开始。
+
+### 默认值 — 什么时候该改
+
+- `reconnectDelay = 1s`、`maxReconnectDelay = 30s` — 从 1 秒开始指数退避，每次翻倍，最多 30 秒。短暂抖动和
+  长时间中断都适用：上限避免一直冲击服务器，服务器恢复后也能及时连回来。
+- `reconnectJitter = 0.5` — 每次等待的时长是当前退避延迟的 [0.5, 1] 倍之间的一个随机值（一开始是 0.5～1 秒，
+  到上限时是 15～30 秒）；退避延迟本身照样按上面翻倍。不然同一时刻掉线的客户端（服务器重启、网关摘掉一个节点）
+  会在同一瞬间一起重连，一轮接一轮，每一轮都是一次建连风暴。传 `0` 就是精确的延迟。
+- `maxReconnectAttempts = 20` — **只管会话至少到达过一次 `Ready` 之后的重连**。按上面的指数退避，20 次大约
+  要在游戏里重试 4～8 分钟（不算抖动是 1+2+4+8+16+30 × 15 ≈ 481 秒）才放弃、进入 `Faulted`。维护窗口很长的话
+  传 `0`（不限次数），玩家开着应用，服务器恢复后就能连回来。**首次连接永远只试 1 次** — 凭据或 URL 可能就是
+  错的，重试没有意义。
+- `connectTimeout = 30s` — 只管**首次** `Connect`；`Ready` 之后的重连不受它限制。如果设了
+  `maxReconnectAttempts > 0`，考虑调大或者关掉它 — 否则哪个预算先用完就按哪个算。
+
+### 状态机
+
+`session.State` 按顺序经过这些状态，每次转换都会触发 `StateChanged`：
+
+| 状态                       | 含义                                                                                     |
+|--------------------------|----------------------------------------------------------------------------------------|
+| `Stopped`                | 初始状态，或者 `Close()` / `Dispose()` 之后。`Connect()` 让它往下走。                                |
+| `Connecting`             | WebSocket 握手中。                                                                         |
+| `Bootstrapping`          | 套接字已连上；你的 `bootstrap` 委托正在运行。                                                         |
+| `RestoringSubscriptions` | bootstrap 完成；正在重新发出每个还活着的 `WatchRow` / `WatchRange`。                                  |
+| `Ready`                  | 排队的调用已经发完；触发 `Ready` 事件。稳定状态。                                                         |
+| `Reconnecting`           | 短暂断线；等完当前的退避延迟（带抖动）后回到 `Connecting`。                                                  |
+| `Faulted`                | 终态 — 首次连接失败（总是终态）、`Ready` 之后重连次数用完（`maxReconnectAttempts`）、被顶号（`HeTuKickedException`，不会重试），或者其他终态 close 码比如请求被拒（`HeTuConnectionRejectedException`，不会重试）。`Faulted` 事件带着最后一个 `Exception`。 |
+
+`Faulted` **事件**的范围比 `Faulted` **状态**大：每次尝试失败都会触发一次 — `Ready` 之前的失败触发一次后进入
+终态；`Ready` 之后的短暂断线每次重试都会触发。在回调里看 `session.State` 就能分清是终态还是短暂的（`Ready`
+之后重试期间状态停在 `Reconnecting`）。
+
+被顶号是重试的例外：账号在别处登录时，服务器以 close 码 `4001` 关闭连接，会话直接进入 `Faulted`，异常为
+`HeTuKickedException`，不会重连 — 重连会重跑你的登录 `bootstrap`、把另一台设备顶掉，两边就会一直互相顶号。
+在 `Faulted` 回调里（或者 `await Connect` 外面）判断它，提示"账号已在别处登录"。其他终态 close 码（4000-4999，
+比如 `4002` 请求被拒）同样直接进入 `Faulted`，异常为 `HeTuConnectionRejectedException`：同样的请求重试也只会
+再被拒。可以提示"版本不匹配，请更新"之类。
+
+### `CallSystem` 的语义
+
+调用在断线那一刻处在*哪个阶段*，表现不同：
+
+- **还没发出（在 `Ready` 之前排队的）** — 一直等到会话 `Ready`，再按顺序发出。从任何地方发起都是安全的，包括
+  在 `Ready` 事件里面。
+- **断线时正在路上的** — 以 `CallOutcomeUnknownException` 失败。会话**从不自动重试**这类调用，因为服务器可能
+  已经执行了它的副作用。如果调用是幂等的，自己捕获后重试。
+
+```csharp
+try {
+    await session.CallSystem("buy", itemId);
+} catch (CallOutcomeUnknownException) {
+    // 服务器可能扣了玩家的钱，也可能没扣。每个调用自己决定怎么处理。
+}
+```
+
+### 订阅的存续
+
+`session.WatchRow<T>` / `session.WatchRange<T>` 返回的就是上面见过的 `RowSubscription<T>` /
+`IndexSubscription<T>`，会话额外填好三个钩子：
+
+- **`sub.IsStale`** — 底层套接字断开期间为 `true`。`sub.Data` / `sub.Rows` 保留最后已知的值；会话再次
+  `Ready` 之前不会有更新。
+- **`sub.OnResynced`** — 每次重连、快照刷新完之后触发一次。断线期间发生的插入 / 更新 / 删除会先经过正常的
+  `OnInsert` / `OnUpdate` / `OnDelete` 事件（以及对应的 R3 流）重放一遍，所以你的回调看到的是一份干净的差异，
+  而不只是一个"全部重新加载了"的信号。用它来清掉 UI 上的"数据过期"提示。
+- **去重** — 用同样的参数调用两次 `WatchRow` / `WatchRange`，只发一个服务端订阅，但每个调用方都拿到**自己的**
+  订阅对象；*每一个*都 `Dispose` 之后才会远程退订，重连时这个查询也只为它们恢复一次。
+
+`RowSubscription` 的恢复目标是**绑定到的那一行的 `ID`**，不是最初的索引 / 值：如果你调用的是
+`session.WatchRow<Player>("owner", userId)`，匹配到的行主键是 `42`，重连时就按 `id=42` 重新订阅。你离线期间
+不再满足原始条件的那一行**不会**被换掉 — 订阅会触发 `Update(null)`，并一直绑定在 `42` 上。
+
+### 关闭
+
+`HeTuSessionClient.Instance.Close()`（或者 `Dispose()` — 两者是同一个）以 `OperationCanceledException` 取消
+正在进行的调用，释放它持有的每个订阅，并销毁套接字。单例本身还在 — 再调 `Connect(...)` 就能开始一个新会话。
+
+```csharp
+async void Start() {
+    await HeTuSessionClient.Instance.Connect(url, bootstrap: Login);
+    // ... 订阅 / 调用 ...
+}
+
+void OnDestroy() => HeTuSessionClient.Instance.Close();
+```
+
 ## Unity 版本说明
 
-- **Unity 6000+** — `Connect`、`CallSystem`、`Get` 和 `Range` 返回 `Awaitable<T>`。使用
+- **Unity 6000+** — `Connect`、`CallSystem`、`WatchRow` 和 `WatchRange` 返回 `Awaitable<T>`。使用
   `await Awaitable.WaitForSecondsAsync(...)` 进行延迟。
 - **Unity 2022.3** — 相同的 API 返回 `UniTask<T>`。通过设置向导安装 UniTask。使用
   `await UniTask.Delay(ms)` 进行延迟。
@@ -395,8 +543,5 @@ try { /* 使用 sub */ } finally { sub.Dispose(); }
 - **[高级](advanced.md)** — `System` 副本、计划中的将来调用、原始 `Endpoints`
   、自定义管道层以及当项目变得真实时你需要的引擎内部机制。
 - **[概念](concepts.md)** — 现在你已经看到了客户端，重新阅读订阅部分；权限/RLS 会过滤
-  `Get` 和 `Range` 可以返回的内容。
-- **[教程：聊天室](tutorial/chat-room.md)** — 一个使用上述模式的完整客户端-服务器示例。
-- **[概念](concepts.md)** — 现在你已经看到了客户端，重新阅读订阅部分；权限/RLS 会过滤
-  `Get` 和 `Range` 可以返回的内容。
+  `WatchRow` 和 `WatchRange` 可以返回的内容。
 - **[教程：聊天室](tutorial/chat-room.md)** — 一个使用上述模式的完整客户端-服务器示例。

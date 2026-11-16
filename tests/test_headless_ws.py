@@ -13,12 +13,11 @@ from typing import Any
 
 import pytest
 from fixtures.backends import ALL_BACKENDS, backend_config_by_name
-from test_websocket import setup_websocket_proxy  # noqa: F401  ws 代理 fixture
+from fixtures.server_harness import ServerHarness
 
 from hetu import headless, webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.server import worker_main
 from hetu.system import SystemClusters
 
 logger = logging.getLogger("HeTu.root")
@@ -26,7 +25,7 @@ logger = logging.getLogger("HeTu.root")
 
 @contextmanager
 def _preserve_loggers():
-    """worker_main 建 Sanic app 时会 dictConfig(LOGGING)，把 HeTu.replay 改成 ERROR 且
+    """建 harness 时会 dictConfig(LOGGING)（aiohttp_app.prepare），把 HeTu.replay 改成 ERROR 且
     不 propagate；本模块按字母序排在别的依赖 caplog 抓 replay 日志的测试之前，退出时把
     被改过的 logger 恢复原样，不把污染留给后面的测试。"""
     names = (None, "HeTu.root", "HeTu.replay")
@@ -45,7 +44,7 @@ def _preserve_loggers():
 
 
 @pytest.fixture(params=["redis", "sqlite"])
-def hl_server(request, setup_websocket_proxy):  # noqa: F811
+def hl_server(request):
     backend_name = request.param
     if backend_name not in ALL_BACKENDS:
         pytest.skip(f"HETU_TEST_BACKENDS 未包含 {backend_name}")
@@ -53,13 +52,13 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
 
     SystemClusters()._clear()
     EndpointDefines()._clear()
-    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
-    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再以 HeTuApp 之名 exec
+    # 同一个文件，同一 uri 就会登记两条，挂到 aiohttp 上时两条挨着加，撞"method GET is already
+    # registered"，开服失败。先清掉
     webext.clear()
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     with _preserve_loggers():
-        server = worker_main(
-            f"Hetu-headless-{backend_name}",
+        harness = ServerHarness(
             {
                 "APP_FILE": app_file,
                 "NAMESPACE": "pytest",
@@ -78,13 +77,11 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
                 "LOGGING": DEFAULT_LOGGING_CONFIG,
                 "DEBUG": False,
                 "WORKER_NUM": 1,
-                "ACCESS_LOG": False,
             },
         )
         try:
-            yield server, config
+            yield harness, config
         finally:
-            server.stop()
             webext.clear()
 
 
@@ -202,7 +199,7 @@ def test_headless_writes_push_to_ws_subscribers(hl_server):
         writer.join(30)
         collected["writer_alive"] = writer.is_alive()
 
-    server.test_client.websocket("/hetu/headless_ws", mimic=routine)
+    server.websocket("/hetu/headless_ws", mimic=routine)
 
     assert not errors, errors
     assert collected["writer_alive"] is False

@@ -1,7 +1,7 @@
 """
 sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 worker），用真实 WebSocket
 客户端（jsonb + zlib + crypto 全套 pipeline）订阅，测量**含 WebSocket 推送在内**的每次
-交付成本，与 sub_budget.py 的进程内数字对照，差值就是 Sanic/ws/pipeline 那一段。
+交付成本，与 sub_budget.py 的进程内数字对照，差值就是 Web 服务器/ws/pipeline 那一段。
 
 模型与 sub_budget.py 相同（Z 个 zone × S 行，C 个连接均摊，扇出 K=C/Z，写进程直写）。
 服务器 worker 的 CPU 用 psutil 读子进程树；交付数和延迟由客户端进程统计。
@@ -16,7 +16,8 @@ sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 wor
         --client-cpus 4,5,6,7,8,9,10,11 --writer-cpus 12,13,14,15
 
 Redis 连接数：每个 worker 每个副本 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数
-无关。服务器的 CPU 是 CPU 时间；笔记本 P 核频率随负载变，跨负载比较时以 sub_scenarios_ws.py 的周期数为准。
+无关。服务器的 CPU 是 CPU 时间；计时窗口里另用 `perf stat` 数服务器的 user 态周期（没装 perf 时这几列为空），
+并给出运行频率相对 TSC 的倍数（cycles / ref-cycles）。注意 loopback 收包的软中断不算进进程的 CPU 时间。
 """
 
 import argparse
@@ -149,7 +150,6 @@ INSTANCES:
 LISTEN: 127.0.0.1:{args.port}
 WORKER_NUM: {args.workers}
 DEBUG: false
-ACCESS_LOG: false
 STARTUP_TIMEOUT: 120
 MAX_ROW_SUBSCRIPTION: 100000
 MAX_INDEX_SUBSCRIPTION: 1000
@@ -180,6 +180,47 @@ def wait_port(port: int, timeout: float = 120) -> None:
         except OSError:
             time.sleep(0.5)
     raise TimeoutError(f"server port {port} not ready")
+
+
+def perf_stat(procs: list[psutil.Process], seconds: float) -> subprocess.Popen | None:
+    """`perf stat` 数这些进程接下来 seconds 秒的 user 态周期与指令"""
+    try:
+        return subprocess.Popen(
+            [
+                "perf",
+                "stat",
+                "-x",
+                ",",
+                "-e",
+                "cycles:u,instructions:u,ref-cycles:u",
+                "-p",
+                ",".join(str(p.pid) for p in procs),
+                "--",
+                "sleep",
+                str(seconds),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as e:  # 没装 perf：不影响别的统计
+        print("perf stat failed", e, flush=True)
+        return None
+
+
+def perf_counts(proc: subprocess.Popen | None) -> dict[str, float]:
+    """读 perf_stat 的结果；混合架构的 P 核、E 核计数相加，没数到的事件不出现"""
+    counts: dict[str, float] = {}
+    if proc is None:
+        return counts
+    _out, err = proc.communicate(timeout=60)
+    for line in err.splitlines():
+        parts = line.split(",")
+        if len(parts) > 2 and parts[0][:1].isdigit():
+            ev = parts[2].replace("cpu_core/", "").replace("cpu_atom/", "")
+            ev = ev.replace("/u", "").replace(":u", "")
+            counts[ev] = counts.get(ev, 0.0) + float(parts[0])
+    return counts
 
 
 def tree_cpu(proc: psutil.Process) -> float:
@@ -235,6 +276,7 @@ def main() -> None:
         stderr=subprocess.STDOUT,
     )
     sproc = psutil.Process(server.pid)
+    perf = None
     try:
         wait_port(args.port)
         time.sleep(3)  # 等 worker 建表、加载完
@@ -309,12 +351,14 @@ def main() -> None:
             written.value = 0
         rep_a = base.redis_snapshot(args.replica)
         cpu_a = tree_cpu(sproc)
+        perf = perf_stat([sproc, *sproc.children(recursive=True)], args.duration)
         wall_a = time.perf_counter()
         window[0] = time.time()
         window[1] = window[0] + args.duration
         time.sleep(args.duration)
         wall = time.perf_counter() - wall_a
         cpu = tree_cpu(sproc) - cpu_a
+        counts = perf_counts(perf)
         rep_b = base.redis_snapshot(args.replica)
         with written.get_lock():
             n_written = written.value
@@ -336,6 +380,8 @@ def main() -> None:
         for p in cprocs:
             p.join(timeout=10)
     finally:
+        if perf is not None and perf.poll() is None:
+            perf.terminate()
         try:
             children = sproc.children(recursive=True)
         except psutil.Error:
@@ -376,6 +422,13 @@ def main() -> None:
         "server_cores": round(cpu / wall, 3),
         "server_us_per_delivered": round(cpu * 1e6 / delivered, 1)
         if delivered
+        else None,
+        "server_us_per_frame": round(cpu * 1e6 / frames, 1) if frames else None,
+        "server_kcycles_u_per_frame": round(counts["cycles"] / frames / 1e3, 1)
+        if frames and "cycles" in counts
+        else None,
+        "server_freq_vs_tsc": round(counts["cycles"] / counts["ref-cycles"], 3)
+        if counts.get("ref-cycles")
         else None,
         "replica_cores": round(rep_cpu / wall, 3),
         "replica_cmds_ps": round((rep_b["cmds"] - rep_a["cmds"]) / wall),

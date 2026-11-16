@@ -45,11 +45,15 @@ CLOSE_KICKED_REASON = "kicked"
 CLOSE_REJECTED = 4002
 # 服务端内部出错：后端连不上、Endpoint 执行抛异常等。客户端可以退避重连
 CLOSE_INTERNAL_ERROR = 1011
+# 服务器关服（WebSocket 标准的 going away）。客户端可以重连，连上别的 worker / 重启后的服务器。原因
+# 留空，同原来 Sanic 关服时发的
+CLOSE_GOING_AWAY = 1001
 
 CLOSE_REASONS = {
     CLOSE_KICKED: CLOSE_KICKED_REASON,
     CLOSE_REJECTED: "rejected",
     CLOSE_INTERNAL_ERROR: "internal error",
+    CLOSE_GOING_AWAY: "",
 }
 
 
@@ -66,10 +70,22 @@ class Connection(BaseComponent):
     last_active: np.double = property_field(0)  # 最后活跃时间
 
 
-async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
+class TooManyAnonymousConnections(RuntimeError):
+    """
+    同一 IP 的匿名连接数到了 MAX_ANONYMOUS_CONNECTION_BY_IP，新连接被拒。这时还没插入 Connection 行。
+
+    Raised when an IP already has MAX_ANONYMOUS_CONNECTION_BY_IP anonymous connections;
+    no Connection row has been inserted.
+    """
+
+
+async def new_connection(
+    tbl_mgr: ComponentTableManager, address: str, connection_id: int | None = None
+) -> int:
     """
     通过connection component分配自己一个连接id，如果失败，Raise各种异常
     此方法不会事务冲突，因为只插入Connection，且Connection没有Unique属性。
+    connection_id 给了就用它作这一行的 id，不给就新分配一个。
     """
     table = tbl_mgr.get_table(Connection)
     assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
@@ -94,9 +110,9 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
                     "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
                 ).format(count=len(same_ip_guests))
                 logger.warning(msg)
-                raise RuntimeError(msg)
+                raise TooManyAnonymousConnections(msg)
 
-        row = Connection.new_row()
+        row = Connection.new_row(connection_id)
         row.owner = 0
         row.created = time.time()
         row.last_active = row.created
@@ -108,9 +124,17 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
     return row.id
 
 
-async def del_connection(tbl_mgr: ComponentTableManager, connection_id: int) -> None:
+async def del_connection(
+    tbl_mgr: ComponentTableManager, connection_id: int, *, wait_synced: bool = False
+) -> None:
+    """
+    删掉一个连接的 Connection 行，没有这一行就什么也不做。wait_synced：这一行可能刚提交、副本
+    还没同步到（落库途中被打断）时传真，先等副本同步，否则下面随机读主从，读不到就删不掉
+    """
     table = tbl_mgr.get_table(Connection)
     assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
+    if wait_synced:
+        await table.backend.wait_for_synced()
 
     async for attempt in table.session().retry(5):
         async with attempt as session:

@@ -196,10 +196,11 @@ uv run hetu start \
   --app-file=./src/app.py \
   --db=sqlite:///./chat.db \
   --namespace=Chat \
-  --instance=dev
+  --instance=chat-room-1
 ```
 
-The provided example also ships a `config.yml` you can use instead:
+The provided example also ships a `config.yml` (with the same instance name,
+`chat-room-1`) you can use instead:
 
 ```bash
 cd examples/chat/server
@@ -214,7 +215,8 @@ In Unity, subscribe to the chat history and react to new messages:
 // Fire and forget connect
 // In practice, this should be wrapped within an asynchronous method, 
 // with a loop controlling the automatic reconnection.
-HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat"); 
+// The last path segment is the instance name, i.e. --instance at startup
+HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/chat-room-1"); 
 // will automatically wait for the connection to be established before sending.
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 

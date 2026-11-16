@@ -81,7 +81,7 @@ public class NetBootstrap : MonoBehaviour
 Key points the source enforces but isn't always obvious from a snippet:
 
 - **URL format** — `ws://<host>:<port>/hetu/<instance>` (or `wss://...`
-  when the server / reverse-proxy terminates TLS). The `/hetu/` prefix is
+  when the reverse proxy in front, e.g. Caddy, terminates TLS; HeTu itself does not). The `/hetu/` prefix is
   required, and `<instance>` must match one of the `INSTANCES:` entries
   in your server's `config.yml` (or the `--instance` flag if it was
   started from CLI). An unknown instance is rejected after the handshake
@@ -533,7 +533,9 @@ Awaitable Connect(
     TimeSpan? reconnectDelay = null,        // default: 1s
     TimeSpan? maxReconnectDelay = null,     // default: 30s (exponential cap)
     int maxReconnectAttempts = 20,          // 0 = unlimited
-    TimeSpan? connectTimeout = null);       // default: 30s
+    TimeSpan? connectTimeout = null,        // default: 30s
+    TimeSpan? requestTimeout = null,        // default: 30s
+    double? reconnectJitter = null);        // default: 0.5
 ```
 
 What the await can do:
@@ -565,13 +567,20 @@ starts from scratch with a fresh core.
   from 1 s, doubling each attempt, capped at 30 s. Reasonable for both
   transient hiccups and longer outages; the cap stops you from hammering
   the server while still waking up promptly when it recovers.
+- `reconnectJitter = 0.5` — each wait is a random point in
+  [0.5, 1] × the current back-off delay (0.5–1 s at first, 15–30 s at the
+  cap); the back-off itself still doubles as above. Clients that dropped at
+  the same moment (server restart, gateway taking a node out) would
+  otherwise all come back in the same instant, attempt after attempt, and
+  every wave is another connection storm. Pass `0` for exact delays.
 - `maxReconnectAttempts = 20` — **only governs reconnects after the session
   has reached `Ready` at least once**. With the exponential schedule above,
-  20 attempts spans roughly 8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s) of
-  in-game retry before surrendering to `Faulted`. Long maintenance windows:
-  pass `0` (unlimited) so a player can leave the app open and rejoin when
-  the server returns. **Initial connect always uses 1 attempt** — there's no
-  retry value when the credentials or URL might be wrong.
+  20 attempts spans roughly 4–8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s
+  before jitter) of in-game retry before surrendering to `Faulted`. Long
+  maintenance windows: pass `0` (unlimited) so a player can leave the app
+  open and rejoin when the server returns. **Initial connect always uses 1
+  attempt** — there's no retry value when the credentials or URL might be
+  wrong.
 - `connectTimeout = 30s` — guards the **initial** `Connect` only; reconnects
   after `Ready` aren't subject to it. If you set `maxReconnectAttempts > 0`,
   consider raising or disabling this — otherwise whichever budget runs out
@@ -589,7 +598,7 @@ transition:
 | `Bootstrapping`          | Socket up; your `bootstrap` delegate is running.                                                   |
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
-| `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
+| `Reconnecting`           | Transient drop; waiting out the current back-off delay (with jitter), then back to `Connecting`.  |
 | `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, kicked (`HeTuKickedException`, never retried), or another terminal close code such as rejected (`HeTuConnectionRejectedException`, never retried). `Faulted` event carries the last `Exception`. |
 
 The `Faulted` **event** is broader than the `Faulted` **state**: it fires

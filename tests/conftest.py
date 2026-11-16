@@ -23,8 +23,15 @@ from fixtures.testdata import *
 def pytest_asyncio_loop_factories(config, item):
     """
     所有异步用例跑在 create_task 签名同 uvloop 的事件循环上：生产在 Linux / macOS 上跑 uvloop，
-    它不收 eager_start 这类参数，标准事件循环收，本机测试发现不了
+    它不收 eager_start 这类参数，标准事件循环收，本机测试发现不了。
+
+    aiohttp 适配层的用例例外，直接跑在生产用的事件循环上（Linux / macOS 是 uvloop）：aiohttp 在
+    3.14 上看到标准事件循环就给 create_task 传 eager_start，签名改过的标准循环会让它报错
     """
+    if item.path.name == "test_aiohttp_adapter.py":
+        from hetu.server.adapters.aiohttp_app import new_event_loop
+
+        return {"production": new_event_loop}
     return {"uvloop_signature": UvloopSignatureLoop}
 
 
@@ -71,7 +78,7 @@ def isolate_snowflake_state():
     进程级单例 SnowflakeID 的状态不能漏给别的模块，每个模块结束时还原成开始时的样子。
     串行时漏出去的状态恰好没砸到谁；xdist 下 worker 跑测试文件的顺序不定，就随机挂：
 
-    * worker_main 起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
+    * 测试起的服务会给它挂上 WorkerKeeper 租约，服务停了就不再续约，60 秒后
       同一进程里别的测试一发号就 WorkerLeaseExpired。
     * last_timestamp 被留在未来（模拟崩溃重启、init 不传时间戳都会这样）：之后同一
       进程里每发一个号都多一条"时钟回拨"告警，数日志条数的用例

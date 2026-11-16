@@ -197,34 +197,42 @@ hetu.endpoint.Context : Context类定义
 ## `define_route`
 
 ```python
-define_route(uri: str, **sanic_kwargs: Any)
+define_route(
+    uri: str,
+    *,
+    methods: collections.abc.Iterable[str] = ('GET',),
+    **aiohttp_kwargs: Any,
+)
 ```
 
-<small>Source: [`hetu/webext.py:44`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L44)</small>
+<small>Source: [`hetu/webext.py:42`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L42)</small>
 
 
 
 把一个async函数注册为HTTP端点，挂载到HeTu的web服务器上。
 
 用于文件下载、后台页面、健康检查等和HeTu数据无关的普通web请求。它们是纯粹的
-Sanic路由，`hetu`只负责帮你挂上去：不经过客户端的权限体系（[`Permission`](components.md#permission)），
+aiohttp路由，`hetu`只负责帮你挂上去：不经过客户端的权限体系（[`Permission`](components.md#permission)），
 也不提供数据库/`System`访问，鉴权、限流等都需要你自己在函数内处理。
 
 需要客户端SDK调用的游戏逻辑请用 [`define_system`](decorators.md#define_system) / [`define_endpoint`](decorators.md#define_endpoint)，不是这个。
 
-Register an async function as a plain HTTP endpoint on HeTu's web server, for
-things unrelated to HeTu's data (file downloads, admin pages, health checks).
-These routes bypass HeTu's [`Permission`](components.md#permission) system entirely and get no database
-access, so any authentication is up to you.
+Register an async function as a plain HTTP endpoint on HeTu's web server
+(aiohttp), for things unrelated to HeTu's data (file downloads, admin pages,
+health checks). These routes bypass HeTu's [`Permission`](components.md#permission) system entirely and get
+no database access, so any authentication is up to you.
 
 
 ### Parameters
 
-- **`uri`** (Any) — 路由路径，必须以"/"开头，可使用Sanic的路径参数语法（如 `/file/<name:str>`）。
-不能占用HeTu保留的 `/hetu` 前缀。注册"/"会覆盖HeTu的默认欢迎页。
+- **`uri`** (Any) — 路由路径，必须以"/"开头，路径参数用aiohttp的语法（如 `/file/{name}`，也可以带正则：
+`/item/{id:\d+}`），在处理函数里从 `request.match_info` 取。不能占用HeTu保留的
+`/hetu` 前缀。注册"/"会覆盖HeTu的默认欢迎页。aiohttp 严格区分尾斜杠：`/ping/` 不会命中
+`/ping`。
 
-- **`**sanic_kwargs`** (Any) — 原样透传给Sanic的 `Blueprint.route`，常用的有 `methods=["POST"]`、
-`stream=True`、`websocket=True` 等。
+- **`methods`** (Any) — 接受哪些HTTP方法，默认只有 GET，不能为空。用别的方法请求这个路径会得到 405。
+
+- **`**aiohttp_kwargs`** (Any) — 原样透传给aiohttp的 `UrlDispatcher.add_route`，比如 `name`、`expect_handler`。
 
 
 
@@ -238,11 +246,11 @@ access, so any authentication is up to you.
 
 ```python
 >>> import hetu
->>> from sanic import Request, response
+>>> from aiohttp import web
 >>>
->>> @hetu.define_route("/download/<name:str>")
-... async def download(request: Request, name: str):
-...     return await response.file(f"/data/{name}")
+>>> @hetu.define_route("/hello/{name}")
+... async def hello(request: web.Request) -> web.StreamResponse:
+...     return web.Response(text=f"hello {request.match_info['name']}")
 ```
 
 
@@ -250,7 +258,7 @@ access, so any authentication is up to you.
 
 
 ### Notes
-hetu.on_server_setup : 直接拿到Sanic app做任意配置（静态目录、中间件等）
+hetu.on_server_setup : 直接拿到aiohttp的app做任意配置（静态目录、中间件等）
 
 
 
@@ -389,18 +397,18 @@ hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
 on_server_setup(func: collections.abc.Callable) -> collections.abc.Callable
 ```
 
-<small>Source: [`hetu/webext.py:108`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L108)</small>
+<small>Source: [`hetu/webext.py:122`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L122)</small>
 
 
 
-注册一个web服务器配置回调，在Sanic app创建后调用，参数为app本身。
+注册一个web服务器配置回调，参数是aiohttp的 `web.Application`。
 
-[`define_route`](decorators.md#define_route) 覆盖不到的场景用它：静态文件目录、中间件、异常处理器、自建带
-`url_prefix` 的Blueprint等，都可以在回调里直接对app操作。
+[`define_route`](decorators.md#define_route) 覆盖不到的场景用它：静态文件目录、中间件、子应用、开服/关服时要做的事等，
+都可以在回调里直接对app操作。
 
-Register a callback invoked with the Sanic app right after it is created, for
-anything [`define_route`](decorators.md#define_route) cannot express: static directories, middleware, error
-handlers, your own prefixed Blueprint, and so on.
+Register a callback invoked with the aiohttp `web.Application`, for anything
+[`define_route`](decorators.md#define_route) cannot express: static directories, middleware, sub-applications,
+startup / cleanup hooks, and so on.
 
 
 
@@ -414,11 +422,11 @@ handlers, your own prefixed Blueprint, and so on.
 
 ```python
 >>> import hetu
->>> from sanic import Sanic
+>>> from aiohttp import web
 >>>
 >>> @hetu.on_server_setup
-... def setup(app: Sanic):
-...     app.static("/download", "/data/files")
+... def setup(app: web.Application):
+...     app.router.add_static("/download", "/data/files")
 ```
 
 

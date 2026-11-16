@@ -742,35 +742,42 @@ Unity SDK 附带了匹配的默认值。如果你添加了自定义层，你需�
 
 ## 自定义 HTTP 端点
 
-HeTu 内置的 web 服务器就是 Sanic，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
+HeTu 内置的 web 服务器是 aiohttp，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
 
 ```python
 import hetu
-from sanic import Request, response
+from aiohttp import web
 
 
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return await response.file(f"/data/{name}")
+@hetu.define_route("/hello/{name}")
+async def hello(request: web.Request) -> web.StreamResponse:
+    return web.Response(text=f"hello {request.match_info['name']}")
 ```
 
-装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。uri 之后的参数会原样透传给 Sanic 的 `Blueprint.route`，所以 `methods=["POST"]`、`stream=True` 等的行为和 Sanic 文档完全一致。
+被装饰的函数就是 aiohttp 的 handler：唯一的参数是 `web.Request`，返回 `web.Response`、`web.json_response(...)`、`web.FileResponse` 之类。路径参数写成 `{name}`（可以带正则，如 `{id:\d+}`），在函数里从 `request.match_info` 取。装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。
+
+- `methods` 指定接受哪些 HTTP 方法，默认只有 `GET`，比如 `@hetu.define_route("/upload", methods=["POST"])`。用别的方法请求这个路径会得到 405。
+- 其余关键字参数原样透传给 aiohttp 的 `UrlDispatcher.add_route`（如 `name`）。
+- 请求体的上限是配置项 `REQUEST_MAX_SIZE`（默认 100MB），超过返回 413。
+- **不要拿路径参数拼文件路径**：`match_info` 里的值已经 URL 解码过，`/download/..%2Fconfig.yml` 拿到的
+  就是 `../config.yml`，照拼就会读到目录外的文件。提供文件下载请用下面 `on_server_setup` 里的
+  `add_static`，它会规范化路径、不出目录。
 
 它们就只是普通的 web 端点：不经过 HeTu 的 `Permission` 权限体系，拿不到 `SystemContext`，也没有数据库访问——鉴权、限流、输入校验都需要你自己写。需要客户端 SDK 调用的游戏逻辑，请用 `define_system` / `define_endpoint`。
 
-单条路由表达不了的场景——静态文件目录、中间件、异常处理器、带 `url_prefix` 的自建 Blueprint——用 `@hetu.on_server_setup`，它会在 Sanic app 创建后立即把 app 交给你：
+单条路由表达不了的场景——静态文件目录、中间件、子应用、开服 / 关服时要做的事——用 `@hetu.on_server_setup`，它把 aiohttp 的 `web.Application` 交给你：
 
 ```python
 @hetu.on_server_setup
-def setup(app):
-    app.static("/download", "/data/files")
+def setup(app: web.Application):
+    app.router.add_static("/download", "/data/files")
 ```
 
 需要记住的三件事：
 
-- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它，你的页面就会顶掉 HeTu 的默认欢迎页。
-- 两个钩子都会在管理进程执行一次、每个 worker 进程再各执行一次，且此时后端还没连接。所以只做注册类操作；需要每个 worker 初始化的东西，请在 setup 回调里用 `app.before_server_start(...)` 挂钩子。
-- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 nginx/CDN，而不是穿过游戏 worker。
+- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它（`define_route` 或在 setup 回调里注册都行），你的页面就会顶掉 HeTu 的默认欢迎页。
+- setup 回调在每个 worker 进程里、每次开服建 app 时执行一次，此时后端还没连接、也还没开始监听；多进程时管理进程不执行它。它在 `define_route` 的路由挂好之后执行，出错就中止开服。需要每个 worker 初始化、清理的东西（比如一个连接池），在回调里挂到 `app.on_startup` / `app.on_cleanup` 上。
+- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 Caddy/CDN，而不是穿过游戏 worker。
 
 ## 可操作性可见性：重放与慢日志
 
@@ -795,17 +802,27 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 - 整个集群最多 1024 个工作器（租约池）。
 - 从纪元（`2025-12-18` UTC+8）起有 69 年的余量。
 
-工作器 ID 由 `WorkerKeeper` 自动租用：Redis 后端的租约存为 Redis 键，每 5 秒续租一次，如果进程在未释放租约的情况下死亡，该槽位会在租约过期后被回收；SQLite 后端（仅用于开发）直接使用进程在本机的序号。启动时，引擎会从 `WorkerLease` `Component`（一个 `core`/易失性表）恢复*上次持久化的时间戳*，如果系统时钟回退，会等待一个短暂的宽限期——这是 HeTu 在主机重启后 NTP 调整时防止重复 ID 的防御机制。
+工作器 ID 由 `WorkerKeeper` 自动租用：Redis 后端的租约存为 Redis 键，每 5 秒续租一次，如果进程在未释放租约的情况下死亡，该槽位会在租约过期（60 秒）后被回收。SQLite 后端（仅用于开发）直接使用进程在本机的序号。
+
+同一个容器重启、或者多进程时管理进程以同一序号重启了 worker，会接回原来的 ID，免得几百个 worker 一起非正常重启时，新旧两份把 1024 个 ID 用光（正常关服会释放租约，没有这个问题）。接回之前要确认旧租约已经至少 20 秒没人续约，所以非正常退出后马上重启的，开服最多多等 20 秒。
+
+为了区分同一台宿主机上主机名相同的容器（比如 host 网络），每个容器第一次启动时会在 `/var/tmp/hetu-node-token` 存一个随机 token：
+
+- 镜像里不要带这个文件。从跑过 HeTu 的容器 commit 镜像、或者构建镜像时跑过 `hetu start` / `call` / `shell`，都会把它带进去。几个容器拿到同一个 token 不会撞号，但接不回原来的 ID、开服要多等，日志里会报 ERROR。
+- 重启时如果是新建容器（k8s 在同一个 pod 里重启容器就是这样，很多编排器重启任务时也是），或者 `/var/tmp` 是 tmpfs，token 会变，接不回原来的 ID。k8s 上需要的话，把 `/var/tmp` 挂成 pod 级的 `emptyDir`，只挂给 pod 里的一个 HeTu 容器。
+
+启动时，引擎会从 `WorkerLease` `Component`（一个 `core`/易失性表）恢复*上次持久化的时间戳*，如果系统时钟回退，会等待一个短暂的宽限期——这是 HeTu 在主机重启后 NTP 调整时防止重复 ID 的防御机制。
 
 对于你的代码，实际影响很短：
 
 - `id` 是为你生成的；切勿自己赋值。
 - `BaseComponent.new_row()` 在底层调用 `SnowflakeID().next_id()`。如果你批量插入，首选 `new_rows(N)` 以便所有 ID 来自同一个单调突发。
 - 时钟回滚保护意味着**时钟严重错误的服务器将拒绝发出 ID 并停止工作**。运行 NTP。如果你必须修复回滚，请重新启动受影响的工作器——管理者会自动重新播种时间戳。
+- 发号前要求最近 15 秒内确认过租约（每 5 秒续一次）。续约连续失败、或者一个 `System` 用同步计算把事件循环堵住超过约 10 秒，之后发号会报 `WorkerLeaseExpired`，直到下一次续约成功。耗时的同步计算请放到线程池或进程池里。
 
 ## 非服务器进程读写表（`hetu.headless`）
 
-有些进程需要和 HeTu 服务器共用同一个后端，却**不是** HeTu 应用：比如独立的战斗模拟进程——它不跑 Sanic、不定义 `System`、不收客户端连接，只想读一张命令表、写一张回报表、和服务器双向维护一张租约表。`hetu.headless` 就是给这类**可信内部进程**用的表直读写客户端。
+有些进程需要和 HeTu 服务器共用同一个后端，却**不是** HeTu 应用：比如独立的战斗模拟进程——它不起 Web 服务器、不定义 `System`、不收客户端连接，只想读一张命令表、写一张回报表、和服务器双向维护一张租约表。`hetu.headless` 就是给这类**可信内部进程**用的表直读写客户端。
 
 ```python
 import hetu.headless
@@ -817,7 +834,7 @@ client = await hetu.headless.connect(
 )
 ```
 
-它的原则只有一条：**写入走与 `System` 完全相同的 `Session.commit()` 提交路径**。表级 PUBLISH、keyspace 通知、乐观锁版本检查、unique 校验都在那一层，所以客户端的 `WatchRow` / `WatchRange` / 整表订阅，以及服务器自己的订阅和 FutureCall，都分不出一行是 `System` 写的还是 headless 进程写的。为此它**不做**的事同样明确：不 import sanic、不需要 app 文件、不建簇、不建表、不迁移、不发雪花 id、**不做权限 / RLS 检查**——把它当成一条可信的内部数据库连接，只给你自己的进程用。
+它的原则只有一条：**写入走与 `System` 完全相同的 `Session.commit()` 提交路径**。表级 PUBLISH、keyspace 通知、乐观锁版本检查、unique 校验都在那一层，所以客户端的 `WatchRow` / `WatchRange` / 整表订阅，以及服务器自己的订阅和 FutureCall，都分不出一行是 `System` 写的还是 headless 进程写的。为此它**不做**的事同样明确：不 import aiohttp、不需要 app 文件、不建簇、不建表、不迁移、不发雪花 id、**不做权限 / RLS 检查**——把它当成一条可信的内部数据库连接，只给你自己的进程用。
 
 ### 认表：cluster_id 与 schema 来自服务器 meta
 
@@ -882,10 +899,9 @@ async def lease_loop():
 
 ### 线程与 event loop
 
-headless 可以在非主线程的 event loop 上创建与使用，不依赖 Sanic；典型部署是 sim 线程跑同步 numpy 循环、HeTu 跑在旁边一个线程的 loop 上。唯一的约束：**`connect` / 使用 / `close` 必须在同一个 loop 上**（Redis 异步连接绑定 loop），一个 loop 一个 client。`await client.close()` 只关连接，无租约、无消息队列，进程被 kill 不留任何跨进程状态。
+headless 可以在非主线程的 event loop 上创建与使用，不依赖 Web 服务器；典型部署是 sim 线程跑同步 numpy 循环、HeTu 跑在旁边一个线程的 loop 上。唯一的约束：**`connect` / 使用 / `close` 必须在同一个 loop 上**（Redis 异步连接绑定 loop），一个 loop 一个 client。`await client.close()` 只关连接，无租约、无消息队列，进程被 kill 不留任何跨进程状态。
 
 ## 接下来去哪儿
 
 - **[运维](operations.md)** —— 生产部署、Redis 拓扑、`hetu` CLI 以及 `config.yml` 的其余部分。
-- **[API 参考](api/)** —— 本页引用的所有公共符号。参阅 `new_rows(N)` 以便所有 ID 来自同一个单调突发。
-- 时钟回滚保护意味着**时钟严重错误的服务器将拒绝发出 ID 并停止工作**。运行 NTP。如果你必须修复回滚，请重新启动受影响的工作器——管理者会自动重新播种时间戳。
+- **[API 参考](api/)** —— 本页引用的所有公共符号。

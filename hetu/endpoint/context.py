@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from sanic import Request
-
     from ..data.component import BaseComponent
     from ..system.caller import SystemCaller
 
@@ -46,8 +44,8 @@ class Context:
     timestamp: float
     """调用时间戳。"""
 
-    request: Request
-    """framework原始请求对象，unsafe，普通业务代码请避免直接使用。"""
+    request: Any
+    """framework原始请求对象（aiohttp 的 `web.Request`），unsafe，普通业务代码请避免直接使用。"""
 
     systems: SystemCaller
     """全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。"""

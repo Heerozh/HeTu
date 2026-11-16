@@ -173,6 +173,8 @@ namespace HeTu
         private readonly List<PendingWatch> _pendingWatches = new();
         private readonly TimeSpan _reconnectDelay;
         private readonly TimeSpan _maxReconnectDelay;
+        private readonly double _reconnectJitter;
+        private readonly Func<double> _random;
         private readonly int _maxReconnectAttempts;
         private readonly TimeSpan _requestTimeout;
         private readonly IHeTuSessionScheduler _scheduler;
@@ -199,14 +201,25 @@ namespace HeTu
             TimeSpan? reconnectDelay = null,
             TimeSpan? maxReconnectDelay = null,
             int maxReconnectAttempts = 0,
-            TimeSpan? requestTimeout = null)
+            TimeSpan? requestTimeout = null,
+            double reconnectJitter = 0,
+            Func<double> random = null)
         {
+            if (reconnectJitter < 0 || reconnectJitter > 1)
+                throw new ArgumentOutOfRangeException(
+                    nameof(reconnectJitter), reconnectJitter, "必须在 [0, 1] 之间");
             _transportFactory = transportFactory;
             _scheduler = scheduler;
             _bootstrap = bootstrap;
             _reconnectDelay = reconnectDelay ?? TimeSpan.FromSeconds(1);
             // 未指定 max 时退化为固定延迟（不做指数退避），保持调用方旧行为。
             _maxReconnectDelay = maxReconnectDelay ?? _reconnectDelay;
+            // 每次重连实际等待的时间在 [1 - jitter, 1] × 当前退避延迟里随机取：同时掉线的客户端
+            // （服务器重启、网关摘掉节点）不加抖动的话会按同一个节奏一波一波重连，每一波都是一次
+            // 建连风暴。0 = 不抖动（旧行为，也是纯逻辑单测的默认）；Unity 门面默认 0.5。
+            // random 返回 [0, 1)，测试可以注入；默认每个实例一个随机种子
+            _reconnectJitter = reconnectJitter;
+            _random = random ?? new Random(Guid.NewGuid().GetHashCode()).NextDouble;
             // 0 = 无限重试（旧行为）；正数 = 连续失败到此数即进入 Faulted 终态。
             _maxReconnectAttempts = maxReconnectAttempts;
             // 单次请求（CallSystem / Watch）派发后多久没有任何回应就判定物理层不通。
@@ -1032,7 +1045,13 @@ namespace HeTu
             SetState(HeTuSessionState.Reconnecting);
             _scheduledReconnect?.Dispose();
             var delay = _currentReconnectDelay;
-            _scheduledReconnect = _scheduler.Schedule(delay, RunSessionLifecycle);
+            // 抖动只缩短这一次实际等待的时间，不改退避序列：翻倍、封顶都按 delay 算，所以
+            // 实际等待不会超过 _maxReconnectDelay
+            var wait = _reconnectJitter > 0
+                ? TimeSpan.FromMilliseconds(
+                    delay.TotalMilliseconds * (1 - _reconnectJitter * _random()))
+                : delay;
+            _scheduledReconnect = _scheduler.Schedule(wait, RunSessionLifecycle);
             // 指数退避：下一次失败时使用翻倍的延迟，封顶在 _maxReconnectDelay。
             // BecomeReady 会把 _currentReconnectDelay 重置回 _reconnectDelay。
             var nextMs = Math.Min(

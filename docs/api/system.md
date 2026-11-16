@@ -626,7 +626,7 @@ SystemContext(
     group: str,
     user_data: dict[str, typing.Any],
     timestamp: float,
-    request: Request,
+    request: Any,
     systems: SystemCaller,
     guard_state: dict[str, typing.Any] = <factory>,
     client_limits: list[list[int]] = <factory>,

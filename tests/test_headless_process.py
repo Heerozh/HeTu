@@ -1,6 +1,6 @@
 """
 headless client 的进程级验收：必须在干净的子进程里跑，因为 pytest 主进程早已被其它测试
-import 过 sanic、初始化过 SnowflakeID，`sys.modules` / 单例状态都不干净。
+import 过 aiohttp、初始化过 SnowflakeID，`sys.modules` / 单例状态都不干净。
 """
 
 import json
@@ -29,17 +29,17 @@ def _run_py(code: str, *args: str) -> dict:
 
 
 def test_import_hetu_is_light():
-    """`import hetu` 不得加载 sanic，也不得加载任何后端（redis / sqlite，按 alias 懒加载）。"""
+    """`import hetu` 不得加载 aiohttp，也不得加载任何后端（redis / sqlite，按 alias 懒加载）。"""
     out = _run_py(
         """
         import json, sys
         import hetu
-        mods = ("sanic", "redis", "hetu.data.backend.sqlite")
+        mods = ("aiohttp", "redis", "hetu.data.backend.sqlite")
         print(json.dumps({m: (m in sys.modules) for m in mods}))
         """
     )
     assert out == {
-        "sanic": False,
+        "aiohttp": False,
         "redis": False,
         "hetu.data.backend.sqlite": False,
     }, out
@@ -78,7 +78,7 @@ def test_backend_factory_lazy_loads_builtin_alias(ses_redis_service, backend_nam
 
 @use_redis_backend_only
 def test_connect_resources(mod_test_app, mod_tbl_mgr, mod_backend_config, backend_name):
-    """验收 6 / R7：干净子进程里 connect 不 import sanic / 别的后端、不初始化
+    """验收 6 / R7：干净子进程里 connect 不 import aiohttp / 别的后端、不初始化
     SnowflakeID、耗时 < 1 s、常驻内存增量 < 10 MB（相对已 import redis 后端的基线）。"""
     out = _run_py(
         """
@@ -110,7 +110,7 @@ def test_connect_resources(mod_test_app, mod_tbl_mgr, mod_backend_config, backen
             await client.close()
             from hetu.common.snowflake_id import SnowflakeID
             print(json.dumps({
-                "sanic": "sanic" in sys.modules,
+                "aiohttp": "aiohttp" in sys.modules,
                 "sqlite_pkg": "hetu.data.backend.sqlite" in sys.modules,
                 "connect_seconds": elapsed,
                 "rss_delta_mb": (after - before) / 1e6,
@@ -125,7 +125,7 @@ def test_connect_resources(mod_test_app, mod_tbl_mgr, mod_backend_config, backen
         json.dumps(mod_backend_config),
     )
     print(out)
-    assert out["sanic"] is False and out["sqlite_pkg"] is False
+    assert out["aiohttp"] is False and out["sqlite_pkg"] is False
     assert out["worker_id"] == -1, "headless 不得初始化 SnowflakeID"
     assert out["host"] == "subprocess"
     assert out["connect_seconds"] < 1.0, out

@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
+# babel：setup.py 打 wheel 时把 hetu/i18n 的 .po 编译成 .mo
+requires = ["setuptools>=80", "setuptools-scm[simple]>=8", "babel>=2.18.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -30,6 +31,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "aiohttp~=3.14",
     "babel>=2.18.0",
     "brotli>=1.2.0",
     "cryptography>=45.0.0",
@@ -38,11 +40,10 @@ dependencies = [
     "numpy~=2.3",
     "pyyaml~=6.0",
     "redis[hiredis]>=7,<9",
-    "sanic~=25.3",
     "tabulate>=0.9.0",
     "tqdm>=4.67.3",
+    "uvloop>=0.22 ; sys_platform != 'win32'",
     "wcwidth>=0.2.13",
-    "websockets>=15.0.1",
 ]
 
 [project.urls]
@@ -55,10 +56,10 @@ hetu = "hetu.__main__:main"
 
 [dependency-groups]
 dev = [
-    "aiohttp>=3.13.1",
     "austin-dist>=4.0.0",
     "autolang",
     "basedpyright>=1.38.1",
+    "dnspython>=2.9.2",
     "docker>=7.1.0",
     "griffe>=1.0",
     "ipykernel>=7.1.0",
@@ -76,8 +77,8 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
-    "sanic-testing>=24.6.0",
-    "trustme>=1.2.1",
+    # 测试里的 ws 客户端（服务端用的是 aiohttp）
+    "websockets>=15.0.1",
 ]
 
 [tool.setuptools_scm]
@@ -91,7 +92,9 @@ include = ["hetu*"]
 exclude = ["tests*", "benchmark*", "docs*"]
 
 [tool.setuptools.package-data]
-hetu = ["CONFIG_TEMPLATE.yml", "llms.txt", "skills/*/*"]
+# Docker 镜像构建时没有 .git，setuptools-scm 列不出受版本控制的文件，包里只有这里列出的数据文件
+# （tests/test_packaging.py 检查有没有漏）
+hetu = ["CONFIG_TEMPLATE.yml", "llms.txt", "skills/*/*", "data/backend/redis/*.lua"]
 
 [tool.pytest.ini_options]
 # 限定 collect 路径，避免 9p mount 下 pytest 递归扫描整个仓库（hetu/、examples/、build/ 等）

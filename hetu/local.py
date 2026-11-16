@@ -1,5 +1,5 @@
 """
-进程内的 HeTu 应用运行时：不跑 Sanic、不收连接，直接连配置好的后端跑 System、读写组件表。
+进程内的 HeTu 应用运行时：不起 Web 服务器、不收连接，直接连配置好的后端跑 System、读写组件表。
 
 `hetu call` / `hetu shell` 用它调试运行中的游戏；`hetu.testing.Sandbox` 是它的子类（临时
 SQLite + 建表），所以单测和线上调试是同一套 API：`call_system` / `get` / `must_get` /
@@ -9,7 +9,7 @@ SQLite + 建表），所以单测和线上调试是同一套 API：`call_system`
 **不做权限 / RLS 检查**——能用它的进程手里本来就有数据库地址和口令。
 
 In-process HeTu app runtime: runs Systems and reads / writes component tables against the
-configured backends without Sanic or connections. Used by `hetu call` / `hetu shell`;
+configured backends without a web server or connections. Used by `hetu call` / `hetu shell`;
 `hetu.testing.Sandbox` subclasses it, so unit tests and live debugging share one API.
 
 用法 / Usage::
@@ -295,7 +295,7 @@ class LocalApp:
             user_data=user_data if user_data is not None else {},
             # 绕过了Endpoint层，所以这里代替它打上请求时间戳，与生产的ctx.timestamp一致
             timestamp=time.time(),
-            request=None,  # type: ignore[arg-type]
+            request=None,
             systems=None,  # type: ignore[arg-type]
         )
         ctx.systems = _AppSystemCaller(self, ctx)

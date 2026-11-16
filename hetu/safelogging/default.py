@@ -32,7 +32,7 @@ DEFAULT_LOGGING_CONFIG = {
     },
     "formatters": {
         "generic": {
-            "class": "sanic.logging.formatter.AutoFormatter",
+            "class": "hetu.safelogging.formatter.ContextAutoFormatter",
         },
     },
 }

@@ -7,34 +7,35 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sanic import SanicException
-from sanic.exceptions import WebsocketClosed
 
 import hetu  # for obtaining __version__
 
 from ..endpoint import connection
 from ..endpoint.response import RejectResponse, ResponseToClient
 from ..i18n import _
+from .conn import ConnectionClosed, Draining
 from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
 if TYPE_CHECKING:
-    from sanic import Websocket
-
     from ..data.sub import SubscriptionBroker
     from ..endpoint.context import Context
     from ..endpoint.executor import EndpointExecutor
+    from .conn import WsConnection
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-# 塞进 push_queue 用来叫醒外层 websocket_connection 的发送循环。接收协程一旦结束，
-# 外层还会永远阻塞在 push_queue.get() 上，靠它退出去跑 finally 里的清理。
+# 接收协程结束时塞进 push_queue，让发送循环自己返回（连接已经由接收协程 fail 了）。拆连接不靠它：
+# serve_connection 等收发任意一边结束就拆，队列满、塞不进去也没关系
 PUSH_CLOSE = object()
+# 关服排空：接收协程停下之后塞进 push_queue（await put，不能丢）。发送循环取到它时，排在前面的回复
+# 都已发完，再发掉待发区的推送，然后以 1001 断开
+PUSH_DRAINED = object()
 
 BAD_SUBS = [
     "sub",
@@ -51,9 +52,9 @@ def check_length(name, data: list, left, right):
         )
 
 
-def close_connection(ws: Websocket, code: int) -> None:
+def close_connection(conn: WsConnection, code: int) -> None:
     """按 close 码断开连接，原因只给该码固定的那句。已经在关了就什么也不做"""
-    ws.fail_connection(code, connection.CLOSE_REASONS[code])
+    conn.fail(code, connection.CLOSE_REASONS[code])
 
 
 async def rpc(
@@ -268,24 +269,8 @@ async def sub_call(
     return True
 
 
-async def receive_messages(ws: Websocket) -> AsyncIterator[str | bytes]:
-    """重组完整消息，避免 Sanic recv() 每包创建 Task + asyncio.wait。
-
-    Reassemble complete messages through Sanic's public streaming receiver.
-    Always exhaust the frame iterator before decoding or handling a message.
-    """
-    while True:
-        chunks = [chunk async for chunk in ws.recv_streaming()]
-        if len(chunks) == 1:
-            yield chunks[0]
-        elif chunks and isinstance(chunks[0], str):
-            yield "".join(cast(list[str], chunks))
-        else:
-            yield b"".join(cast(list[bytes], chunks))
-
-
 async def client_handler(
-    ws: Websocket,
+    conn: WsConnection,
     pipe_ctx: PipeContext,
     executor: EndpointExecutor,
     broker: SubscriptionBroker,
@@ -293,20 +278,30 @@ async def client_handler(
     flood_checker: connection.ConnectionFloodChecker,
     debug: int,
 ):
-    """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
+    """
+    连接的接收协程：逐条收客户端的消息并执行。由 serve_connection 起成单独的 task。
+
+    关服排空时（recv 抛 Draining）不再收新消息：已经收到的这条照常执行完，在后台跑的订阅后半段等它们
+    做完，再往 push_queue 塞 PUSH_DRAINED，由发送循环发完回复后断开。这时返回 True，其余情况返回 None
+    """
     pipe = ServerMessagePipeline()
     ctx = executor.context
     last_data = None
     cancelled = False
+    # 关服排空：不再收新消息，排着的回复由发送循环发完
+    drained = False
+    # 连接已经关了（对端断开，或顶号核查、发送那边已经 fail 了它），不算异常，也不用再 fail
+    connection_closed = False
     # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
-    # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
-    # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。
+    # 连接断开后 conn.recv() 抛 ConnectionClosed；serve_connection 拆连接时取消本协程的，走下面
+    # 静默的 CancelledError 出口。
     # 其余出口都在各自分支里写明原因和 close 码（客户端按码决定重不重连），这里只是兜底
     exit_reason = _("接收循环意外结束")
     close_code = connection.CLOSE_INTERNAL_ERROR
     try:
-        async for message in receive_messages(ws):
+        while True:
+            message = await conn.recv()
             if not message:
                 exit_reason = _("收到空帧")
                 close_code = connection.CLOSE_REJECTED
@@ -372,19 +367,21 @@ async def client_handler(
                     check_length("unsub", last_data, 2, 2)
                     await broker.unsubscribe(last_data[1])
                 case "motd":
-                    await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
+                    await conn.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
                     raise ValueError(
                         _(" [非法操作] 未知消息类型：{msg_type}").format(
                             msg_type=last_data[0]
                         )
                     )
+    except Draining:
+        drained = True
     except asyncio.CancelledError:
         # print(ctx, 'client_handler normal canceled')
-        # 唯一合法的静默出口：连接本来就在被 websocket_connection 拆，别再插手
+        # 唯一合法的静默出口：连接本来就在被 serve_connection 拆，别再插手
         cancelled = True
-    except WebsocketClosed:
-        exit_reason = _("WebSocket 已关闭")
+    except ConnectionClosed:
+        connection_closed = True
     except RedisConnectionError as e:
         exit_reason = _("Redis ConnectionError")
         err_msg = _("❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}").format(
@@ -401,7 +398,7 @@ async def client_handler(
         )
         replay.info(err_msg)
         logger.warning(err_msg)
-    except (SanicException, BaseException) as e:
+    except BaseException as e:
         exit_reason = f"{type(e).__name__}:{e}"
         err_msg = _("❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}").format(
             data=last_data, err=f"{type(e).__name__}:{e}"
@@ -409,22 +406,42 @@ async def client_handler(
         replay.info(err_msg)
         logger.exception(err_msg)
     finally:
-        # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）
-        for task in list(deferred):
-            task.cancel()
-        # 除了被取消（连接本来就在拆），任何退出路径都必须把连接一起拆掉并留下日志。
-        # 否则连接会变成"半死"：外层 websocket_connection 还阻塞在 push_queue.get()
-        # 上，谁也不知道接收协程没了 —— TCP 仍 ESTABLISHED、协议层 ping/pong 照常、
-        # 客户端 socket 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到
-        # 回应，而且两端一行错误日志都没有（实测：卡在 WatchRange 上无限等待）。
-        if not cancelled:
-            close_msg = _("⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}").format(
-                reason=exit_reason
-            )
-            replay.info(close_msg)
-            logger.info(close_msg)
-            close_connection(ws, close_code)
+        # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）。排空时不取消，等它们做完
+        if not drained:
+            for task in list(deferred):
+                task.cancel()
+        # 除了被取消（连接本来就在拆）和连接已经关了，任何退出路径都必须把连接一起 fail 掉并
+        # 留下日志。否则连接会变成"半死"：TCP 仍 ESTABLISHED、协议层 ping/pong 照常、客户端
+        # socket 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到回应，而且两端
+        # 一行错误日志都没有（实测：卡在 WatchRange 上无限等待）。
+        # 连接已经关了的不打 INFO：每次正常掉线都会走到这里（aiohttp 上 recv 直接抛
+        # ConnectionClosed），拆连接时还会记一条"连接断开"
+        if not cancelled and not drained:
+            if connection_closed:
+                logger.debug("[📡WSReceiver] connection closed, receiver exits")
+            else:
+                close_msg = _(
+                    "⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}"
+                ).format(reason=exit_reason)
+                replay.info(close_msg)
+                logger.info(close_msg)
+                close_connection(conn, close_code)
             try:
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:
-                pass  # 队列满时外层自然会被 Sanic 的连接关闭取消掉
+                pass  # serve_connection 等到本协程结束就会取消发送协程，不靠 PUSH_CLOSE
+    if not drained:
+        return None
+    try:
+        # 等在后台跑的订阅后半段做完再塞（顺带持有它们的引用）。它们的占位已经排在队列里，发送循环
+        # 按顺序等占位填好、发出回复
+        if deferred:
+            await asyncio.wait(list(deferred))
+        # 队列满着也要等着塞进去，不能丢：发送循环靠它知道排在前面的回复都发完了
+        await push_queue.put(PUSH_DRAINED)
+    except asyncio.CancelledError:
+        # 排空超时，适配层兜底取消：还在等的订阅一起取消
+        for task in list(deferred):
+            task.cancel()
+        raise
+    return True

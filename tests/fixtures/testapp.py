@@ -1,41 +1,44 @@
 import pytest
+
 from hetu.endpoint.executor import EndpointExecutor
+
+
+def _load_test_app():
+    """
+    清空各注册表，再加载 tests/app.py、建簇。
+
+    先清再导入：同一进程里 prepare_worker 可能已经以别的模块名 exec 过这个文件，注册过同名的
+    Endpoint，这时第一次 `import app` 就会撞"Endpoint重复定义"。第一次导入就是执行，不能再
+    reload 一遍
+    """
+    import importlib
+    import sys
+
+    import hetu
+
+    hetu.data.ComponentDefines().clear_()
+    hetu.endpoint.definer.EndpointDefines()._clear()
+    hetu.system.SystemClusters()._clear()
+
+    if "app" in sys.modules:
+        app = importlib.reload(sys.modules["app"])
+    else:
+        import app
+
+    # 初始化SystemCluster
+    hetu.system.SystemClusters().build_clusters("pytest")
+    hetu.system.SystemClusters().build_endpoints()
+    return app
 
 
 @pytest.fixture(scope="module")
 def mod_test_app():
-    import hetu
-    import app
-    import importlib
-
-    hetu.data.ComponentDefines().clear_()
-    hetu.endpoint.definer.EndpointDefines()._clear()
-    hetu.system.SystemClusters()._clear()
-
-    importlib.reload(app)
-
-    # 初始化SystemCluster
-    hetu.system.SystemClusters().build_clusters("pytest")
-    hetu.system.SystemClusters().build_endpoints()
-    return app
+    return _load_test_app()
 
 
 @pytest.fixture(scope="function")
 def test_app():
-    import hetu
-    import app
-    import importlib
-
-    hetu.data.ComponentDefines().clear_()
-    hetu.endpoint.definer.EndpointDefines()._clear()
-    hetu.system.SystemClusters()._clear()
-
-    importlib.reload(app)
-
-    # 初始化SystemCluster
-    hetu.system.SystemClusters().build_clusters("pytest")
-    hetu.system.SystemClusters().build_endpoints()
-    return app
+    return _load_test_app()
 
 
 def tbl_mgr_factory(mod_auto_backend):

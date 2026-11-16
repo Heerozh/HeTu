@@ -691,11 +691,11 @@ def test_concurrent_cli_processes_get_distinct_worker_ids(project):
             holder.wait()
 
 
-def test_cli_commands_do_not_load_sanic(project):
-    """call / get / range / shell 进程不加载 sanic（start 的 sanic import 挪进了 execute）"""
+def test_cli_commands_do_not_load_web_server(project):
+    """call / get / range / shell 进程不加载 Web 框架（start 的 aiohttp import 在 execute 里）"""
     code = (
         "import sys, atexit\n"
-        "atexit.register(lambda: sys.stderr.write('SANIC=%s' % ('sanic' in sys.modules)))\n"
+        "atexit.register(lambda: sys.stderr.write('AIOHTTP=%s' % ('aiohttp' in sys.modules)))\n"
         "sys.argv = ['hetu', 'call', '--list']\n"
         "from hetu.__main__ import main\n"
         "main()\n"
@@ -708,7 +708,7 @@ def test_cli_commands_do_not_load_sanic(project):
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    assert b"SANIC=False" in proc.stderr
+    assert b"AIOHTTP=False" in proc.stderr
 
 
 # ============ 纯函数 ============

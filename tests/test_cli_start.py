@@ -21,7 +21,14 @@ def test_required_parameters():
     with pytest.raises(SystemExit):
         main()
 
-    sys.argv[1:] = ["start", "--namespace=ssw", "--instance=unittest1", "--debug=2"]
+    # 单进程：本进程加载 app 文件，找不到就抛出来。多进程时管理进程不加载 app 文件，由 worker 报错
+    sys.argv[1:] = [
+        "start",
+        "--namespace=ssw",
+        "--instance=unittest1",
+        "--debug=2",
+        "--workers=1",
+    ]
     with pytest.raises(FileNotFoundError):
         main()
 
@@ -53,3 +60,82 @@ def test_resolve_worker_num_negative_means_auto():
     assert resolve_worker_num(1) == 1
     assert resolve_worker_num(-1) == (os.process_cpu_count() or 1)
     assert resolve_worker_num(-1) >= 1
+
+
+def _write_config(tmp_path, workers: int) -> str:
+    config = tmp_path / "config.yml"
+    config.write_text(
+        f"""
+APP_FILE: app.py
+NAMESPACE: pytest
+INSTANCES: [cli_start]
+LISTEN: 127.0.0.1:0
+WORKER_NUM: {workers}
+PACKET_LAYERS:
+  - type: jsonb
+BACKENDS:
+  main:
+    type: sqlite
+    master: sqlite:///{tmp_path / "cli_start.db"}
+""",
+        encoding="utf-8",
+    )
+    return str(config)
+
+
+def test_logging_config_referencing_sanic_exits_before_startup(
+    tmp_path, monkeypatch, capsys
+):
+    """
+    配置文件的 LOGGING 还引用着 Sanic 的类：hetu start 读完配置就打出说明、以 2 退出，不开服（这里的
+    app.py 根本不存在，开服的话会抛 FileNotFoundError）
+    """
+    config = _write_config(tmp_path, workers=1)
+    with open(config, "a", encoding="utf-8") as f:
+        f.write(
+            """
+LOGGING:
+  version: 1
+  formatters:
+    colour:
+      class: sanic.logging.formatter.AutoFormatter
+"""
+        )
+    monkeypatch.chdir(tmp_path)
+    sys.argv[1:] = ["start", "--config", config]
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+    assert exc_info.value.code == 2
+    out = capsys.readouterr().out
+    assert "formatters.colour.class: sanic.logging.formatter.AutoFormatter" in out
+    assert "ContextAutoFormatter" in out
+
+
+def test_multiple_workers_go_through_the_supervisor(tmp_path, monkeypatch):
+    """
+    WORKER_NUM > 1：本进程是管理进程，只配日志、不加载 app 文件（这里的 app.py 根本不存在），bind 好
+    监听 socket 交给 supervisor，用完关掉
+    """
+    from hetu.server import runtime, supervisor
+
+    calls = []
+    sockets = []
+
+    def fake_run(config, sock, workers):
+        sockets.append(sock)
+        calls.append((config["NAMESPACE"], sock.getsockname()[1] > 0, workers))
+        return 0
+
+    logged = []
+    monkeypatch.setattr(supervisor, "run", fake_run)
+    # 不真的 dictConfig：别改了测试进程的全局日志配置
+    monkeypatch.setattr(runtime, "setup_logging", lambda config: logged.append(1))
+    monkeypatch.chdir(tmp_path)
+    sys.argv[1:] = ["start", "--config", _write_config(tmp_path, workers=2)]
+    try:
+        main()
+    except SystemExit as e:
+        assert e.code in (0, None)
+    assert calls == [("pytest", True, 2)]
+    assert logged == [1]
+    assert sockets[0].fileno() == -1  # 已经关了

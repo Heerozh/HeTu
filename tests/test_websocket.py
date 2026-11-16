@@ -9,9 +9,7 @@ from collections.abc import Iterable
 from typing import Any, Callable, cast
 
 import pytest
-import sanic_testing
-import sanic_testing.testing
-from nacl.public import PrivateKey
+from fixtures.server_harness import ServerHarness, routine_timeout_for
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 import hetu
@@ -20,7 +18,6 @@ from hetu.data import sub as sub_module
 from hetu.endpoint import connection
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.server import pipeline, worker_main
 from hetu.server import websocket as websocket_server
 from hetu.system import SystemClusters
 
@@ -31,122 +28,24 @@ logging.lastResort.setLevel(logging.DEBUG)
 
 
 @pytest.fixture
-def setup_websocket_proxy():
-    # 设置ws测试routine方法
-
-    async def websocket_proxy(url, *args, **kwargs):
-        mimic = kwargs.pop("mimic", None)
-        from websockets.legacy.client import connect
-
-        class ProxyForWebsocketProxy:
-            def __init__(self):
-                self.wss = []
-
-            async def close(self):
-                [await ws.close() for ws in self.wss]
-
-        ws_proxy = sanic_testing.websocket.WebsocketProxy(ProxyForWebsocketProxy())  # type: ignore
-
-        async def new_connection():
-            ws = await connect(url, *args, **kwargs)
-            ws_proxy.ws.wss.append(ws)
-
-            do_send = ws.send
-            do_recv = ws.recv
-
-            client_pipe = pipeline.MessagePipeline()
-            client_pipe.add_layer(pipeline.JSONBinaryLayer())
-            client_pipe.add_layer(pipeline.ZlibLayer())
-            crypto_layer = pipeline.CryptoLayer()
-            client_pipe.add_layer(crypto_layer)
-            pipe_ctx = None
-            logger.debug(f"客户端pipe {id(crypto_layer)}")
-
-            async def handshake():
-                nonlocal pipe_ctx
-                # 生成密钥对
-                private_key = PrivateKey.generate()
-                public_key = private_key.public_key
-                handshake_msg = [b""] * client_pipe.num_handshake_layers
-                handshake_msg[-1] = public_key.encode()
-                # 握手
-                await do_send(client_pipe.encode(None, handshake_msg))
-                data = cast(bytes, await do_recv())
-                message = client_pipe.decode(None, data)
-                assert type(message) is list
-                ctx, msg = client_pipe.handshake(message)
-                ctx[-1] = crypto_layer.client_handshake(
-                    private_key.encode(), message[-1]
-                )
-                pipe_ctx = ctx
-
-            async def send(data, *, fragment_size=None):
-                logger.debug(
-                    f"[{id(crypto_layer)}] > Sent: {data} [{len(repr(data))} bytes]"
-                )
-                ws_proxy.client_sent.append(data)
-                encoded = client_pipe.encode(pipe_ctx, data)
-                if fragment_size is None:
-                    await do_send(encoded)
-                else:
-
-                    async def fragments():
-                        for offset in range(0, len(encoded), fragment_size):
-                            yield encoded[offset : offset + fragment_size]
-                            await asyncio.sleep(0)
-
-                    await do_send(fragments())
-
-            async def recv():
-                data = cast(bytes, await do_recv())
-                message = client_pipe.decode(pipe_ctx, data)
-                logger.debug(
-                    f"[{id(crypto_layer)}] < Received: {message} [{len(repr(message))} bytes]"
-                )
-                ws_proxy.client_received.append(message)
-                return message
-
-            def clear_recv():
-                ws_proxy.client_received.clear()
-
-            await handshake()
-
-            ws.send = send  # type: ignore
-            ws.recv = recv  # type: ignore
-            ws.clear_recv = clear_recv  # type: ignore
-
-            return ws
-
-        if mimic:
-            mimic: Callable
-            try:
-                await mimic(new_connection)
-            except ConnectionClosedOK:
-                pass
-
-        return ws_proxy
-
-    sanic_testing.testing.websocket_proxy = websocket_proxy
+def ws_redis_url(ses_redis_service) -> str:
+    """test_server 用的 Redis 地址（master）"""
+    return ses_redis_service[0]
 
 
 @pytest.fixture
-def test_server(setup_websocket_proxy, ses_redis_service):
+def test_server(request, ws_redis_url):
     SystemClusters()._clear()
     EndpointDefines()._clear()
-    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
-    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再以 HeTuApp 之名 exec
+    # 同一个文件，同一 uri 就会登记两条，挂到 aiohttp 上时两条挨着加，撞"method GET is already
+    # registered"，开服失败。先清掉
     webext.clear()
-    import re
-
-    match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])
-    assert match
-    port = match.group(1)
 
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
-    server = worker_main(
-        "Hetu-test",
+    harness = ServerHarness(
         {
             "APP_FILE": app_file,
             "NAMESPACE": "pytest",
@@ -160,7 +59,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "BACKENDS": {
                 "Redis": {
                     "type": "Redis",
-                    "master": f"redis://127.0.0.1:{port}/0",
+                    "master": ws_redis_url,
                 }
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
@@ -168,22 +67,20 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "LOGGING": logging_cfg,
             "DEBUG": False,
             "WORKER_NUM": 4,
-            "ACCESS_LOG": False,
         },
+        routine_timeout_for(request.node),
     )
 
-    yield server
+    yield harness
 
-    server.stop()
     webext.clear()
 
 
 def test_websocket_started(test_server):
     # 测试服务器是否正常启动
     # 这行future出现异常是正常的，因为下面的请求很快就关闭了
-    request, response = test_server.test_client.get("/")
-    assert request.method.lower() == "get"
-    assert "Powered by HeTu" in response.body.decode()
+    response = test_server.get("/")
+    assert "Powered by HeTu" in response.text
     assert response.status == 200
     # 因为上面get("/")会启动future线程，也因此启动了redis，所以要切换下connection_pool
     # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
@@ -191,9 +88,61 @@ def test_websocket_started(test_server):
 
 def test_custom_http_route(test_server):
     # app.py里用@hetu.define_route注册的普通HTTP端点应该能正常提供服务
-    _request, response = test_server.test_client.get("/webext-test/abc.zip")
+    response = test_server.get("/webext-test/abc.zip")
     assert response.status == 200
-    assert response.body.decode() == "downloaded abc.zip"
+    assert response.text == "downloaded abc.zip"
+
+
+# harness 的语义（见 fixtures/server_harness.py 模块说明）。第 2 条（routine 跑在服务的事件循环里、
+# 后台任务起来之后）和第 4 条（先关客户端再停服）由下面依赖它们的用例守住，比如
+# test_lease_lost_in_single_process_stops_with_failure_code、
+# test_shutdown_waits_for_connection_cleanup
+
+
+@pytest.mark.timeout(20)
+def test_harness_reraises_routine_error(test_server):
+    """routine 里的异常等服务停下之后原样抛给测试，不包成别的类型"""
+
+    class RoutineError(Exception):
+        pass
+
+    async def routine(connect):
+        await connect()
+        raise RoutineError("raised in routine")
+
+    with pytest.raises(RoutineError, match="raised in routine"):
+        test_server.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_harness_swallows_connection_closed_ok(test_server):
+    """routine 里客户端正常关闭后再收，抛出的 ConnectionClosedOK 被吞掉，不算测试失败"""
+
+    async def routine(connect):
+        client = await connect()
+        await client.close()
+        await client.recv()
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(30)
+def test_harness_each_call_restarts_server(test_server):
+    """每次调用都完整起停一次服务：每次一个新的 runtime（连接表因此按服务实例隔离），启动钩子
+    每次都重新跑，拿到的是新租约"""
+    runtimes = []
+    leases = []
+
+    async def routine(connect):
+        runtimes.append(test_server.runtime)
+        leases.append(test_server.runtime.snowflake_lease)
+        await connect()
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert len(runtimes) == 2
+    assert runtimes[0] is not runtimes[1]
+    assert leases[0] is not leases[1]
 
 
 @pytest.mark.timeout(20)
@@ -232,9 +181,7 @@ def test_websocket_call_system(test_server):
 
         await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
 
-    _, response1 = test_server.test_client.websocket(
-        "/hetu/pytest_1", mimic=normal_routine
-    )
+    response1 = test_server.websocket("/hetu/pytest_1", mimic=normal_routine)
     # print(response1.client_received)
     # 测试add_rls_comp_value调用了2次
     id1 = next(iter(response1.client_received[4][2].keys()))
@@ -280,7 +227,7 @@ def test_websocket_rpcs_sync_arrives_after_push(test_server):
             while not frames or frames[-1] != ["sync", 7]:
                 frames.append(await client.recv())
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert frames[0] == ["rsp", "ok"]
     assert frames[-1] == ["sync", 7]
     expected = before.get(owner, 100) + 1
@@ -312,7 +259,7 @@ def test_websocket_rpcs_without_push_still_syncs(test_server):
             frames.append(await client.recv())
         elapsed.append(loop.time() - start)
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert frames == [["rsp", ["hi"]], ["sync", 3]]
     assert elapsed[0] >= 1 / MQClient.UPDATE_FREQUENCY - 0.03
 
@@ -351,7 +298,7 @@ def test_websocket_rpcs_sync_after_rows_enter_and_leave_range(test_server):
         await call_awaiting_push(client, 1, 9150.0)  # 进入
         await call_awaiting_push(client, 2, 0.0)  # 离开
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
 
     def pushed(frames: list) -> dict:
         assert frames[0] == ["rsp", "ok"]
@@ -394,9 +341,7 @@ def test_websocket_kick_connect(test_server):
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
-    _, response1 = test_server.test_client.websocket(
-        "/hetu/pytest_1", mimic=kick_routine
-    )
+    response1 = test_server.websocket("/hetu/pytest_1", mimic=kick_routine)
     # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
     assert response1.client_sent[-1] == [
         "rpc",
@@ -427,9 +372,7 @@ def test_websocket_kick_without_rpc_after_login(test_server):
         await client2.send(["rpc", "add_rls_comp_value", 2])
         await client2.recv()
 
-    _, response = test_server.test_client.websocket(
-        "/hetu/pytest_1", mimic=kick_routine
-    )
+    response = test_server.websocket("/hetu/pytest_1", mimic=kick_routine)
     assert response.client_sent[-1] == ["rpc", "add_rls_comp_value", 2], (
         "最后一行没执行到"
     )
@@ -464,7 +407,7 @@ def test_websocket_kick_found_on_rpc_sends_close_code(monkeypatch, test_server):
                 await client1.recv()
         result["close"] = exc_info.value.rcvd
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=kick_routine)
+    test_server.websocket("/hetu/pytest_1", mimic=kick_routine)
     close = result["close"]
     assert close is not None and (close.code, close.reason) == (4001, "kicked"), close
 
@@ -659,7 +602,7 @@ def test_websocket_normal_logout_no_spurious_kick_log(test_server, caplog):
             await client2.close()
             await asyncio.sleep(0.2)  # 留时间给删行之后可能冒出来的假顶号核查
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     kicked = [r.getMessage() for r in caplog.records if "已被顶号" in r.getMessage()]
     assert kicked == [], f"正常断开被记成了顶号：{kicked}"
 
@@ -685,7 +628,7 @@ def test_websocket_disconnect_system_called(test_server):
             await asyncio.sleep(0.05)
         assert count == 1
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=disconnect_routine)
+    test_server.websocket("/hetu/pytest_1", mimic=disconnect_routine)
 
 
 @pytest.mark.timeout(20)
@@ -705,16 +648,15 @@ def test_websocket_disconnect_system_missing_skip(monkeypatch, test_server):
         message = await client2.recv()
         assert message[1] == 0
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=disconnect_routine)
+    test_server.websocket("/hetu/pytest_1", mimic=disconnect_routine)
 
 
-async def _wait_server_connections(count: int, timeout: float = 5) -> None:
+async def _wait_server_connections(runtime, count: int, timeout: float = 5) -> None:
     """等服务端只剩 count 条连接：其余的都拆完了（连接协程、拆连接的清理任务都跑完）"""
-    loop = asyncio.get_running_loop()
 
     def pending() -> int:
-        tasks = (*websocket_server._live_connections, *websocket_server._cleanup_tasks)
-        return sum(1 for t in tasks if not t.done() and t.get_loop() is loop)
+        tasks = (*runtime.live_connections, *runtime.cleanup_tasks)
+        return sum(1 for t in tasks if not t.done())
 
     async with asyncio.timeout(timeout):
         while pending() > count:
@@ -741,18 +683,18 @@ def test_websocket_kicked_disconnect_system_not_as_user(test_server):
         with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
             async with asyncio.timeout(3):
                 await client1.recv()
-        await _wait_server_connections(1)
+        await _wait_server_connections(test_server.runtime, 1)
         await client2.send(["rpc", "get_disconnect_count", user_id])
         counts["kicked"] = (await client2.recv())[1]
 
         # 新连接正常断开，断线 System 照常以用户身份跑
         await client2.close()
-        await _wait_server_connections(0)
+        await _wait_server_connections(test_server.runtime, 0)
         client3 = await connect()
         await client3.send(["rpc", "get_disconnect_count", user_id])
         counts["logout"] = (await client3.recv())[1]
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert counts == {"kicked": 0, "logout": 1}
 
 
@@ -782,11 +724,11 @@ def test_websocket_kicked_unnoticed_disconnect_system_not_as_user(
 
         # client1 没发觉自己被顶号，自己断开
         await client1.close()
-        await _wait_server_connections(1)
+        await _wait_server_connections(test_server.runtime, 1)
         await client2.send(["rpc", "get_disconnect_count", user_id])
         counts["kicked"] = (await client2.recv())[1]
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert counts == {"kicked": 0}
 
 
@@ -802,13 +744,12 @@ def test_call_flooding_lv1_normal(test_server):
             await client1.send(["rpc", "login", 1])
             await client1.recv()
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine)
+    test_server.websocket("/hetu/pytest_1", mimic=normal_routine)
 
 
 def test_call_flooding_lv1_flooding(test_server):
-    # 因为同时启动2个websocket会报
-    # sanic.exceptions.ServerError: Sanic server could not start: [Errno 98] Address already in use.
-    # 所以分2个测试，或者可以尝试启动时用随机的port
+    # 原来 Sanic 的测试客户端在同一个测试里起两次服会撞端口（Address already in use），所以分成了
+    # 2个测试
     close = None
 
     async def flooding_routine(connect):
@@ -820,7 +761,7 @@ def test_call_flooding_lv1_flooding(test_server):
                 await client1.recv()
         close = exc_info.value.rcvd
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine)
+    test_server.websocket("/hetu/pytest_1", mimic=flooding_routine)
     # 超出接收频率上限算客户端越界：带 4002 断开，客户端别重连
     assert close is not None and close.code == connection.CLOSE_REJECTED, close
 
@@ -839,7 +780,7 @@ def test_call_flooding_lv2_normal(test_server):
             if i == 99:
                 await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine_lv2)
+    test_server.websocket("/hetu/pytest_1", mimic=normal_routine_lv2)
 
 
 def test_call_flooding_lv2_flooding(test_server):
@@ -852,7 +793,7 @@ def test_call_flooding_lv2_flooding(test_server):
                 if i == 99:
                     await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)
+    test_server.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)
 
 
 @pytest.mark.timeout(20)
@@ -885,7 +826,7 @@ def test_websocket_table_subscribe(test_server):
         await asyncio.sleep(0.3)
         await client1.recv()  # updt delete
 
-    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    response = test_server.websocket("/hetu/pytest_1", mimic=routine)
     # client_received 混有两个连接的rsp，按帧类型筛
     subs = [m for m in response.client_received if m[0] == "sub"]
     updts = [
@@ -928,7 +869,7 @@ def test_websocket_table_subscribe_limit(test_server):
             await client1.recv()
         closed_detected = True
 
-    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    response = test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert response.client_received[0][1] == "PublicNames.table"
     assert closed_detected, "连接没有被服务器关闭"
 
@@ -1126,6 +1067,7 @@ class _FakeSendWs:
         self.frames: list = []
         self.on_send = on_send
         self.delay = delay
+        self.failed: list[tuple[int, str]] = []
 
     async def send(self, frame) -> None:
         self.frames.append(frame)
@@ -1133,8 +1075,8 @@ class _FakeSendWs:
             self.on_send(frame)
         await asyncio.sleep(self.delay)
 
-    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
-        pass
+    def fail(self, code: int, reason: str) -> None:
+        self.failed.append((code, reason))
 
 
 class _FakeOutbox:
@@ -1188,6 +1130,76 @@ async def _run_send_loop(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_send_loop_drained_flushes_pushes_then_goes_away(monkeypatch):
+    """
+    关服排空：取到 PUSH_DRAINED 时排在前面的回复都已发出，再把待发区的推送、sync 发掉，然后以 1001
+    断开。这几帧不计发送频率上限（超限断开的话客户端收到的是 4002，别重连）
+    """
+    from hetu.server.receiver import PUSH_DRAINED
+    from hetu.server.websocket import PushQueue, send_loop
+
+    # 推送不会被回复压住太久、在普通轮次里先发出去（机器忙时两轮之间可能隔得久），测的是 PUSH_DRAINED 那一轮
+    monkeypatch.setattr(websocket_server, "PUSH_MAX_HOLD", 60)
+
+    ws = _FakeSendWs()
+    outbox = _FakeOutbox({"sub_1": {"1": {"v": 1}}}, synced=[7])
+    queue = PushQueue(8)
+    queue.put_nowait(["rsp", "ok"])
+    queue.put_nowait(PUSH_DRAINED)
+    counted: list[int] = []
+
+    def flooded() -> bool:
+        counted.append(1)
+        return False
+
+    await asyncio.wait_for(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=flooded,
+        ),
+        2,
+    )
+    # 待发区在回复之前就有推送：回复优先，推送排在后面（同 test_send_loop_* 的规则）
+    assert ws.frames == [["rsp", "ok"], ["updt", "sub_1", {"1": {"v": 1}}], ["sync", 7]]
+    assert ws.failed == [(connection.CLOSE_GOING_AWAY, "")]
+    assert counted == [1]
+
+
+async def test_send_loop_drained_takes_pushes_and_syncs_together():
+    """
+    关服排空时待发区和 sync 在同一个同步段里取：发推送的时候 hub 又交来一个 tick（新的推送和它后面的
+    sync），这个 tick 的推送不发，它的 sync 也不能发，否则客户端会以为那次调用引起的推送都到了
+    """
+    from hetu.server.receiver import PUSH_DRAINED
+    from hetu.server.websocket import PushQueue, send_loop
+
+    outbox = _FakeOutbox({"sub_1": {"1": {"v": 1}}}, synced=[7])
+
+    def new_tick(frame):
+        if frame == ["updt", "sub_1", {"1": {"v": 1}}]:
+            outbox.outbox["sub_1"] = {"1": {"v": 2}}
+            outbox.synced.append(8)
+
+    ws = _FakeSendWs(on_send=new_tick)
+    queue = PushQueue(8)
+    queue.put_nowait(PUSH_DRAINED)
+    await asyncio.wait_for(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=lambda: False,
+        ),
+        2,
+    )
+    assert ws.frames == [["updt", "sub_1", {"1": {"v": 1}}], ["sync", 7]]
+    assert ws.failed == [(connection.CLOSE_GOING_AWAY, "")]
 
 
 async def test_send_loop_does_not_hold_pushes_behind_replies_forever():
@@ -1397,7 +1409,7 @@ def test_websocket_table_subscribe_does_not_block_following_messages(
         result["order"] = order
         result["watch_id"] = watch_id
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert result["early"], "整表订阅在等全量读，后面的 RPC 没被执行"
     assert result["early"][:2] == ["updt", result["watch_id"]]
     assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
@@ -1450,7 +1462,7 @@ def test_websocket_range_subscribe_does_not_block_following_messages(
         result["order"] = order
         result["watch_id"] = watch_id
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert result["early"], "范围订阅在等初始读，后面的 RPC 没被执行"
     assert result["early"][:2] == ["updt", result["watch_id"]]
     assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
@@ -1498,7 +1510,7 @@ def test_websocket_pushes_merge_while_sub_reply_is_pending(monkeypatch, test_ser
                     msgs.append(await client.recv())
         result["msgs"] = msgs
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     msgs = result["msgs"]
     assert [m[0] for m in msgs] == ["sub", "updt"], msgs
     assert msgs[1][1] == result["watch_id"]
@@ -1547,7 +1559,7 @@ def test_websocket_table_subscribes_wait_concurrently(monkeypatch, test_server):
                     replies.append(msg[1])
         result["replies"] = replies
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert result["concurrent"], "第二个整表订阅排在了第一个的等待后面"
     assert result["replies"] == ["PublicNames.table", "PublicConfig.table"]
 
@@ -1588,7 +1600,7 @@ def test_websocket_disconnect_while_table_subscribe_waits(monkeypatch, test_serv
         finally:
             state["release"].set()
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert result["cancelled"], "断线后整表订阅的后半段还挂在后台"
 
 
@@ -1633,7 +1645,7 @@ def test_websocket_duplicate_table_subscribe_while_waiting(monkeypatch, test_ser
                 pass
         result["replies"] = replies
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert result.get("replies") == ["PublicNames.table", "PublicNames.table"]
 
 
@@ -1667,7 +1679,7 @@ def test_websocket_invalid_sub_length_disconnects(test_server):
             await client1.recv()
         closed = True
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert closed, "连接没有被服务器关闭"
 
 
@@ -1685,7 +1697,7 @@ def test_websocket_system_crash_closes_with_internal_error(test_server):
             await client.recv()
         result["close"] = exc_info.value.rcvd
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     close = result["close"]
     assert close is not None, "没收到 close 帧"
     assert (close.code, close.reason) == (
@@ -1761,7 +1773,7 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         await healthy.recv()
         healthy_ok = True
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert closed == list(cases), "有非法消息没让连接断开"
     assert close_frames == dict.fromkeys(
         cases, (connection.CLOSE_REJECTED, "rejected")
@@ -1807,7 +1819,7 @@ def test_websocket_unsub_stops_updates(test_server):
             async with asyncio.timeout(0.3):
                 await client1.recv()
 
-    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    response = test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert sub_ids[owner_a] and sub_ids[owner_b]
     updts = [m for m in response.client_received if m[0] == "updt"]
     assert [m[1] for m in updts] == [sub_ids[owner_b]], "退订后仍收到了推送"
@@ -1829,14 +1841,14 @@ def test_websocket_motd(test_server):
         await client1.send(["rpc", "login", 1])
         await client1.recv()
 
-    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    response = test_server.websocket("/hetu/pytest_1", mimic=routine)
     assert motd == f"👋 Welcome to HeTu Database! v{hetu.__version__}"
     assert response.client_received[-1] == ["rsp", {"id": 1}]
 
 
 @pytest.mark.timeout(20)
 def test_websocket_setup_failure_deletes_connection_row(
-    monkeypatch, test_server, ses_redis_service
+    monkeypatch, test_server, ws_redis_url
 ):
     """initialize() 落库之后初始化再出错（这里让订阅管理器构造失败）：连接断开，
     且本连接那行 Connection 必须被删掉，不能永远留在库里（匿名连接数按 IP 计数）"""
@@ -1847,7 +1859,7 @@ def test_websocket_setup_failure_deletes_connection_row(
             raise RuntimeError("broker boom")
 
     monkeypatch.setattr(websocket_server, "SubscriptionBroker", BrokenBroker)
-    r = redis.Redis.from_url(ses_redis_service[0])
+    r = redis.Redis.from_url(ws_redis_url)
     pattern = "pytest_1:Connection:*:id:*"
     before = len(r.keys(pattern))
 
@@ -1865,15 +1877,13 @@ def test_websocket_setup_failure_deletes_connection_row(
             "初始化失败的连接把 Connection 行留在库里了"
         )
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
 
 
 @pytest.mark.timeout(30)
-def test_shutdown_waits_for_connection_cleanup(
-    monkeypatch, test_server, ses_redis_service
-):
-    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
-    里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
+def test_shutdown_waits_for_connection_cleanup(monkeypatch, test_server, ws_redis_url):
+    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不登记进任务表（关服时
+    不能被取消），不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
     事务一直占着写锁，同进程之后的测试全部 database is locked"""
     import redis
 
@@ -1884,7 +1894,7 @@ def test_shutdown_waits_for_connection_cleanup(
         await cleanup(*args, **kwargs)
 
     monkeypatch.setattr(websocket_server, "_cleanup_connection", slow_cleanup)
-    r = redis.Redis.from_url(ses_redis_service[0])
+    r = redis.Redis.from_url(ws_redis_url)
     pattern = "pytest_1:Connection:*:id:*"
     before = len(r.keys(pattern))
 
@@ -1894,9 +1904,114 @@ def test_shutdown_waits_for_connection_cleanup(
         await client1.recv()
         # 返回后测试客户端关掉连接就停服，服务端的清理和停服同时进行
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
     # 返回时服务器已经停了
     assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_stops_background_tasks_before_lease_release(monkeypatch, test_server):
+    """关服时 FutureCalls、续约、水位预留三个后台循环都要在释放租约之前停掉。以前它们是 loop
+    启动前 app.add_task 的，不进 Sanic 的任务表，Sanic 关服时不取消：release() 写精确水位、
+    释放 worker id 时它们还在跑，FutureCalls 可能在释放之后还在发号，续约可能对刚释放的 id
+    报租约丢失去重启 worker"""
+    import hetu.server.runtime as runtime_mod
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    running: set[str] = set()
+
+    def tracked(name, func):
+        async def wrapper(*args, **kwargs):
+            running.add(name)
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                running.discard(name)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "future_call_task",
+        tracked("future_calls", runtime_mod.future_call_task),
+    )
+    monkeypatch.setattr(
+        SnowflakeLease, "renew_forever", tracked("renew", SnowflakeLease.renew_forever)
+    )
+    monkeypatch.setattr(
+        SnowflakeLease,
+        "reserve_forever",
+        tracked("reserve", SnowflakeLease.reserve_forever),
+    )
+    seen_at_release: list[set[str]] = []
+    release = SnowflakeLease.release
+
+    async def spying_release(self):
+        seen_at_release.append(set(running))
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", spying_release)
+
+    response = test_server.get("/")
+    assert response.status == 200
+    assert seen_at_release == [set()], f"释放租约时还在跑：{seen_at_release}"
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_cancels_leftover_connection_tasks_before_lease_release(
+    monkeypatch, test_server
+):
+    """关服时还没结束的连接相关任务（顶号核查之类）要在释放租约之前取消掉：它们会读写库，
+    不能活过后端"""
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    leftover: list[asyncio.Task] = []
+    seen_at_release: list[list[bool]] = []
+    release = SnowflakeLease.release
+
+    async def spying_release(self):
+        seen_at_release.append([task.done() for task in leftover])
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", spying_release)
+
+    async def routine(connect):
+        await connect()
+        leftover.append(test_server.runtime.tasks.spawn(asyncio.Event().wait()))
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert seen_at_release == [[True]]
+    assert leftover[0].cancelled()
+
+
+@pytest.mark.timeout(30)
+def test_lease_lost_in_single_process_stops_with_failure_code(monkeypatch, test_server):
+    """单进程模式没有管理进程（没有 app.multiplexer）。以前续约发现租约丢了就调
+    app.m.restart()，抛 AttributeError，续约任务死掉，服务器照常跑却再也发不出号。现在停服并
+    记下非 0 退出码，交给 docker/systemd/k8s 重启（app.stop() 自己的退出码是 0）"""
+    from hetu.data.backend import snowflake_lease
+    from hetu.server.runtime import LEASE_LOST_EXIT_CODE
+
+    monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
+
+    async def lost_keep_alive():
+        raise SystemExit("lease lost")
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        # 模拟租约过期后被别人拿走：下一次续约就会发现
+        lease = test_server.runtime.snowflake_lease
+        monkeypatch.setattr(lease.keeper, "keep_alive", lost_keep_alive)
+        for _ in range(100):
+            if test_server.runtime.exit_code:
+                return
+            await asyncio.sleep(0.05)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert test_server.runtime.snowflake_lease.lost
+    assert test_server.runtime.exit_code == LEASE_LOST_EXIT_CODE
 
 
 @pytest.mark.timeout(20)
@@ -1911,7 +2026,7 @@ def test_websocket_fragmented_rpc_and_following_message(test_server):
         await client.send(["rpc", "echo_response", ["next"]])
         assert await client.recv() == ["rsp", ["next"]]
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
 
 
 @pytest.mark.timeout(20)
@@ -1922,7 +2037,7 @@ def test_websocket_streaming_close_mid_fragment(test_server):
     from hetu.endpoint.connection import Connection
 
     async def routine(connect):
-        table = test_server.ctx.table_managers["pytest_1"].get_table(Connection)
+        table = test_server.runtime.table_managers["pytest_1"].get_table(Connection)
         assert table is not None
 
         async def count_rows():
@@ -1943,13 +2058,35 @@ def test_websocket_streaming_close_mid_fragment(test_server):
             await asyncio.sleep(0.02)
         pytest.fail("Connection 行未随分片中的断线清理")
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
 
 
 @pytest.mark.timeout(20)
-def test_websocket_fragmented_message_size_limit(test_server):
-    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。"""
-    test_server.config.WEBSOCKET_MAX_SIZE = 128
+def test_websocket_same_request_id_connections_independent(test_server):
+    """连接的任务名不能用客户端给的值（原来用过 Sanic 的 request.id，取自 X-Request-ID 头）。两个连接同名
+    时任务表互相覆盖，一个连接拆掉时会把另一个连接的接收协程取消掉，后者之后发的请求再也没人收"""
+
+    async def routine(connect):
+        client1 = await connect()
+        client2 = await connect()
+        for client, tag in ((client1, "c1"), (client2, "c2")):
+            await client.send(["rpc", "echo_response", [tag]])
+            assert await client.recv() == ["rsp", [tag]]
+        await client1.close()
+        await asyncio.sleep(0.3)  # 等 client1 的清理跑完
+        await client2.send(["rpc", "echo_response", ["still alive"]])
+        assert await asyncio.wait_for(client2.recv(), 5) == ["rsp", ["still alive"]]
+
+    test_server.websocket(
+        "/hetu/pytest_1", mimic=routine, extra_headers={"X-Request-ID": "dup"}
+    )
+
+
+@pytest.mark.timeout(20)
+def test_websocket_fragmented_message_size_limit(test_server, caplog):
+    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。超限是协议错误，恰好打一条日志"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+    test_server.config["WEBSOCKET_MAX_SIZE"] = 128
 
     async def routine(connect):
         client = await connect()
@@ -1962,4 +2099,105 @@ def test_websocket_fragmented_message_size_limit(test_server):
         assert exc_info.value.rcvd is not None
         assert exc_info.value.rcvd.code == 1009
 
-    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    protocol_errors = [
+        r
+        for r in caplog.records
+        if r.name == "HeTu.root" and "WS协议异常" in r.getMessage()
+    ]
+    assert len(protocol_errors) == 1
+
+
+@pytest.mark.timeout(20)
+def test_websocket_abrupt_disconnect_is_not_a_protocol_error(test_server, caplog):
+    """对端直接断开 TCP（不发 close 帧）：照常拆连接，不算协议错误、不打它的日志"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        client.transport.abort()
+        await _wait_server_connections(test_server.runtime, 0)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    messages = [r.getMessage() for r in caplog.records if r.name == "HeTu.root"]
+    assert any("连接断开" in m for m in messages)
+    assert not any("WS协议异常" in m for m in messages)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_handshake_timeout_closes_with_rejected(monkeypatch, test_server):
+    """连上来不发握手消息：HANDSHAKE_TIMEOUT 后以 4002 断开"""
+    monkeypatch.setattr(websocket_server, "HANDSHAKE_TIMEOUT", 0.2)
+    codes = []
+
+    async def routine(connect):
+        raw = await connect(handshake=False)
+        with pytest.raises(ConnectionClosedError) as exc_info:
+            await asyncio.wait_for(raw.recv(), 5)
+        rcvd = exc_info.value.rcvd
+        codes.append(None if rcvd is None else rcvd.code)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert codes == [connection.CLOSE_REJECTED]
+
+
+@pytest.mark.timeout(30)
+def test_websocket_disconnect_during_initialize_deletes_connection_row(
+    monkeypatch, test_server, ws_redis_url
+):
+    """
+    客户端握手完立刻断开，服务端还在 initialize 里（Connection 行已经提交、在等副本同步）：拆连接
+    照样要删掉这一行。以前 initialize 在拆连接的 try 外面、行 id 也是返回之后
+    才记下，这一行就永远留在库里
+    """
+    import redis
+
+    from hetu.data.backend import Backend
+
+    entered = asyncio.Event()
+    wait_for_synced = Backend.wait_for_synced
+
+    async def slow_once(self):
+        if not entered.is_set():
+            entered.set()
+            await asyncio.sleep(1)  # 客户端趁这时断开
+        await wait_for_synced(self)
+
+    monkeypatch.setattr(Backend, "wait_for_synced", slow_once)
+    r = redis.Redis.from_url(ws_redis_url)
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client = await connect()
+        await asyncio.wait_for(entered.wait(), 5)
+        client.transport.abort()
+        await _wait_server_connections(test_server.runtime, 0)
+
+    test_server.websocket("/hetu/pytest_1", mimic=routine)
+    assert len(r.keys(pattern)) == before, (
+        "初始化途中断开的连接把 Connection 行留在库里了"
+    )
+
+
+@pytest.mark.timeout(20)
+def test_websocket_path_with_trailing_slash(test_server):
+    """带尾斜杠的路径也能连上（原来 Sanic 默认就匹配，aiohttp 上另外注册了一条）"""
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["slash"]])
+        assert await client.recv() == ["rsp", ["slash"]]
+
+    test_server.websocket("/hetu/pytest_1/", mimic=routine)
+
+
+def test_no_access_log(test_server, caplog):
+    """访问日志交给前面的反向代理：不打"""
+    caplog.set_level(logging.DEBUG)
+    response = test_server.get("/")
+    assert response.status == 200
+    access = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert access == []

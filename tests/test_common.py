@@ -4,14 +4,14 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fixtures.backends import raw_hset, use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 # 导入即注册 core 组件 WorkerLease，必须赶在 mod_test_app 建簇之前，不然簇里没有它
-from hetu.server.main import close_backends, start_backends
+from hetu.server.runtime import WorkerRuntime
 
 
 async def test_snowflake_id(monkeypatch):
@@ -176,9 +176,12 @@ async def test_redis_keeper_detects_stolen_lease(mod_auto_backend):
     thief = RedisWorkerKeeper(501, redis_client)
     assert await thief.get_worker_id() == worker_id
 
-    # victim 醒来续约，必须发现自己已经不是持有者
+    # victim 醒来续约，必须发现自己已经不是持有者，并且马上停止发号：上层接着是优雅关服，期间还会
+    # 发号，等安全期自己过完就会和 thief 撞号
     with pytest.raises(SystemExit):
         await victim.keep_alive()
+    assert victim.lease_deadline is not None
+    assert time.monotonic() > victim.lease_deadline
 
     # 而且不能把 thief 的租约刷掉或删掉
     assert await redis_client.get(victim._key(worker_id)) is not None
@@ -191,16 +194,13 @@ async def test_fixed_worker_keeper(monkeypatch):
     """开发模式分配器：用本机进程序号，零协调"""
     from hetu.data.backend.worker_keeper import FixedWorkerKeeper
 
-    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
+    monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
     assert await FixedWorkerKeeper().get_worker_id() == 0  # 单进程模式
 
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 3")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "3")
     keeper = FixedWorkerKeeper()
     assert await keeper.get_worker_id() == 3
     assert await keeper.get_worker_id() == 3  # 幂等
-
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv12")  # sanic对两位数不留空格
-    assert await FixedWorkerKeeper().get_worker_id() == 12
 
     # 续约/释放都是空操作，不该抛异常
     await keeper.keep_alive()
@@ -406,7 +406,7 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
     table = _make_lease_table(backend)
 
     for label in ("首次开服", "重启"):
-        # 完整走一遍 worker_start 的流程：分配id → 读水位 → 初始化发号器
+        # 完整走一遍 WorkerRuntime.start 里租约的流程：分配id → 读水位 → 初始化发号器
         worker_id = await create_worker_keeper(backend, 301).get_worker_id()
         loaded = await SnowflakeTimestampKeeper(table, worker_id).load()
         now_ms = int(time.time() * 1000)
@@ -425,25 +425,20 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
         )
 
 
-def _server_app(backend_config: dict) -> Any:
-    """够 start_backends/close_backends 用的最小 app 替身（config 要能按属性读）"""
-    from types import SimpleNamespace
-
-    class Config(dict):
-        __getattr__ = dict.__getitem__
-
-    config = Config(
-        NAMESPACE="pytest",
+def _server_runtime(backend_config: dict) -> WorkerRuntime:
+    """只连后端、拿租约的 runtime（不跑启动 System），测 start_backends/close_backends 用"""
+    config = {
+        "NAMESPACE": "pytest",
         # 独立 instance：别的模块在 server1 等 instance 上按各自的簇建过表，同名会撞
         # cluster_mismatch
-        INSTANCES=["snowflake_restart"],
-        BACKENDS={"main": backend_config},
-    )
-    return SimpleNamespace(config=config, ctx=SimpleNamespace(), stop=lambda: None)
+        "INSTANCES": ["snowflake_restart"],
+        "BACKENDS": {"main": backend_config},
+    }
+    return WorkerRuntime(config, on_lease_lost=lambda: None)
 
 
 async def test_restart_resumes_from_snowflake_watermark(
-    mod_test_app, mod_backend_config
+    mod_test_app, mod_backend_config, monkeypatch
 ):
     """开关服的水位接线：正常关服后马上重启不该被钳在未来，崩溃后重启要从开服时预留的
     水位接着发。
@@ -457,25 +452,229 @@ async def test_restart_resumes_from_snowflake_watermark(
 
     generator = SnowflakeID()
     for label in ("首次开服", "正常关服后重启", "再次重启"):
-        app = _server_app(mod_backend_config)
-        await start_backends(app)
+        runtime = _server_runtime(mod_backend_config)
+        await runtime.start_backends()
         ahead = generator.last_timestamp - int(time.time() * 1000)
         assert ahead < 1000, f"{label}时发号器起始时间戳超前了 {ahead} 毫秒"
         generator.next_id()
-        await close_backends(app)
+        await runtime.close_backends()
 
     # 崩溃：不走 close_backends 直接断开。开服时预留的水位盖住了崩溃前发出的所有ID，
     # 重启必须从它接着发，停机期间时钟被拨回也不会重复
     boot_ms = int(time.time() * 1000)
-    app = _server_app(mod_backend_config)
-    await start_backends(app)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
     generator.next_id()
-    await app.ctx.default_backend.close()
+    # 进程崩了，它的续约、水位预留循环也跟着没了
+    assert runtime.snowflake_lease is not None
+    await runtime.snowflake_lease.stop_loops()
+    await runtime.default_backend.close()
 
-    app = _server_app(mod_backend_config)
-    await start_backends(app)
+    # 崩溃后马上重启，要确认旧租约没人续约了才接回同一个 worker id（水位是按 id 存的），默认最多等
+    # REUSE_STALE_SEC（20）秒，这里缩到 1 秒
+    from hetu.data.backend.redis import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "REUSE_STALE_SEC", 1)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
     assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
-    await close_backends(app)
+    await runtime.close_backends()
+
+
+async def test_lease_loops_start_with_lease(mod_test_app, mod_backend_config):
+    """拿到租约就要开始续约和预留水位，不能等开始监听：发号围栏在拿到租约
+    LEASE_SAFE_SEC（15）秒后跳闸，而之后的启动 System 最长能跑
+    STARTUP_TIMEOUT（默认 60）秒，续约起晚了开服途中就发不出号"""
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    assert runtime.snowflake_lease is not None
+    loops = list(runtime.snowflake_lease._tasks)
+    try:
+        assert len(loops) == 2 and not any(t.done() for t in loops)
+    finally:
+        await runtime.close_backends()
+    # close_backends 先停两个循环再释放租约
+    assert all(t.done() for t in loops)
+
+
+async def test_runtime_post_configures_and_closes_each_backend_once(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """ "default" 是第一个后端的别名：post_configure（版本探测、Lua 加载等同步调用）和关闭都只做
+    一次"""
+    from hetu.data.backend import Backend
+
+    calls = {"post_configure": 0, "close": 0}
+    post_configure, close = Backend.post_configure, Backend.close
+
+    def counting_post_configure(self):
+        calls["post_configure"] += 1
+        return post_configure(self)
+
+    async def counting_close(self):
+        calls["close"] += 1
+        return await close(self)
+
+    monkeypatch.setattr(Backend, "post_configure", counting_post_configure)
+    monkeypatch.setattr(Backend, "close", counting_close)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    await runtime.close_backends()
+    assert calls == {"post_configure": 1, "close": 1}
+
+
+async def test_runtime_stop_runs_once_when_called_twice(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """stop() 可以重复调用、并发调用（原来 Sanic 关服时，第二个关服信号会让关服钩子被整个重跑一遍、
+    两遍并发），只真正关一次：租约只释放一次，后端只关一次"""
+    from hetu.data.backend import Backend
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    calls = {"close": 0, "release": 0}
+    close, release = Backend.close, SnowflakeLease.release
+
+    async def counting_close(self):
+        calls["close"] += 1
+        return await close(self)
+
+    async def counting_release(self):
+        calls["release"] += 1
+        return await release(self)
+
+    monkeypatch.setattr(Backend, "close", counting_close)
+    monkeypatch.setattr(SnowflakeLease, "release", counting_release)
+    runtime = _server_runtime(mod_backend_config)
+    await runtime.start_backends()
+    await asyncio.gather(runtime.stop(), runtime.stop())
+    await runtime.stop()
+    assert calls == {"close": 1, "release": 1}
+
+
+async def test_runtime_stop_resumes_after_being_interrupted(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """关到一半被打断（被取消，或标准 asyncio 下抛 KeyboardInterrupt）后再调 stop()：已经释放的
+    租约、已经关掉的后端不再来第二次，没关完的接着关"""
+    from hetu.data.backend import Backend
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+
+    closed: list[int] = []
+    releases: list[int] = []
+    interrupted: list[int] = []
+    close, release = Backend.close, SnowflakeLease.release
+
+    async def interrupting_close(self):
+        # 第一个后端关掉之后、第二个后端第一次关的时候被打断
+        if closed and not interrupted:
+            interrupted.append(id(self))
+            raise asyncio.CancelledError
+        closed.append(id(self))
+        return await close(self)
+
+    async def counting_release(self):
+        releases.append(1)
+        return await release(self)
+
+    monkeypatch.setattr(Backend, "close", interrupting_close)
+    monkeypatch.setattr(SnowflakeLease, "release", counting_release)
+    runtime = WorkerRuntime(
+        {
+            "NAMESPACE": "pytest",
+            "INSTANCES": ["snowflake_restart"],
+            "BACKENDS": {"main": mod_backend_config, "second": mod_backend_config},
+        },
+        on_lease_lost=lambda: None,
+    )
+    await runtime.start_backends()
+    first, second = (backend for _name, backend in runtime._unique_backends())
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.stop()
+    assert interrupted == [id(second)]
+    await runtime.stop()
+    assert closed == [id(first), id(second)]
+    assert releases == [1]
+
+
+def test_runtime_default_backend_is_first_configured(monkeypatch):
+    """配置里的第一个后端是默认后端，另登记一个 "default" 别名。配置里另有一个就叫 "default" 的
+    后端时，backends["default"] 是它，default_backend 仍是第一个（和原来一致）"""
+    import hetu.server.runtime as runtime_mod
+
+    class FakeBackend:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+    monkeypatch.setattr(runtime_mod, "Backend", FakeBackend)
+
+    def make(backends: dict) -> WorkerRuntime:
+        runtime = WorkerRuntime({"BACKENDS": backends}, on_lease_lost=lambda: None)
+        runtime._create_backends()
+        return runtime
+
+    runtime = make({"a": "A", "b": "B"})
+    assert cast(Any, runtime.default_backend).cfg == "A"
+    assert runtime.backends["default"] is runtime.backends["a"]
+    assert [name for name, _ in runtime._unique_backends()] == ["a", "b"]
+
+    runtime = make({"a": "A", "default": "D"})
+    assert cast(Any, runtime.default_backend).cfg == "A"
+    assert cast(Any, runtime.backends["default"]).cfg == "D"
+
+    runtime = make({"default": "D", "b": "B"})
+    assert cast(Any, runtime.default_backend).cfg == "D"
+
+
+async def test_runtime_start_aborts_when_migration_needed(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """表结构需要迁移时开服中止（StartupAborted），提示用 hetu upgrade"""
+    from hetu.manager import ComponentTableManager
+    from hetu.server.runtime import StartupAborted
+
+    monkeypatch.setattr(
+        ComponentTableManager, "check_and_create_new_tables", lambda self: False
+    )
+    runtime = _server_runtime(mod_backend_config)
+    try:
+        with pytest.raises(StartupAborted, match="hetu upgrade"):
+            await runtime.start()
+        assert runtime.snowflake_lease is None
+    finally:
+        await runtime.close_backends()
+
+
+async def test_runtime_start_failure_after_lease_abandons_it(
+    monkeypatch, mod_test_app, mod_backend_config
+):
+    """拿到租约之后才失败（启动 System 出错）：停掉续约、水位预留循环并释放租约，之后关服不会
+    再释放一次"""
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+    from hetu.server.runtime import StartupAborted
+    from hetu.system import startup
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("boom in on_start")
+
+    monkeypatch.setattr(startup, "run_startup_systems", boom)
+    released = []
+    release = SnowflakeLease.release
+
+    async def recording_release(self):
+        released.append([t.done() for t in self._tasks])
+        await release(self)
+
+    monkeypatch.setattr(SnowflakeLease, "release", recording_release)
+    runtime = _server_runtime(mod_backend_config)
+    try:
+        with pytest.raises(StartupAborted, match="boom in on_start"):
+            await runtime.start()
+        # stop_loops 已把循环清空，release 时一个都不剩
+        assert released == [[]]
+        assert runtime.snowflake_lease is None
+    finally:
+        await runtime.close_backends()
+    assert released == [[]], "关服又释放了一次租约"
 
 
 async def test_snowflake_lease_fence():
@@ -510,6 +709,11 @@ async def test_snowflake_lease_fence():
     keeper.lease_deadline = time.monotonic() + 60
     assert generator.next_id() > 0
 
+    # 续约发现租约已经被接手：马上关掉，不等安全期过完
+    keeper.close_fence()
+    with pytest.raises(WorkerLeaseExpired):
+        generator.next_id()
+
     # 不提供租约的分配器（开发模式）不启用围栏
     keeper.lease_deadline = None
     assert generator.next_id() > 0
@@ -520,11 +724,8 @@ async def test_snowflake_lease_fence():
 @use_redis_family_backend_only
 async def test_redis_keeper_arms_fence(mod_auto_backend):
     """Redis租约必须武装围栏，且安全期要留出余量、抢到的那一刻就生效"""
-    from hetu.data.backend.redis.worker_keeper import (
-        FENCE_MARGIN_SEC,
-        WORKER_ID_EXPIRE_SEC,
-        RedisWorkerKeeper,
-    )
+    from hetu.common.snowflake_id import LEASE_SAFE_SEC
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
     redis = mod_auto_backend()
     redis_client = redis.master.aio
@@ -538,10 +739,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     await keeper.get_worker_id()
     # 抢到就武装，不用等第一次续约（那要5秒后）
     assert keeper.lease_deadline is not None
-    # 安全期必须早于Redis侧的过期时刻，留出余量给时钟漂移。用发起请求前的时刻算，所以
-    # 它一定不晚于 "现在 + TTL - 余量"
+    # 安全期必须早于同标识的进程能接手的时刻（见 LEASE_SAFE_SEC）。用发起请求前的时刻算，所以
+    # 它一定不晚于 "现在 + LEASE_SAFE_SEC"
     now = time.monotonic()
-    assert keeper.lease_deadline <= now + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+    assert keeper.lease_deadline <= now + LEASE_SAFE_SEC
     assert keeper.lease_deadline > now
 
     # 续约成功要推进安全期
@@ -549,6 +750,10 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     time.sleep(0.01)
     await keeper.keep_alive()
     assert keeper.lease_deadline > old
+
+    # 释放之后别的进程马上就能拿走这个 id，不能再发号
+    await keeper.release_worker_id()
+    assert time.monotonic() > keeper.lease_deadline
 
 
 def test_batched():
@@ -723,6 +928,7 @@ async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
         assert master.run_sync_(SQLiteStore.kv_set_nx, key, b"thief", 60)
         with pytest.raises(SystemExit):
             await first.keep_alive()
+        assert time.monotonic() > first.lease_deadline  # 被抢就马上停止发号
         await first.release_worker_id()
         assert master.run_sync_(SQLiteStore.kv_get, key) == b"thief"
         master.run_sync_(SQLiteStore.kv_delete_if, key, b"thief")
@@ -763,9 +969,33 @@ async def test_fixed_worker_keeper_leaves_tool_range(monkeypatch):
     """SQLite 服务器 worker 的序号不能进工具进程的预留段"""
     from hetu.data.backend.worker_keeper import FixedWorkerKeeper
 
-    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 1000")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "1000")
     with pytest.raises(KeyError):
         await FixedWorkerKeeper().get_worker_id()
+
+
+def test_worker_ident(monkeypatch):
+    """日志里的进程标识：worker 是两位宽的 "Srv 3"、"Srv12"（和原来 Sanic 的一样），其他进程是 "Main "。"""
+    from hetu.common.helper import worker_ident, worker_index
+
+    monkeypatch.delenv("HETU_WORKER_INDEX", raising=False)
+    assert (worker_index(), worker_ident()) == (None, "Main ")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "3")
+    assert (worker_index(), worker_ident()) == (3, "Srv 3")
+    monkeypatch.setenv("HETU_WORKER_INDEX", "12")
+    assert worker_ident() == "Srv12"
+    # Sanic 给 worker 设的标识不再认
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 5")
+    assert worker_index() == 12
+    monkeypatch.delenv("HETU_WORKER_INDEX")
+    assert (worker_index(), worker_ident()) == (None, "Main ")
+    # 空串当作没设；其他不是非负整数的值直接报错
+    monkeypatch.setenv("HETU_WORKER_INDEX", "")
+    assert worker_index() is None
+    for bad in ("-1", "abc", "1.5"):
+        monkeypatch.setenv("HETU_WORKER_INDEX", bad)
+        with pytest.raises(ValueError, match="HETU_WORKER_INDEX"):
+            worker_index()
 
 
 async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path):
@@ -839,3 +1069,41 @@ def test_slow_log_table_shows_average_race_count():
         "0.50",
         "4.00",
     ]
+
+
+def test_version_comes_from_the_distribution():
+    """
+    __version__ 按发行包名 hetudb 取（import 名是 hetu）。原来按 hetu 取，取不到，默认欢迎页、握手后的
+    motd 里显示的都是 "hetu is not installed in a proper way"
+    """
+    from importlib.metadata import version
+
+    import hetu
+
+    assert hetu.__version__ == version("hetudb")
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("redis://hetu:secret@127.0.0.1:6379/0", "redis://hetu:***@127.0.0.1:6379/0"),
+        ("redis://:secret@10.0.1.20/0", "redis://:***@10.0.1.20/0"),
+        ("redis://u:secret@[::1]:6379/0", "redis://u:***@[::1]:6379/0"),
+        # redis-py 也认查询串里的 password
+        (
+            "redis://10.0.1.20:6379/0?password=secret&protocol=2",
+            "redis://10.0.1.20:6379/0?password=***&protocol=2",
+        ),
+        (
+            "unix:///run/redis.sock?password=secret",
+            "unix:///run/redis.sock?password=***",
+        ),
+        ("redis://10.0.1.20:6379/0", "redis://10.0.1.20:6379/0"),
+        ("redis://hetu@10.0.1.20/0", "redis://hetu@10.0.1.20/0"),
+        ("not a url", "not a url"),
+    ],
+)
+def test_mask_url_password(url, expected):
+    from hetu.common.helper import mask_url_password
+
+    assert mask_url_password(url) == expected
