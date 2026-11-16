@@ -141,10 +141,9 @@ CPS (每秒调用次数)测试结果为：
 
 ### 关于 Python 性能
 
-不用担心 Python 的性能。CPU 价格已远低于开发人员成本，快速迭代，数据分析，AI 生态更具有优势。
+不用担心 Python 的性能，在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
 
-现在 Python 社区活跃，宛如人肉 JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端
-Redis。
+当前 AI 时代，快速迭代，数据分析能力，天然的 AI 生态更具有优势。
 
 ### Native 计算
 
@@ -177,6 +176,9 @@ for row in rows:
 
 ```bash
 winget install --id=astral-sh.uv -e
+
+# 设置清华源
+$env:UV_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
 新建你的项目目录，在目录中初始化 uv（最低版本需求 `3.14`）：
@@ -191,12 +193,10 @@ uv init --python "3.14"
 uv add hetudb
 ```
 
-还要部署 Redis，开启持久化模式，这里跳过。
-
 启动河图：
 
 ```bash
-uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
+uv run hetu start --app-file=./app.py --namespace=ssw --instance=server_name
 ```
 
 其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.yml`方式启动，
@@ -204,68 +204,35 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 ## 🎉 生产部署
 
-生产环境推荐用 Docker 部署或 pip 直接安装。
-
 ### Docker 部署
 
-#### 国内用户：
+提供Docker镜像：
 
-先安装Docker
-[阿里云镜像](https://help.aliyun.com/zh/ecs/user-guide/install-and-use-docker):
-
-在你的项目目录下，创建 `Dockerfile` 文件，内容如下：
+阿里云外网:
 
 ```Dockerfile
-# 如果是阿里云内网请用 registry-vpc.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
 FROM registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
-
-WORKDIR /app
-
-COPY . .
-RUN pip install .
-
-ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
 ```
 
-#### 国际用户
+阿里云内网:
 
-用 [Docker Hub 的镜像](https://hub.docker.com/r/heerozh/hetu) 替换上面的容器地址。
-
-#### 启动
-
-注意你的项目目录格式得符合 src-layout，不然 RUN pip install .会失败。
-
-然后执行：
-
-```bash
-# 编译你的应用镜像
-docker build -t app_image_name .
-# 启动你的应用
-docker run -it --rm -p 2466:2466 --name server_name app_image_name
+```Dockerfile
+FROM registry-vpc.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
 ```
+
+或者Docker Hub:
+
+```Dockerfile
+FROM heerozh/hetu:latest
+```
+
+ `/app` 目录为项目目录。
 
 使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用 9
 折的抢占服务器，然后用反向代理对连接进行负载均衡。
 
-### pip 原生部署
-
-容器一般有 20% 的性能损失，常驻服务器可以用 pip 的方式部署。
-
-首先是安装 Python 高版本：
-
-国内用户：建议通过清华 uv 源安装。
-
-```bash
-# 设置清华源
-echo 'export UV_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple' >> ~/.bashrc
-source ~/.bashrc
-
-# 进入项目目录
-cd your_app_directory
-
-# 启动河图，用 `python -O` 方式在生产环境启动，以去掉assert提升性能
-uv run python -O -m hetu start --config=./config.yml
-```
+容器一般有 20% 的性能损失，常驻服务器可以直接用python -O去掉assert执行：
+ `uv run python -O -m hetu start --config=./config.yml` 。
 
 ### Redis 部署
 
@@ -321,8 +288,6 @@ git URL”
 ## ⚖️ 代码规范
 
 使用basedPyright和PyCharm进行代码检查，Ruff进行格式化。
-
-Docstring要求为中文英文双语。
 
 # ©️ Copyright & Thanks
 
