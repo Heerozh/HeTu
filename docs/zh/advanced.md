@@ -779,29 +779,6 @@ def setup(app: web.Application):
 - setup 回调在每个 worker 进程里、每次开服建 app 时执行一次，此时后端还没连接、也还没开始监听；多进程时管理进程不执行它。它在 `define_route` 的路由挂好之后执行，出错就中止开服。需要每个 worker 初始化、清理的东西（比如一个连接池），在回调里挂到 `app.on_startup` / `app.on_cleanup` 上。
 - 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 Caddy/CDN，而不是穿过游戏 worker。
 
-从 Sanic 版本升级时（之前的 HeTu 用的是 Sanic），处理函数要按 aiohttp 的写法改。另外有两处行为不同：
-
-- aiohttp 严格区分尾斜杠：`/ping/` 不会再命中 `/ping`（Sanic 默认会）。两种都要的话就两个都注册；
-- 处理函数没有总时长的上限了（Sanic 的 `RESPONSE_TIMEOUT` 是 60 秒，超时回 503），需要的话在函数里自己
-  用 `asyncio.timeout`。
-
-
-```python
-# 之前（Sanic）
-from sanic import Request, response
-
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return response.text(f"downloaded {name}")
-
-# 之后（aiohttp）
-from aiohttp import web
-
-@hetu.define_route("/download/{name}")
-async def download(request: web.Request):
-    return web.Response(text=f"downloaded {request.match_info['name']}")
-```
-
 ## 可操作性可见性：重放与慢日志
 
 HeTu 暴露了两个容易被忽略的专用日志记录器：

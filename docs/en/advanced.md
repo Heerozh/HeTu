@@ -1206,32 +1206,6 @@ Three things to know:
   worker serves them. Keep handlers stateless, and in production put large or
   slow downloads behind Caddy or a CDN instead of through the game workers.
 
-Upgrading from an earlier HeTu, which ran on Sanic, means rewriting handlers
-the aiohttp way. Two behaviours differ as well:
-
-- aiohttp is strict about trailing slashes: `/ping/` no longer matches `/ping`
-  (Sanic matched it by default). Register both if you need both.
-- Handlers have no overall time limit any more (Sanic's `RESPONSE_TIMEOUT` was
-  60 seconds, answering 503); wrap the work in `asyncio.timeout` yourself if
-  you need one.
-
-
-```python
-# Before (Sanic)
-from sanic import Request, response
-
-@hetu.define_route("/download/<name:str>")
-async def download(request: Request, name: str):
-    return response.text(f"downloaded {name}")
-
-# After (aiohttp)
-from aiohttp import web
-
-@hetu.define_route("/download/{name}")
-async def download(request: web.Request):
-    return web.Response(text=f"downloaded {request.match_info['name']}")
-```
-
 ## Operational visibility: replay and slow logs
 
 HeTu exposes two specialized loggers that are easy to overlook:
