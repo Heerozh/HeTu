@@ -19,7 +19,7 @@ EndpointContext(
     group: str,
     user_data: dict[str, typing.Any],
     timestamp: float,
-    request: Request,
+    request: Any,
     systems: SystemCaller,
     guard_state: dict[str, typing.Any] = <factory>,
     client_limits: list[list[int]] = <factory>,
@@ -30,7 +30,7 @@ EndpointContext(
 ) -> None
 ```
 
-<small>Source: [`hetu/endpoint/context.py:23`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L23)</small>
+<small>Source: [`hetu/endpoint/context.py:21`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L21)</small>
 
 
 
@@ -55,7 +55,7 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 - **`timestamp`** (float) — 调用时间戳。
 
-- **`request`** (Request) — framework原始请求对象，unsafe，普通业务代码请避免直接使用。
+- **`request`** (Any) — framework原始请求对象（aiohttp 的 `web.Request`），unsafe，普通业务代码请避免直接使用。
 
 - **`systems`** (SystemCaller) — 全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。
 
@@ -88,7 +88,7 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 is_admin()
 ```
 
-<small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
+<small>Source: [`hetu/endpoint/context.py:74`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L74)</small>
 
 是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
 可订阅 ADMIN 组件，订阅时不受 RLS 限制。这是后台管理工具用的 root 级权限，不要给游戏
@@ -111,7 +111,7 @@ back-office tools only, never for game-client connections (those use GM).
 is_gm()
 ```
 
-<small>Source: [`hetu/endpoint/context.py:86`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L86)</small>
+<small>Source: [`hetu/endpoint/context.py:84`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L84)</small>
 
 是否 GM 连接（group 以 "gm" 开头）：登录后可调用 `Permission.GM` 的 System/Endpoint，
 读数据和普通玩家一样。
@@ -132,7 +132,7 @@ Whether this is a GM connection (group starts with "gm").
 configure(client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:94`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L94)</small>
+<small>Source: [`hetu/endpoint/context.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L92)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -182,7 +182,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:134`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L134)</small>
+<small>Source: [`hetu/endpoint/context.py:132`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L132)</small>
 
 检查当前用户对某个component的权限
 
@@ -239,7 +239,7 @@ ResponseToClient(message: list | dict)
 elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 ```
 
-<small>Source: [`hetu/endpoint/connection.py:123`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L123)</small>
+<small>Source: [`hetu/endpoint/connection.py:147`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L147)</small>
 
 
 

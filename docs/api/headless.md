@@ -1,6 +1,6 @@
 ---
 title: "Headless"
-description: "无服务器进程的表直读写客户端：可信内部进程不经 Sanic / System 直接读写组件表。"
+description: "无服务器进程的表直读写客户端：可信内部进程不经 Web 服务器 / System 直接读写组件表。"
 type: docs
 generated: true
 weight: 70
@@ -416,7 +416,7 @@ connect(
 
 连接后端，按服务器写入的表 meta 认下 `components`，返回 [`HeadlessClient`](headless.md#headlessclient)。
 
-不 import sanic、不需要 app 文件、不建簇、不建表、不初始化 `SnowflakeID`。
+不 import aiohttp、不需要 app 文件、不建簇、不建表、不初始化 `SnowflakeID`。
 [`connect`](headless.md#connect) / 使用 / `close` 必须在同一个 event loop 上（Redis 异步连接绑定 loop）。
 
 
