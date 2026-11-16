@@ -1,6 +1,6 @@
 name: Workflow for Codecov python
 # 只在 PR 上跑（全部后端 + 上传覆盖率）。直接 push 不跑：分支开了 PR 后，push 和 pull_request
-# 会各触发一次，push 那次只是重复
+# 会各触发一次，push 那次只是重复。发版 PR（dev → main）上还会补译文，见下面的 i18n job
 on:
   pull_request:
     paths:
@@ -77,3 +77,98 @@ jobs:
             echo "::error::then commit the result to dev and push before merging this release PR."
             exit 1
           fi
+
+  # 发版 PR（dev → main）上补译文：autolang 抽取新文案交给模型翻译，有变化才提交回 dev，随这个
+  # PR 合进 main，当版生效（打 wheel / 镜像时 setup.py 把 .po 编译成 .mo）。不直接提交 main：
+  # main 有分支保护，必须走 PR，管理员也不例外。
+  # 只有 test_i18n_catalogs.py 读 .po 的内容（editable 安装不编 .mo，别的测试按中文原文断言），
+  # 所以译文在这里自己检查，和上面的全量测试并行，全量测试不用为译文再跑一遍。
+  # 译文提交带 [skip ci]，不触发任何 workflow：用 GITHUB_TOKEN 推的提交，GitHub 本来会在 PR
+  # 上再建一轮等批准（action_required）的运行。它成了 PR 的最新提交、自己却没有运行，而 PR 页
+  # 只显示最新提交的检查，所以由 i18n-status 把这一轮的结果挂上去
+  i18n:
+    timeout-minutes: 15
+    if: >-
+      github.base_ref == 'main' && github.head_ref == 'dev'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 推回 dev
+      statuses: write  # 给译文提交挂状态
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Check out dev
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # 从 hetu/ 源码重新抽取可翻译字符串，更新各语言 .po
+      - name: Sync i18n catalogs
+        run: uv run autolang sync -d ./hetu/i18n --source ./hetu/
+
+      # 通过 API 补全未翻译条目（autolang 的 --model/--base-url/--api-key 为必填项）
+      - name: Translate pending entries
+        env:
+          AUTOLANG_API_KEY: ${{ secrets.AUTOLANG_API_KEY }}
+          AUTOLANG_BASE_URL: ${{ secrets.AUTOLANG_BASE_URL }}
+          AUTOLANG_MODEL: ${{ secrets.AUTOLANG_MODEL }}
+        run: >
+          uv run autolang translate -d ./hetu/i18n --source ./hetu/
+          --api-key "$AUTOLANG_API_KEY"
+          --base-url "$AUTOLANG_BASE_URL"
+          --model "$AUTOLANG_MODEL"
+
+      # 提交回 dev，在发版 PR 的 diff 里审译文（.pot/.mo 已被 .gitignore 忽略，只会加 .po）。
+      # 文案没变时 autolang 一个字节都不改 .po（不刷 POT-Creation-Date，translate 和 sync
+      # 写出的格式一致），所以有差异就是有新文案或新译文。
+      # 同时有人往 dev 推时这里推不上去而失败，那次推送触发的新一轮会重跑补上
+      - name: Commit i18n updates to dev
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git add hetu/i18n
+          if git diff --cached --quiet; then
+            echo "i18n 没有变化"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "MAINT: 同步并翻译 i18n 多国语言 (PR #${{ github.event.pull_request.number }}) [skip ci]"
+          git push origin HEAD:dev
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$sha" -f state=pending \
+            -f context="CI（含译文）" -f description="测试和译文检查进行中" \
+            -f target_url="$RUN_URL"
+
+      # 检查不过时译文已经提交了：在 dev 上手改那几条再推，新一轮会重新检查
+      - name: Check translations
+        run: uv run pytest tests/test_i18n_catalogs.py
+
+  # 把这一轮的结果挂到译文提交上（它带 [skip ci]，自己没有运行）
+  i18n-status:
+    needs: [run, api-docs-drift, i18n]
+    if: ${{ !cancelled() && needs.i18n.outputs.sha != '' }}
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Report this run on the i18n commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.i18n.outputs.sha }}
+          STATE: ${{ (needs.run.result == 'success' && needs.api-docs-drift.result == 'success' && needs.i18n.result == 'success') && 'success' || 'failure' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$STATE"
+          -f context="CI（含译文）" -f description="全量测试和译文检查，跑在上一个提交的运行里"
+          -f target_url="$RUN_URL"

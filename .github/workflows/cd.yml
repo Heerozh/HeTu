@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - v**
-  pull_request:
-    branches:
-      - main
   schedule:
     - cron: '0 20 * * *' # 每天 北京时间 04:00 运行一次 nightly 构建（如果有新提交才会 push）
   workflow_dispatch:  # 空workflow_dispatch触发器，表示额外允许手动执行此工作流，方便调试
@@ -128,62 +125,6 @@ jobs:
 #          tag_name: ${{ steps.ver.outputs.ref }}
 #          body_path: RELEASE_NOTES.md
 #          generate_release_notes: false
-
-  sync-translate-i18n:
-    timeout-minutes: 15
-    name: Sync and Translate i18n on Release PR
-    # 发版 PR（dev → main）打开、以及之后每次往 dev 推时运行：译文直接提交回 dev，
-    # 随这个 PR 合进 main，当版生效（打 wheel / 镜像时 setup.py 把 .po 编译成 .mo）。
-    # 不直接提交 main：main 有分支保护，必须走 PR，管理员也不例外。
-    # GITHUB_TOKEN 推的提交不会再触发 workflow：不会自己触发自己，但 PR 最新那个提交上
-    # 也就没有 CI 结果（main 没设必过检查，不挡合并）。合并前等这个 job 跑完。
-    if: >-
-      github.event_name == 'pull_request'
-      && github.base_ref == 'main' && github.head_ref == 'dev'
-      && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write  # 推回 dev
-    steps:
-      - name: Check out dev
-        uses: actions/checkout@v5
-        with:
-          ref: dev
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      # 从 hetu/ 源码重新抽取可翻译字符串，更新各语言 .po
-      - name: Sync i18n catalogs
-        run: uv run autolang sync -d ./hetu/i18n --source ./hetu/
-
-      # 通过 API 补全未翻译条目（autolang 的 --model/--base-url/--api-key 为必填项）
-      - name: Translate pending entries
-        env:
-          AUTOLANG_API_KEY: ${{ secrets.AUTOLANG_API_KEY }}
-          AUTOLANG_BASE_URL: ${{ secrets.AUTOLANG_BASE_URL }}
-          AUTOLANG_MODEL: ${{ secrets.AUTOLANG_MODEL }}
-        run: >
-          uv run autolang translate -d ./hetu/i18n --source ./hetu/
-          --api-key "$AUTOLANG_API_KEY"
-          --base-url "$AUTOLANG_BASE_URL"
-          --model "$AUTOLANG_MODEL"
-
-      # 提交回 dev，在发版 PR 的 diff 里审译文（.pot/.mo 已被 .gitignore 忽略，只会加 .po）。
-      # 同时有人往 dev 推时这里推不上去而失败，那次推送触发的新一轮会重跑补上
-      - name: Commit i18n updates to dev
-        run: |
-          git add hetu/i18n
-          if git diff --cached --quiet; then
-            echo "i18n 没有变化"
-            exit 0
-          fi
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "MAINT: 同步并翻译 i18n 多国语言 (PR #${{ github.event.pull_request.number }})"
-          git push origin HEAD:dev
 
   nightly_build:
     timeout-minutes: 10

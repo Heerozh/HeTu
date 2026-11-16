@@ -30,10 +30,11 @@ docs/api 的改动：行号一变，改了同一个源文件的 PR 就会互相�
 docs/api 是否过期。它的读者（文档站、`hetu/llms.txt`）只读 main。
 
 `hetu/i18n/*/LC_MESSAGES/messages.po` 不用手动同步：dev → main 的发版 PR 打开（及之后每次往
-dev 推）时，CD 跑 `autolang sync` + `autolang translate` 并把译文直接提交回 dev，随该 PR 当版
-生效，**合并前等这个 job 跑完**。`.mo` 不进 git，由 `setup.py` 在打 wheel / 镜像时编译进包；
-editable 安装不编（测试按 zh_CN 断言中文原文）。`tests/test_i18n_catalogs.py` 检查译文的
-`%` / `{}` 占位符与原文一致。
+dev 推）时，CI 的 `i18n` job 跑 `autolang sync` + `autolang translate`，译文有变化才提交回 dev，
+随该 PR 当版生效，**合并前等 CI 跑完**。译文提交带 `[skip ci]`、自己不触发 CI：`i18n` job 提交后
+单独跑 `tests/test_i18n_catalogs.py`（检查译文的 `%` / `{}` 占位符与原文一致），这一轮的结果由
+`i18n-status` 挂到译文提交上。`.mo` 不进 git，由 `setup.py` 在打 wheel / 镜像时编译进包；
+editable 安装不编（测试按 zh_CN 断言中文原文）。
 
 测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
 worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /

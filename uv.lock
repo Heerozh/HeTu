@@ -252,8 +252,8 @@ wheels = [
 
 [[package]]
 name = "autolang"
-version = "1.0.3.dev2+gb68e9ef79"
-source = { git = "https://github.com/Heerozh/autolang.git#b68e9ef791deedb4ce51adf0bf96245ed168c7b8" }
+version = "1.0.3.dev4+g00746a686"
+source = { git = "https://github.com/Heerozh/autolang.git#00746a686e717cd3f0c2a9dbb173a23ba6677d49" }
 dependencies = [
     { name = "babel" },
     { name = "polib" },
