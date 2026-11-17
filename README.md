@@ -202,12 +202,10 @@ uv now manages your project, much like npm. Add HeTu to your project's dependenc
 uv add hetudb
 ```
 
-You also need a Redis deployment with persistence enabled. That is not covered here.
-
 Start HeTu:
 
 ```bash
-uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
+uv run hetu start --app-file=./app.py --namespace=ssw --instance=server_name
 ```
 
 See `hetu start --help` for other options. For example, you can start with
@@ -216,61 +214,17 @@ hetu/CONFIG_TEMPLATE.yml.
 
 ## 🎉 Production Deployment
 
-In production, we recommend deploying with Docker or installing directly with pip.
-
 ### Docker deployment
 
-Install Docker first, then create a `Dockerfile` in your project directory:
+Official docker image: https://hub.docker.com/r/heerozh/hetu
 
-```Dockerfile
-FROM heerozh/hetu:latest
-
-WORKDIR /app
-
-COPY . .
-RUN pip install .
-
-ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
-```
-
-The image is published on [Docker Hub](https://hub.docker.com/r/heerozh/hetu). In
-mainland China, use `registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest` instead
-(inside Aliyun's internal network, use
-`registry-vpc.cn-shanghai.aliyuncs.com/heerozh/hetu:latest`).
-
-#### Launch
-
-Your project must use the src layout, or `RUN pip install .` will fail.
-
-Then run:
-
-```bash
-# Build your app image
-docker build -t app_image_name .
-# Start your app
-docker run -it --rm -p 2466:2466 --name server_name app_image_name
-```
+Copy your project into `/app` mount point.
 
 Docker lets you use HeTu's ability to start and stop instances freely. You can keep one
 always-on server on a yearly plan and run everything else on discounted spot
 (preemptible) instances. A reverse proxy then load-balances the connections.
 
-### Native pip deployment
-
-Containers usually cost about 20% in performance, so you may prefer a pip-based
-deployment for always-on servers.
-
-```bash
-# Go to your project directory
-cd your_app_directory
-
-# Start HeTu. In production, use `python -O` to strip asserts for better performance
-uv run python -O -m hetu start --config=./config.yml
-```
-
-uv installs the required Python version automatically. In mainland China, you can speed
-up downloads with a PyPI mirror such as
-`UV_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple`.
+Containers usually cost about 20% in performance, so you may prefer `uv run python -O -m hetu start --config=./config.yml` for always-on servers.
 
 ### Redis deployment
 
@@ -333,8 +287,6 @@ Head over to [GitHub Discussions](https://github.com/Heerozh/HeTu/discussions).
 ## ⚖️ Code Style
 
 Code is checked with basedPyright and PyCharm and formatted with Ruff.
-
-Docstrings must be bilingual (Chinese and English).
 
 # ©️ Copyright & Thanks
 
