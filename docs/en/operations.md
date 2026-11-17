@@ -102,6 +102,15 @@ population while staying consistent.
   that row changes again — which is why subscription pushes are only guaranteed
   to be up to date in about 99% of cases. Monitor replica replication lag (e.g.
   the "sync delay" metric in your cloud console) and keep it well below 100 ms.
+  The initial full read of a table subscription waits one such interval as well
+  (whole tables are not re-read afterwards), so the first connection in a worker
+  to subscribe a table gets its reply about 100 ms later; later ones in the same
+  worker get the shared snapshot at once. When the read endpoint is a master
+  with no replica at all (`INFO replication` reports `role:master` and
+  `connected_slaves:0`, i.e. a single-instance deployment) there is no
+  replication lag and this wait is skipped. A read/write-splitting proxy must
+  forward INFO to the master; one that answers as a replica-less master while
+  routing reads to replicas would be misjudged.
 - Every logged-in connection also subscribes to the `Connection` table's
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every

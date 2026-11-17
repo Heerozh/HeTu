@@ -68,6 +68,8 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
     HSETEX_PROBE_KEY = "hetu:probe:hsetex"
     # 探测遇到连接错误时最多试几次
     HSETEX_PROBE_ATTEMPTS = 3
+    # is_lag_free 的结论（None = 还没查到）
+    _lag_free: bool | None = None
 
     def load_commit_scripts(self, file: str | Path):
         # read file to text
@@ -384,6 +386,41 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
                 if lag_of_offset > 0:
                     return False, master_offset
         return True, master_offset
+
+    @override
+    async def is_lag_free(self) -> bool:
+        """
+        本连接是不是连着一台没有任何副本的 master：`INFO replication` 回 `role:master`、
+        `connected_slaves:0`。读、写、通知都在这一台上，订阅生效前提交的写入都读得到。
+        集群模式、一个客户端挂了几个地址（读落在哪台不定）时不查，回 False。
+        结论管这个进程的一辈子（加副本要改配置、重启）；服务端回错（代理层不认 INFO）也记下
+        False，网络抖动只回这一次 False、下次再查。
+        做读写分离的代理层若把 INFO 转给 master，master 上挂着副本就照常回 False；
+        自己回答成"没有副本的 master"、却把读分给副本的代理层会被误判。
+
+        Whether this client is connected to a master with no replica (`INFO replication`
+        reports `role:master` and `connected_slaves:0`). Cluster mode and clients with
+        several addresses are not probed and return False. The answer is cached for the
+        process lifetime; a server error (e.g. a proxy without INFO) is cached as False,
+        a network error returns False this time only. A read/write-splitting proxy that
+        answers INFO as a replica-less master while routing reads to replicas would be
+        misjudged.
+        """
+        if self._lag_free is not None:
+            return self._lag_free
+        if self.raw_clustering or len(self._async_ios) != 1:
+            self._lag_free = False
+            return False
+        try:
+            info = await self.aio.info("replication")
+        except redis.exceptions.ConnectionError, redis.exceptions.TimeoutError:
+            return False
+        except redis.exceptions.RedisError:
+            self._lag_free = False
+            return False
+        free = info.get("role") == "master" and info.get("connected_slaves", -1) == 0
+        self._lag_free = free
+        return free
 
     @override
     async def close(self):

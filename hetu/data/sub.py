@@ -534,10 +534,13 @@ class TableSubscription(BaseSubscription):
         """
         先订阅、订上就生效：初始全量读完成之前弹出的通知攒进 pending（见 get_updated），读完再
         定向重读。整表重读太贵，不做补读：订阅生效后隔一个 interval 才全量读，生效前已在别的节点
-        上应用的写入不会再有通知，隔这一下，读到的副本也已应用（复制延迟在预算内）
+        上应用的写入不会再有通知，隔这一下，读到的副本也已应用（复制延迟在预算内）。读的节点
+        就是唯一的写入节点、没有副本时（`is_lag_free`，单机部署、开发环境）不用等：生效前提交的
+        写入都读得到，之后的都有通知
         """
         await hub.attach_(self, active=True)
-        await asyncio.sleep(hub.interval)
+        if not await self.servant.is_lag_free():
+            await asyncio.sleep(hub.interval)
         ref = self.table_ref
         rows, truncated = await read_whole_table_(self.servant, ref, self.max_rows)
         if truncated:
@@ -2854,7 +2857,7 @@ class SubscriptionBroker:
     ) -> Coroutine[Any, Any, tuple[str | None, list[dict]]]:
         """
         `subscribe_table` 的前半段：检查、登记（重复订阅也在这里认出来），订阅的初始化（订阅表级
-        频道，隔一个 interval 再全量读）交给 worker 级订阅器。返回后半段的协程，await 它得到与
+        频道，读的节点可能落后时隔一个 interval 再全量读）交给 worker 级订阅器。返回后半段的协程，await 它得到与
         `subscribe_table` 一样的 (sub_id, rows)，用法同 `begin_subscribe_get`。
 
         The first half of `subscribe_table`; see `begin_subscribe_get`.
