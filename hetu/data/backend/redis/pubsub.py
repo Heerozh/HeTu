@@ -28,6 +28,11 @@ UNSUBSCRIBE_ACK_TIMEOUT = 5.0
 # 节点失效后重新订阅的退避区间
 RESUBSCRIBE_BACKOFF_MIN = 0.5
 RESUBSCRIBE_BACKOFF_MAX = 5.0
+# 节点上一个频道都没订时监听循环的轮询间隔（秒）。这时 listen() 一进去就结束、不挂起，所以不能
+# 为 0：循环会独占事件循环，整个 worker 卡死（连结束空闲的那条 SUBSCRIBE 都发不出去）。也别太大：
+# 这时新发的 SUBSCRIBE 要等监听醒来才读到 ack，worker 上一条订阅都没有（冷 worker）时每次都多等
+# 最多这么久——登录在回包前就要等顶号通知频道的这个 ack
+IDLE_POLL_INTERVAL = 0.01
 
 
 def _pubsub_pool(connection_class: type, connection_kwargs: dict) -> ConnectionPool:
@@ -466,7 +471,7 @@ class AsyncKeyspacePubSub:
                         logger.exception("on_message callback failed")
 
             # 走到这里只可能是node没订阅任何频道
-            await asyncio.sleep(0.25)  # 等待订阅建立
+            await asyncio.sleep(IDLE_POLL_INTERVAL)  # 等待订阅建立
 
     def _on_node_listener_done(self, node_key, task):
         # task关闭说明链接断开了，node可能失效，移除资源。一般发生在数据库扩容/容灾。

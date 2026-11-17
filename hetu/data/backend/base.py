@@ -910,6 +910,20 @@ class BackendClient:
         # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
 
+    async def is_lag_free(self) -> bool:
+        """
+        经本连接读，能不能保证读到全部已提交的写入：只有本连接连的就是唯一的写入节点、而且
+        没有任何副本（单机部署、开发环境）时为 True。订阅初始化据此省掉等复制延迟预算的那
+        一个 interval。拿不准一律回 False（按可能落后处理），默认实现即如此。
+
+        Whether reads through this client are guaranteed to see every committed write:
+        True only when it is connected to the single write node and no replica exists
+        (single-instance deployments, development). Subscription initialization skips
+        the replication lag budget wait when it is True. Returns False whenever in
+        doubt, which is also the default.
+        """
+        return False
+
     # 类型注解部分
     @overload
     async def get(

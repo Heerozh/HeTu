@@ -166,3 +166,84 @@ def test_probe_hsetex_raises_when_master_unreachable():
     io = _ProbeIO(*[redis.exceptions.ConnectionError("refused")] * 10, ping_ok=False)
     with pytest.raises(redis.exceptions.ConnectionError):
         _probe(io)
+
+
+@use_redis_family_backend_only
+async def test_is_lag_free_with_replica(mod_backend_config):
+    """测试夹具是一主一从（集群是多主）：经副本读、直连挂着副本的 master 都按可能落后
+    处理（读会不会被代理层分到副本拿不准）。没有副本的单机 master 那一侧见下面的假连接
+    用例"""
+    from hetu.data.backend import Backend
+
+    replicated = Backend(mod_backend_config)
+    direct = Backend({**mod_backend_config, "servants": []})
+    try:
+        assert await replicated.servant.is_lag_free() is False
+        assert await direct.servant.is_lag_free() is False
+    finally:
+        await replicated.close()
+        await direct.close()
+
+
+class _InfoAIO:
+    """is_lag_free 用的假异步连接：INFO replication 回 info 或抛 error，记调用次数"""
+
+    def __init__(self, info=None, error=None):
+        self.reply = info
+        self.error = error
+        self.calls = 0
+
+    async def info(self, section):
+        assert section == "replication"
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+def _lag_client(*aios, raw_clustering=False):
+    from hetu.data.backend.redis import RedisBackendClient
+
+    client = object.__new__(RedisBackendClient)
+    client._async_ios = list(aios)
+    client.raw_clustering = raw_clustering
+    client.loop_id = 0
+    return client
+
+
+async def test_is_lag_free_only_for_replica_less_master():
+    """只有 role:master 且 connected_slaves:0 才算不会落后，结论只查一次"""
+    master = _InfoAIO({"role": "master", "connected_slaves": 0})
+    client = _lag_client(master)
+    assert await client.is_lag_free() is True
+    assert await client.is_lag_free() is True
+    assert master.calls == 1
+
+    assert await _lag_client(_InfoAIO({"role": "slave"})).is_lag_free() is False
+    with_replica = _InfoAIO({"role": "master", "connected_slaves": 1})
+    assert await _lag_client(with_replica).is_lag_free() is False
+    # 字段缺失（某些代理层的 INFO）：拿不准，按可能落后处理
+    assert await _lag_client(_InfoAIO({"role": "master"})).is_lag_free() is False
+
+
+async def test_is_lag_free_unknown_topology():
+    """集群模式、一个客户端挂了几个地址：不查，按可能落后处理。代理层不认 INFO：记下
+    False；网络抖动：这次回 False、下次再查"""
+    master = _InfoAIO({"role": "master", "connected_slaves": 0})
+    assert await _lag_client(master, raw_clustering=True).is_lag_free() is False
+    assert await _lag_client(master, master).is_lag_free() is False
+    assert master.calls == 0
+
+    unsupported = _InfoAIO(error=redis.exceptions.ResponseError("unknown command"))
+    client = _lag_client(unsupported)
+    assert await client.is_lag_free() is False
+    assert await client.is_lag_free() is False
+    assert unsupported.calls == 1
+
+    flaky = _InfoAIO(error=redis.exceptions.ConnectionError("reset by peer"))
+    client = _lag_client(flaky)
+    assert await client.is_lag_free() is False
+    flaky.error = None
+    flaky.reply = {"role": "master", "connected_slaves": 0}
+    assert await client.is_lag_free() is True
+    assert flaky.calls == 2

@@ -2049,11 +2049,10 @@ async def test_subscribe_range_followup_reread_fixes_lagging_initial_read(
     await updates_until(broker, caught_up)
 
 
-async def test_subscribe_table_initial_read_waits_lag_budget(
-    broker: SubscriptionBroker, filled_item_ref, admin_ctx
-):
-    """整表订阅不补读（整表重读太贵）：改为先订阅，生效后隔一个 interval 才全量读，
-    生效前在别的节点上已应用的写入这时副本也已应用"""
+async def _table_read_delay(
+    broker: SubscriptionBroker, item_ref, ctx, lag_free: bool
+) -> float:
+    """订阅整表，返回 SUBSCRIBE 生效到初始全量读发出隔了多久；读的节点会不会落后按 lag_free 打桩"""
     servant = broker._backend.servant
     mq = broker._hub.mq
     acked_at: float | None = None
@@ -2070,14 +2069,36 @@ async def test_subscribe_table_initial_read_waits_lag_budget(
         read_at = read_at or time.monotonic()
         return await real_range(*args, **kwargs)
 
+    async def is_lag_free():
+        return lag_free
+
     with (
         patch.object(mq, "subscribe", timed_subscribe),
         patch.object(servant, "range", timed_range),
+        patch.object(servant, "is_lag_free", is_lag_free),
     ):
-        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        sub_id, rows = await broker.subscribe_table(item_ref, ctx)
     assert sub_id and len(rows) == 25
     assert acked_at is not None and read_at is not None
-    assert read_at - acked_at >= INTERVAL * 0.9
+    return read_at - acked_at
+
+
+async def test_subscribe_table_initial_read_waits_lag_budget(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅不补读（整表重读太贵）：读的节点可能落后时，先订阅，生效后隔一个 interval
+    才全量读，生效前在别的节点上已应用的写入这时副本也已应用"""
+    delay = await _table_read_delay(broker, filled_item_ref, admin_ctx, False)
+    assert delay >= INTERVAL * 0.9
+
+
+async def test_subscribe_table_skips_lag_budget_when_lag_free(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """读的就是唯一的写入节点（没有副本）：订阅生效前提交的写入都读得到，之后的都有通知，
+    不用等复制延迟预算，生效后立刻全量读"""
+    delay = await _table_read_delay(broker, filled_item_ref, admin_ctx, True)
+    assert delay < INTERVAL * 0.5
 
 
 @both_hub_modes
