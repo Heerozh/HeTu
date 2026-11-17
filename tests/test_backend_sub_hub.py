@@ -669,7 +669,12 @@ async def test_snapshot_order_follows_index_changes(
         await repo.update(first)
     moved = int(first.id)
     sub = cast(IndexSubscription, a._subs[sub_id])
-    await wait_until(lambda: sub.order[-1] == moved, timeout=3)
+    # 边等边取走 a 的推送：a、b 都不取的话，第一批推送进了待发区，两个成员就都算推送卡住，之后
+    # 才处理的通知被攒着不读（_park）。行频道与索引频道的通知分进两个 tick 时（CI 满载时偶发），
+    # 索引频道一直攒着，顺序就停在改之前
+    async with asyncio.timeout(3):
+        while sub.order[-1] != moved:
+            await a.get_updates(timeout=INTERVAL)
     sub_c, rows_c = await c.subscribe_range(filled_item_ref, admin_ctx, *query)
     order = await backend.servant.range(
         filled_item_ref, *query, row_format=RowFormat.ID_LIST
