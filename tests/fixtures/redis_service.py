@@ -93,6 +93,9 @@ def _start_cluster_nodes(stack: DockerStack, nodes: int) -> list[int]:
                         "--appendonly yes",
                         # 总线只在容器网络内使用，端口固定即可（默认 port+10000 可能越界）
                         "--cluster-port 16379",
+                        # Redis 8.12 起默认 yes：没开 tls-cluster 的 cluster 节点拒绝启动。
+                        # 总线端口没有发布到宿主机，外面连不到，用不着这层保护
+                        "--cluster-bus-port-protected-mode no",
                         # 只影响返回给客户端的地址（MOVED、CLUSTER SLOTS），节点间总线
                         # 仍走容器 IP。测试客户端都在宿主机上，宣告 127.0.0.1 不依赖 DNS，
                         # 测试起的子进程也能直连（宣告 host.docker.internal 时要打补丁解析）
