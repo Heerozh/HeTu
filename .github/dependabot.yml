@@ -10,10 +10,12 @@ updates:
     target-branch: "dev"
     schedule:
       interval: "weekly"
-  - package-ecosystem: npm
-    directory: "/ClientSDK/typescript"
+  # 合并它的 PR 时，Unity 安装向导的最低版本一起改：
+  # ClientSDK/unity/cn.hetudb.clientsdk/Editor/Setup/NuGetInstall.cs
+  # examples/chat/client/Assets/packages.config 它升不了，要手动改：nuget 从 sln / csproj
+  # 找起，Unity 的 csproj 不进 git
+  - package-ecosystem: "nuget"
+    directory: "/ClientSDK/csharp/HeTu.Client"
     target-branch: "dev"
     schedule:
       interval: "weekly"
-
-
